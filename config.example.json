@@ -1,0 +1,9 @@
+{
+  "tvdb_api_key": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+  "tvdb_pin": "",
+  "movie_path": "/downloads/movie",
+  "tv_path": "/downloads/tv_shows",
+  "movie_format": "{n} ({y})",
+  "tv_format": "{n} - {s00e00} - {t}",
+  "password": ""
+}

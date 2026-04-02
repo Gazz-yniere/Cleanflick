@@ -1,0 +1,15 @@
+services:
+  cleanflick:
+    build: .
+    container_name: cleanflick
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./downloads:/downloads
+      - ./config.json:/app/config.json
+      - ./rename_history.json:/app/rename_history.json
+    environment:
+      - FLASK_ENV=production
+      - PYTHONUNBUFFERED=1
+      - SECRET_KEY=change-me-to-a-random-string  # generate with: python -c "import secrets; print(secrets.token_hex(32))"
+    restart: unless-stopped

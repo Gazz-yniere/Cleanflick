@@ -1,0 +1,16 @@
+__pycache__
+*.pyc
+.git
+.gitignore
+.env
+.vscode
+.idea
+*.log
+# Médias
+downloads/
+# Config sensible — monter via volume Docker
+config.json
+rename_history.json
+# Dev
+venv/
+_archive/

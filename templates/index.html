@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CleanFlick</title>
+    <link rel="icon" type="image/x-icon" href="{{ url_for('static', filename='CleanFlick.ico') }}">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@mdi/font@7.4.47/css/materialdesignicons.min.css">
+    <link rel="stylesheet" href="{{ url_for('static', filename='base.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='files.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='config.css') }}">
+</head>
+<body>
+<div class="container">
+
+    <header>
+        <div class="header-left">
+            <img src="{{ url_for('static', filename='CleanFlick.png') }}" alt="CleanFlick" style="height:48px;width:auto;">
+            <div>
+                <h1>CleanFlick</h1>
+                <p>Automatic media file renamer powered by TVDB</p>
+            </div>
+        </div>
+        <div class="header-right">
+            <button class="btn-lang" id="lang-switch" onclick="setLang(currentLang === 'fr' ? 'en' : 'fr')">🇬🇧 EN</button>
+        </div>
+    </header>
+
+    <nav>
+        <a href="#" onclick="switchTab('files', event)" class="nav-link active" data-i18n="nav_files"><i class="mdi mdi-folder-play"></i></a>
+        <a href="#" onclick="switchTab('config', event)" class="nav-link" data-i18n="nav_config"><i class="mdi mdi-cog"></i></a>
+        <a href="/logout" class="logout" data-i18n="nav_logout"><i class="mdi mdi-logout"></i></a>
+    </nav>
+
+    <div class="content">
+
+        <!-- ===== FICHIERS ===== -->
+        <div id="files" class="section active">
+            <div class="filter-bar">
+                <button class="filter-btn active" data-filter="" onclick="filterFiles('')" data-i18n="filter_all"></button>
+                <button class="filter-btn" data-filter="movie" onclick="filterFiles('movie')" data-i18n="filter_movies"><i class="mdi mdi-movie"></i></button>
+                <button class="filter-btn" data-filter="tv" onclick="filterFiles('tv')" data-i18n="filter_tv"><i class="mdi mdi-television-play"></i></button>
+                <button class="btn btn-primary" style="margin-left:auto;" onclick="scanFiles()" data-i18n="btn_scan"><i class="mdi mdi-refresh"></i></button>
+                <button class="btn btn-secondary" onclick="renameAll()" data-i18n="btn_rename_all"><i class="mdi mdi-check-all"></i></button>
+            </div>
+
+            <table class="files-table">
+                <thead>
+                    <tr>
+                        <th style="width:22%;" data-i18n="th_file"></th>
+                        <th style="width:52%;" data-i18n="th_preview"></th>
+                        <th style="width:26%;" data-i18n="th_actions"></th>
+                    </tr>
+                </thead>
+                <tbody id="files-tbody">
+                    <tr><td colspan="3" class="empty-state" data-i18n="no_files"></td></tr>
+                </tbody>
+            </table>
+        </div>
+
+        <!-- ===== CONFIGURATION ===== -->
+        <div id="config" class="section">
+
+            <div class="config-section">
+                <h3 data-i18n="cfg_tvdb_section"><i class="mdi mdi-api"></i></h3>
+                <div class="form-field">
+                    <label data-i18n="cfg_tvdb_key"></label>
+                    <input type="password" id="tvdb_api_key" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx">
+                    <span class="hint">→ <a href="https://www.thetvdb.com/dashboard/account/apikey" target="_blank">thetvdb.com/dashboard/account/apikey</a></span>
+                </div>
+                <div class="form-field">
+                    <label data-i18n="cfg_tvdb_pin"></label>
+                    <input type="text" id="tvdb_pin" placeholder="PIN">
+                </div>
+                <button class="btn-test" onclick="testKeys()" data-i18n="cfg_test_key"><i class="mdi mdi-check-network"></i></button>
+                <div id="api-test-results"></div>
+            </div>
+
+            <div class="config-section">
+                <h3 data-i18n="cfg_paths_section"><i class="mdi mdi-folder-multiple"></i></h3>
+                <div class="form-field">
+                    <label data-i18n="cfg_movie_path"></label>
+                    <div class="input-with-btn">
+                        <input type="text" id="movie_path" placeholder="/downloads/movie">
+                        <button class="btn-test" onclick="pickFolder('movie_path')"><i class="mdi mdi-folder-open"></i></button>
+                    </div>
+                    <span class="hint" data-i18n="cfg_movie_path_hint"></span>
+                </div>
+                <div class="form-field">
+                    <label data-i18n="cfg_tv_path"></label>
+                    <div class="input-with-btn">
+                        <input type="text" id="tv_path" placeholder="/downloads/tv_shows">
+                        <button class="btn-test" onclick="pickFolder('tv_path')"><i class="mdi mdi-folder-open"></i></button>
+                    </div>
+                    <span class="hint" data-i18n="cfg_tv_path_hint"></span>
+                </div>
+            </div>
+
+            <div class="config-section">
+                <h3 data-i18n="cfg_security_section"><i class="mdi mdi-shield-lock"></i></h3>
+                <div class="form-field">
+                    <label data-i18n="cfg_password"></label>
+                    <input type="password" id="password" placeholder="...">
+                    <span class="hint" data-i18n="cfg_password_hint"></span>
+                </div>
+            </div>
+
+            <div class="config-section">
+                <h3 data-i18n="cfg_formats_section"><i class="mdi mdi-pencil-ruler"></i></h3>
+                <div class="form-field">
+                    <label data-i18n="cfg_movie_format"></label>
+                    <input type="text" id="movie_format" placeholder="{n} ({y})">
+                </div>
+                <div class="examples-box">
+                    <p><code>{n} ({y})</code> → <em>The Matrix (1999).mkv</em></p>
+                    <p><code>{n} ({y}) [imdbid-{imdb}] - {n:fr}</code> → <em>The Matrix (1999) [imdbid-tt0133093] - Matrix.mkv</em></p>
+                    <p><code>{n} - {director} ({y})</code> → <em>The Matrix - Wachowski (1999).mkv</em></p>
+                </div>
+                <div class="form-field" style="margin-top:16px;">
+                    <label data-i18n="cfg_tv_format"></label>
+                    <input type="text" id="tv_format" placeholder="{n} - {s00e00} - {t}">
+                </div>
+                <div class="examples-box">
+                    <p><code>{n} - {s00e00} - {t}</code> → <em>Breaking Bad - S01E01 - Pilot.mkv</em></p>
+                    <p><code>{n} ({y}) [tvdbid-{tvdbid}] - {s00e00} - {t}</code> → <em>Breaking Bad (2008) [tvdbid-81189] - S01E01 - Pilot.mkv</em></p>
+                </div>
+            </div>
+
+            <div class="config-section">
+                <h3 data-i18n="cfg_vars_title"><i class="mdi mdi-book-open-variant"></i></h3>
+                <table class="vars-table">
+                    <thead><tr><th>Variable</th><th>Description</th><th>Exemple</th></tr></thead>
+                    <tbody>
+                        <tr class="section-header"><td colspan="3" data-i18n="var_title_section"></td></tr>
+                        <tr><td><code>{n}</code></td><td>Titre</td><td class="example">The Matrix</td></tr>
+                        <tr><td><code>{ny}</code></td><td>Titre + Année</td><td class="example">The Matrix (1999)</td></tr>
+                        <tr class="section-header"><td colspan="3" data-i18n="var_date_section"></td></tr>
+                        <tr><td><code>{y}</code></td><td>Année</td><td class="example">1999</td></tr>
+                        <tr><td><code>{d}</code> / <code>{airdate}</code></td><td>Date diffusion</td><td class="example">2008-01-20</td></tr>
+                        <tr class="section-header"><td colspan="3" data-i18n="var_tv_section"></td></tr>
+                        <tr><td><code>{s:02d}</code></td><td>Saison 2 chiffres</td><td class="example">01</td></tr>
+                        <tr><td><code>{e:02d}</code></td><td>Épisode 2 chiffres</td><td class="example">03</td></tr>
+                        <tr><td><code>{s00e00}</code></td><td>Format S01E01</td><td class="example">S01E03</td></tr>
+                        <tr><td><code>{sxe}</code></td><td>Format 1x03</td><td class="example">1x03</td></tr>
+                        <tr><td><code>{t}</code> / <code>{episode_title}</code></td><td>Titre épisode</td><td class="example">Pilot</td></tr>
+                        <tr><td><code>{absolute}</code></td><td>N° absolu</td><td class="example">42</td></tr>
+                        <tr class="section-header"><td colspan="3" data-i18n="var_meta_section"></td></tr>
+                        <tr><td><code>{director}</code></td><td>Réalisateur</td><td class="example">Wachowski</td></tr>
+                        <tr><td><code>{genres}</code></td><td>Genres</td><td class="example">Action, Sci-Fi</td></tr>
+                        <tr><td><code>{runtime}</code></td><td>Durée (min)</td><td class="example">136</td></tr>
+                        <tr><td><code>{certification}</code></td><td>Classification</td><td class="example">R</td></tr>
+                        <tr><td><code>{network}</code></td><td>Chaîne TV</td><td class="example">AMC</td></tr>
+                        <tr><td><code>{studio}</code></td><td>Studio</td><td class="example">Warner Bros.</td></tr>
+                        <tr><td><code>{country}</code></td><td>Pays</td><td class="example">US</td></tr>
+                        <tr><td><code>{status}</code></td><td>Statut</td><td class="example">Ended</td></tr>
+                        <tr class="section-header"><td colspan="3" data-i18n="var_ids_section"></td></tr>
+                        <tr><td><code>{tvdbid}</code></td><td>ID TVDB</td><td class="example">81189</td></tr>
+                        <tr><td><code>{imdb}</code></td><td>ID IMDb</td><td class="example">tt0903747</td></tr>
+                        <tr><td><code>{tmdb}</code></td><td>ID TMDB</td><td class="example">1396</td></tr>
+                        <tr class="section-header"><td colspan="3" data-i18n="var_trans_section"></td></tr>
+                        <tr><td><code>{n:fr}</code></td><td>Titre français</td><td class="example">La Matrice</td></tr>
+                        <tr><td><code>{n:de}</code></td><td>Titre allemand</td><td class="example">Die Matrix</td></tr>
+                        <tr><td><code>{n:es}</code></td><td>Titre espagnol</td><td class="example">Matrix</td></tr>
+                        <tr><td><code>{n:ja}</code></td><td>Titre japonais</td><td class="example">マトリックス</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <div style="display:flex;gap:10px;margin-top:10px;">
+                <button class="btn btn-primary" onclick="saveConfig()" data-i18n="cfg_save"><i class="mdi mdi-content-save"></i></button>
+                <button class="btn btn-secondary" onclick="loadConfig()" data-i18n="cfg_reload"><i class="mdi mdi-reload"></i></button>
+            </div>
+            <div id="config-message"></div>
+        </div>
+
+    </div>
+</div>
+
+<!-- Modal Recherche -->
+<div id="manualSearchModal" class="modal">
+    <div class="modal-content">
+        <div class="modal-header">
+            <h2 data-i18n="search_title"><i class="mdi mdi-magnify"></i></h2>
+            <button class="close-btn" onclick="closeModal('manualSearchModal')">&times;</button>
+        </div>
+        <div id="manualSearchContent"></div>
+    </div>
+</div>
+
+<!-- Modal File Picker -->
+<div id="folderPickerModal" class="modal">
+    <div class="modal-content" style="max-width:500px;">
+        <div class="modal-header">
+            <h2 data-i18n="picker_title"><i class="mdi mdi-folder-open"></i></h2>
+            <button class="close-btn" onclick="closeModal('folderPickerModal')">&times;</button>
+        </div>
+        <div id="folderPickerContent"></div>
+    </div>
+</div>
+
+<script src="{{ url_for('static', filename='i18n.js') }}"></script>
+<script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>

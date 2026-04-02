@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+
+*.py[cod]
+*.so
+env/
+venv/
+ENV/
+build/
+dist/
+
+# Données sensibles — ne pas committer
+config.json
+rename_history.json
+
+# Médias — trop lourds pour git
+downloads/
+
+# OS / IDE
+.DS_Store
+*.log
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.env
+
+# Archive fichiers non essentiels
+_archive/

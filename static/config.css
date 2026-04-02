@@ -1,0 +1,46 @@
+/* ===== CONFIG SECTIONS ===== */
+.config-section { margin-bottom: 28px; padding-bottom: 24px; border-bottom: 1px solid #3a3a3a; }
+.config-section h3 { color: #e67e22; margin-bottom: 14px; font-size: 1em; display: flex; align-items: center; }
+
+/* ===== FORM ===== */
+.form-field { margin-bottom: 14px; }
+.form-field label { display: block; margin-bottom: 6px; font-weight: bold; color: #bbb; font-size: 0.88em; }
+.form-field input {
+    width: 100%; padding: 10px; border: 1px solid #444; border-radius: 5px;
+    font-family: monospace; font-size: 0.88em; background: #333; color: #eee;
+}
+.form-field input:focus { outline: none; border-color: #e67e22; box-shadow: 0 0 4px rgba(230,126,34,0.3); }
+.hint { display: block; font-size: 0.78em; color: #666; margin-top: 4px; }
+.hint a { color: #e67e22; text-decoration: none; }
+.input-with-btn { display: flex; gap: 8px; }
+.input-with-btn input { flex: 1; }
+
+/* ===== VARS TABLE ===== */
+.vars-table { width: 100%; border-collapse: collapse; font-size: 0.82em; margin: 10px 0; }
+.vars-table th { background: #222; padding: 8px 10px; text-align: left; font-weight: bold; color: #e67e22; }
+.vars-table td { padding: 7px 10px; border-bottom: 1px solid #3a3a3a; vertical-align: top; color: #bbb; }
+.vars-table tr:hover td { background: #333; }
+.vars-table code { background: #222; padding: 1px 5px; border-radius: 3px; font-family: monospace; color: #e67e22; }
+.vars-table .example { color: #888; font-style: italic; }
+.vars-table .section-header td { background: #222; font-weight: bold; color: #e67e22; padding: 6px 10px; }
+
+/* ===== EXAMPLES BOX ===== */
+.examples-box { background: #222; border-left: 3px solid #e67e22; padding: 12px 15px; border-radius: 5px; margin: 10px 0; }
+.examples-box p { margin: 6px 0; font-size: 0.82em; color: #bbb; }
+.examples-box code { background: #333; padding: 1px 4px; border-radius: 2px; color: #e67e22; }
+.examples-box em { color: #888; }
+
+/* ===== FILE PICKER ===== */
+.picker-path {
+    background: #222; padding: 8px 12px; border-radius: 4px;
+    font-family: monospace; font-size: 0.82em; margin-bottom: 10px;
+    word-break: break-all; color: #e67e22; border: 1px solid #444;
+}
+.picker-list { max-height: 350px; overflow-y: auto; border: 1px solid #444; border-radius: 4px; background: #333; }
+.picker-item {
+    padding: 9px 14px; cursor: pointer; display: flex; align-items: center;
+    gap: 8px; font-size: 0.88em; border-bottom: 1px solid #3a3a3a; color: #ccc;
+}
+.picker-item:hover { background: #3a3a3a; color: #e67e22; }
+.picker-item.up { color: #e67e22; font-weight: bold; }
+.picker-actions { display: flex; gap: 8px; margin-top: 12px; }

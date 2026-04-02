@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CleanFlick</title>
+    <link rel="icon" type="image/x-icon" href="/static/CleanFlick.ico">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@mdi/font@7.4.47/css/materialdesignicons.min.css">
+    <link rel="stylesheet" href="/static/login.css">
+</head>
+<body>
+<div class="card">
+    <img src="/static/CleanFlick.png" alt="CleanFlick">
+    <h1>CleanFlick</h1>
+    <p>Accès protégé</p>
+    {% if error %}
+    <div class="error"><i class="mdi mdi-alert-circle"></i> {{ error }}</div>
+    {% endif %}
+    <form method="POST">
+        <input type="password" name="password" placeholder="Mot de passe" autofocus>
+        <button type="submit">
+            <i class="mdi mdi-login"></i> Connexion
+        </button>
+    </form>
+</div>
+</body>
+</html>
