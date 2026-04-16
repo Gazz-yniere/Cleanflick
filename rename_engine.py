@@ -11,6 +11,17 @@ class RenameEngine:
         self.movie_format = config.get("movie_format", "{n} ({y})")
         self.tv_format = config.get("tv_format", "{n} - {s00e00} - {t}")
 
+    def _clean_title(self, title: str) -> str:
+        """Nettoie les titres en supprimant les séparateurs doubles (: et -) 
+        qui créent des caractères bizarres (ex: 'Arrow: The Series' -> 'Arrow The Series')"""
+        if not title:
+            return title
+        # Remplacer les tirets et deux-points par des espaces
+        title = re.sub(r'[\:-]', ' ', title)
+        # Nettoyer les espaces multiples
+        title = re.sub(r'\s+', ' ', title).strip()
+        return title
+
     def generate_name(self, file_info: Dict, details: Dict, extension: str) -> str:
         """Génère le nom selon le type (movie/tv) et le format configuré"""
         is_tv = file_info.get("media_type") == "tv"
@@ -21,18 +32,18 @@ class RenameEngine:
 
         vars = {
             # Identifiants courts Filebot
-            "n": details.get("title") or details.get("n") or "",
+            "n": self._clean_title(details.get("title") or details.get("n") or ""),
             "y": details.get("year") or details.get("y") or "",
-            "t": details.get("episode_title") or details.get("t") or "",
+            "t": self._clean_title(details.get("episode_title") or details.get("t") or ""),
             "d": details.get("airdate") or details.get("release_date") or details.get("d") or "",
             "s": season,
             "e": episode,
             "absolute": details.get("absolute") or "",
 
             # Formes longues
-            "title": details.get("title") or "",
+            "title": self._clean_title(details.get("title") or ""),
             "year": details.get("year") or "",
-            "episode_title": details.get("episode_title") or "",
+            "episode_title": self._clean_title(details.get("episode_title") or ""),
             "season": season,
             "episode": episode,
             "airdate": details.get("airdate") or "",
@@ -41,7 +52,7 @@ class RenameEngine:
             # Formats composés
             "sxe": f"{season}x{str(episode).zfill(2)}",
             "s00e00": f"S{str(season).zfill(2)}E{str(episode).zfill(2)}",
-            "ny": f"{details.get('title', '')} ({details.get('year', '')})" if details.get("title") and details.get("year") else details.get("title", ""),
+            "ny": f"{self._clean_title(details.get('title', ''))} ({details.get('year', '')})" if details.get("title") and details.get("year") else self._clean_title(details.get("title", "")),
 
             # Métadonnées
             "director": details.get("director") or "",

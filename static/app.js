@@ -24,6 +24,14 @@ const LANG_MAP = {
 };
 
 // ============= Format =============
+function cleanTitle(title) {
+    // Nettoie les titres en supprimant les séparateurs doubles (: et -)
+    // qui créent des caractères bizarres (ex: 'Arrow: The Series' -> 'Arrow The Series')
+    if (!title) return '';
+    title = title.replace(/[\:-]/g, ' ').replace(/\s+/g, ' ').trim();
+    return title;
+}
+
 function interpolate(template, vars) {
     return template.replace(/\{([a-zA-Z_]\w*)(:[^}]*)?\}/g, (_, name, fmt) => {
         if (name === 'n' && fmt) {
@@ -48,13 +56,15 @@ function generateFilename(file, details) {
     const ext = file.filename.slice(file.filename.lastIndexOf('.'));
     const fmt = file.media_type === 'movie' ? globalConfig.movie_format : globalConfig.tv_format;
     const s = file.season || 1, e = file.episode || 1;
+    const cleanedTitle = cleanTitle(details.title || '');
+    const cleanedEpisodeTitle = cleanTitle(details.episode_title || details.t || '');
     const vars = {
-        n: details.title || '', title: details.title || '',
-        ny: details.title && details.year ? `${details.title} (${details.year})` : (details.title || ''),
+        n: cleanedTitle, title: cleanedTitle,
+        ny: cleanedTitle && details.year ? `${cleanedTitle} (${details.year})` : cleanedTitle,
         y: details.year || '', year: details.year || '',
         d: details.airdate || details.release_date || '',
         airdate: details.airdate || '', release_date: details.release_date || '',
-        t: details.episode_title || details.t || '', episode_title: details.episode_title || '',
+        t: cleanedEpisodeTitle, episode_title: cleanedEpisodeTitle,
         s, season: s, e, episode: e,
         s00e00: `S${String(s).padStart(2,'0')}E${String(e).padStart(2,'0')}`,
         sxe: `${s}x${String(e).padStart(2,'0')}`,
@@ -214,9 +224,15 @@ function doRename(idx) {
     const newName = generateFilename(file, p.data.details);
     if (newName === file.filename) return;
     fetch('/api/rename', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: file.path, new_name: newName }) })
-    .then(r => r.json())
+    .then(r => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+    })
     .then(data => {
-        if (!data.success) { alert(`✗ ${data.message}`); return; }
+        if (!data.success) { 
+            alert(`✗ ${tr('err_rename')}\n${data.message}`); 
+            return; 
+        }
         const newPath = data.new_path;
         renameHistory[newPath] = { original_path: file.path, original_name: file.filename };
         allFiles[idx] = { ...file, filename: newName, path: newPath };
@@ -228,7 +244,7 @@ function doRename(idx) {
             row.querySelector('.actions-cell').innerHTML = renderActions(allFiles[idx], idx);
         }
     })
-    .catch(e => alert(`${tr('err_rename')} ${e.message}`));
+    .catch(e => alert(`✗ ${tr('err_rename')}\n${e.message}`));
 }
 
 function doRevert(idx) {
@@ -236,9 +252,15 @@ function doRevert(idx) {
     const hist = renameHistory[file.path];
     if (!hist) return;
     fetch('/api/revert', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: file.path }) })
-    .then(r => r.json())
+    .then(r => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+    })
     .then(data => {
-        if (!data.success) { alert(`✗ ${data.message}`); return; }
+        if (!data.success) { 
+            alert(`✗ ${tr('err_revert')}\n${data.message}`); 
+            return; 
+        }
         delete renameHistory[file.path];
         allFiles[idx] = { ...file, filename: hist.original_name, path: hist.original_path };
         filesPreviews[hist.original_path] = filesPreviews[file.path];

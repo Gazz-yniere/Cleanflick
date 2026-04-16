@@ -8,8 +8,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-# Créer les dossiers de téléchargement
-RUN mkdir -p /downloads/movie /downloads/tv_shows
+# Créer les dossiers et fichiers par défaut
+RUN mkdir -p /downloads/movie /downloads/tv_shows && \
+    cp config.example.json config.json && \
+    echo '{}' > rename_history.json
 
 EXPOSE 5000
 

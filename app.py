@@ -27,14 +27,39 @@ DEFAULT_CONFIG = {
 }
 
 def load_rename_history():
-    if os.path.exists(RENAME_HISTORY_FILE):
+    """Charge l'historique de renommage avec gestion des erreurs JSON"""
+    if not os.path.exists(RENAME_HISTORY_FILE):
+        return {}
+    
+    try:
         with open(RENAME_HISTORY_FILE, 'r', encoding='utf-8') as f:
             return json.load(f)
-    return {}
+    except json.JSONDecodeError as e:
+        # Le JSON est corrompu - créer une sauvegarde et réinitialiser
+        logger.error(f"Corrupted rename history JSON: {e}")
+        backup_file = f"{RENAME_HISTORY_FILE}.corrupted"
+        try:
+            # Sauvegarder le fichier corrompu
+            import shutil
+            shutil.copy2(RENAME_HISTORY_FILE, backup_file)
+            logger.info(f"Created backup of corrupted file: {backup_file}")
+        except Exception as backup_err:
+            logger.warning(f"Could not create backup: {backup_err}")
+        
+        # Réinitialiser avec un historique vide
+        return {}
+    except Exception as e:
+        logger.error(f"Unexpected error loading rename history: {e}")
+        return {}
 
 def save_rename_history(history):
-    with open(RENAME_HISTORY_FILE, 'w', encoding='utf-8') as f:
-        json.dump(history, f, indent=2, ensure_ascii=False)
+    """Sauvegarde l'historique avec gestion des erreurs"""
+    try:
+        with open(RENAME_HISTORY_FILE, 'w', encoding='utf-8') as f:
+            json.dump(history, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        logger.error(f"Error saving rename history: {e}")
+        raise
 
 def _resolve(path):
     """Résout un chemin: si inexistant, cherche downloads/ local"""
