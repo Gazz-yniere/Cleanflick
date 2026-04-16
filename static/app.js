@@ -1,11 +1,16 @@
 'use strict';
 
+// ============= Version =============
+const APP_VERSION = '1.0.2';
+
 // ============= State =============
 let currentFilter = '';
 let allFiles = [];
 let filesPreviews = {};
 let globalConfig = { movie_format: '{n} ({y})', tv_format: '{n} - {s00e00} - {t}' };
 let renameHistory = {};
+let autoSaveTimer = null;
+let isLoadingConfig = false;
 
 // ============= i18n helper (fallback si i18n.js absent) =============
 function tr(key) {
@@ -96,7 +101,7 @@ function switchTab(tab, e) {
     const section = document.getElementById(tab);
     if (section) section.classList.add('active');
     if (e && e.target) e.target.classList.add('active');
-    if (tab === 'config') loadConfig();
+    // Ne pas recharger la config à chaque fois, seulement si nécessaire
 }
 
 // ============= Scan =============
@@ -396,7 +401,11 @@ function browseFolder(path) {
         </div>`;
         content.innerHTML = html;
         document.getElementById('picker-select-btn').onclick = () => {
-            if (_pickerTarget) document.getElementById(_pickerTarget).value = _pickerCurrentPath;
+            if (_pickerTarget) {
+                document.getElementById(_pickerTarget).value = _pickerCurrentPath;
+                // Déclencher la sauvegarde automatique après la sélection
+                scheduleAutoSave();
+            }
             closeModal('folderPickerModal');
         };
     }).catch(e => { content.innerHTML = `<div class="message error">Erreur: ${esc(e.message)}</div>`; });
@@ -407,57 +416,212 @@ function closeModal(id) { document.getElementById(id).classList.remove('active')
 document.addEventListener('click', e => { if (e.target.classList.contains('modal')) e.target.classList.remove('active'); });
 
 // ============= Config =============
-function loadConfig() {
-    fetch('/api/config')
-    .then(r => { if (r.status === 401) { window.location='/login'; throw new Error('401'); } return r.json(); })
-    .then(data => {
-        setVal('tvdb_api_key', data.tvdb_api_key || '');
-        setVal('tvdb_pin', data.tvdb_pin || '');
-        setVal('movie_format', data.movie_format || '');
-        setVal('tv_format', data.tv_format || '');
-        setVal('movie_path', data.movie_path || '');
-        setVal('tv_path', data.tv_path || '');
+function loadConfig(data = null) {
+    const load = (configData) => {
+        setVal('tvdb_api_key', configData.tvdb_api_key || '');
+        setVal('tvdb_pin', configData.tvdb_pin || '');
+        setVal('movie_format', configData.movie_format || '');
+        setVal('tv_format', configData.tv_format || '');
+        setVal('movie_path', configData.movie_path || '');
+        setVal('tv_path', configData.tv_path || '');
+        
+        // Gérer le mot de passe et son état activé/désactivé
+        const passwordEnabled = configData.password_enabled || false;
+        document.getElementById('password-enabled').checked = passwordEnabled;
+        const passwordField = document.getElementById('password-field');
+        
+        if (passwordEnabled) {
+            passwordField.style.display = 'block';
+        } else {
+            passwordField.style.display = 'none';
+        }
+        
         setVal('password', '');
-        globalConfig.movie_format = data.movie_format || globalConfig.movie_format;
-        globalConfig.tv_format = data.tv_format || globalConfig.tv_format;
-    });
+        
+        // Afficher/masquer le bouton logout selon l'état du toggle (password_enabled)
+        updateLogoutButton(passwordEnabled);
+        
+        globalConfig.movie_format = configData.movie_format || globalConfig.movie_format;
+        globalConfig.tv_format = configData.tv_format || globalConfig.tv_format;
+    };
+    
+    if (data) {
+        // Données déjà fournies
+        load(data);
+    } else {
+        // Fetch depuis le serveur
+        fetch('/api/config')
+        .then(r => { if (r.status === 401) { window.location='/login'; throw new Error('401'); } return r.json(); })
+        .then(configData => load(configData));
+    }
 }
 
-function saveConfig() {
+function togglePassword() {
+    const checkbox = document.getElementById('password-enabled');
+    const passwordField = document.getElementById('password-field');
+    const passwordInput = document.getElementById('password');
+    
+    if (checkbox.checked) {
+        // Activation: montrer le champ et forcer la saisie
+        passwordField.style.display = 'block';
+        passwordInput.focus();
+        updateLogoutButton(true);
+        
+        // Ne pas sauvegarder tant que le password n'est pas rempli
+        // Le champ est vide au départ, la validation se fera au saveConfig
+    } else {
+        // Désactivation: effacer et sauvegarder
+        passwordField.style.display = 'none';
+        setVal('password', '');
+        
+        // Sauvegarder avec password_enabled=false et password vide
+        const cfg = {
+            tvdb_pin: getVal('tvdb_pin'),
+            movie_format: getVal('movie_format'),
+            tv_format: getVal('tv_format'),
+            movie_path: getVal('movie_path'),
+            tv_path: getVal('tv_path'),
+            password: '',
+            password_enabled: false
+        };
+        const tvdb = getVal('tvdb_api_key').trim();
+        if (tvdb) cfg.tvdb_api_key = tvdb;
+        
+        fetch('/api/config', { 
+            method: 'POST', 
+            headers: { 'Content-Type': 'application/json' }, 
+            body: JSON.stringify(cfg) 
+        })
+        .then(r => r.json())
+        .then(data => {
+            if (data.success) {
+                const msg = document.getElementById('config-message');
+                msg.innerHTML = `<div class="message success">✓ Protection désactivée</div>`;
+                msg.style.display = 'block';
+                setTimeout(() => msg.style.display = 'none', 2000);
+            }
+        })
+        .catch(e => console.error('Erreur:', e));
+        
+        updateLogoutButton(false);
+    }
+}
+
+function updateLogoutButton(show) {
+    const logoutBtn = document.getElementById('logout-btn');
+    if (show) {
+        logoutBtn.style.display = '';
+    } else {
+        logoutBtn.style.display = 'none';
+    }
+}
+
+function saveConfig(isAutoSave = false) {
     const tvdb = getVal('tvdb_api_key').trim();
-    const pwd = getVal('password');
+    const pwd = getVal('password').trim();
+    const passwordEnabled = document.getElementById('password-enabled')?.checked || false;
+    
+    // Validation: si toggle activé mais password vide
+    if (passwordEnabled && !pwd) {
+        const msg = document.getElementById('config-message');
+        msg.innerHTML = `<div class="message error">✗ Le mot de passe ne peut pas être vide</div>`;
+        msg.style.display = 'block';
+        // Reforcer le toggle pour qu'il refuse
+        document.getElementById('password-enabled').checked = false;
+        return;
+    }
+    
     const cfg = {
         tvdb_pin: getVal('tvdb_pin'),
         movie_format: getVal('movie_format'),
         tv_format: getVal('tv_format'),
         movie_path: getVal('movie_path'),
         tv_path: getVal('tv_path'),
+        password_enabled: passwordEnabled
     };
     if (tvdb) cfg.tvdb_api_key = tvdb;
     if (pwd) cfg.password = pwd;
+    
     fetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cfg) })
     .then(r => r.json())
     .then(data => {
         const msg = document.getElementById('config-message');
-        msg.innerHTML = `<div class="message ${data.success ? 'success' : 'error'}">${data.success ? '✓' : '✗'} ${esc(data.message)}</div>`;
+        
+        if (data.success && isAutoSave) {
+            // Autosave: juste un ✓ rapide et discret
+            msg.innerHTML = `<div class="message success">✓</div>`;
+            msg.style.display = 'block';
+            setTimeout(() => msg.style.display = 'none', 1000);
+        } else if (!data.success) {
+            // Erreur: afficher le message
+            msg.innerHTML = `<div class="message error">✗ ${esc(data.message)}</div>`;
+            msg.style.display = 'block';
+        } else if (!isAutoSave) {
+            // Clic manuel: message normal
+            msg.innerHTML = `<div class="message success">✓ ${esc(data.message)}</div>`;
+            msg.style.display = 'block';
+            setTimeout(() => msg.style.display = 'none', 3000);
+        }
+        
         if (data.success) {
             globalConfig.movie_format = cfg.movie_format || globalConfig.movie_format;
             globalConfig.tv_format = cfg.tv_format || globalConfig.tv_format;
-            setTimeout(() => msg.innerHTML = '', 3000);
         }
+    })
+    .catch(e => {
+        const msg = document.getElementById('config-message');
+        msg.innerHTML = `<div class="message error">✗ Erreur: ${esc(e.message)}</div>`;
+        msg.style.display = 'block';
     });
 }
 
+// Sauvegarde IMMÉDIATE sur chaque changement
+function scheduleAutoSave() {
+    if (autoSaveTimer) clearTimeout(autoSaveTimer);
+    saveConfig(true);
+}
+
 function testKeys() {
+    const btn = document.getElementById('test-btn');
     const resultsDiv = document.getElementById('api-test-results');
-    resultsDiv.innerHTML = `<div class="loading"><div class="spinner"></div></div>`;
-    fetch('/api/test-keys', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tvdb_api_key: getVal('tvdb_api_key'), tvdb_pin: getVal('tvdb_pin') }) })
+    
+    // État de chargement
+    btn.classList.add('testing');
+    resultsDiv.innerHTML = '<div class="test-result"><div class="spinner"></div></div>';
+    
+    fetch('/api/test-keys', { 
+        method: 'POST', 
+        headers: { 'Content-Type': 'application/json' }, 
+        body: JSON.stringify({ tvdb_api_key: getVal('tvdb_api_key'), tvdb_pin: getVal('tvdb_pin') }) 
+    })
     .then(r => r.json())
     .then(data => {
         const t = data.tvdb;
-        resultsDiv.innerHTML = `<div class="test-result ${t?.valid ? 'valid' : 'invalid'}">${esc(t?.message || 'N/A')}</div>`;
+        const isValid = t?.valid;
+        
+        // Colorer le bouton
+        btn.classList.remove('testing', 'success', 'error');
+        btn.classList.add(isValid ? 'success' : 'error');
+        
+        // Afficher le message (le message inclut déjà ✓ ou ✗)
+        resultsDiv.innerHTML = `<div class="test-result ${isValid ? 'valid' : 'invalid'}">${esc(t?.message || 'N/A')}</div>`;
+        
+        // Réinitialiser après 3 secondes
+        setTimeout(() => {
+            btn.classList.remove('success', 'error');
+            resultsDiv.innerHTML = '';
+        }, 3000);
     })
-    .catch(e => { resultsDiv.innerHTML = `<div class="test-result invalid">Erreur: ${esc(e.message)}</div>`; });
+    .catch(e => { 
+        btn.classList.remove('testing', 'success');
+        btn.classList.add('error');
+        resultsDiv.innerHTML = `<div class="test-result invalid">✗ Erreur: ${esc(e.message)}</div>`;
+        
+        setTimeout(() => {
+            btn.classList.remove('error');
+            resultsDiv.innerHTML = '';
+        }, 3000);
+    });
 }
 
 // ============= Helpers =============
@@ -467,8 +631,22 @@ function setVal(id, v) { const el = document.getElementById(id); if (el) el.valu
 
 // ============= Init =============
 document.addEventListener('DOMContentLoaded', () => {
+    // Afficher la version dans le footer
+    const versionEl = document.getElementById('app-version');
+    if (versionEl) versionEl.textContent = `v${APP_VERSION}`;
+
     // Appliquer les traductions i18n si disponibles
     if (typeof applyTranslations === 'function') applyTranslations();
+
+    // Ajouter autosave sur les champs de config
+    const configFields = ['tvdb_api_key', 'tvdb_pin', 'movie_format', 'tv_format', 'movie_path', 'tv_path', 'password'];
+    configFields.forEach(fieldId => {
+        const field = document.getElementById(fieldId);
+        if (field) {
+            field.addEventListener('input', scheduleAutoSave);
+            field.addEventListener('change', scheduleAutoSave);
+        }
+    });
 
     // Charger config + historique puis scanner
     Promise.all([
@@ -478,6 +656,14 @@ document.addEventListener('DOMContentLoaded', () => {
         if (cfg.movie_format) globalConfig.movie_format = cfg.movie_format;
         if (cfg.tv_format) globalConfig.tv_format = cfg.tv_format;
         renameHistory = hist || {};
+        
+        // Afficher le bouton logout au démarrage si il y a un mot de passe
+        const hasPassword = cfg.password && cfg.password.trim() !== '';
+        updateLogoutButton(hasPassword);
+        
+        // Charger les paramètres dans les champs (avec les données déjà récupérées)
+        loadConfig(cfg);
+        
         scanFiles();
     }).catch(e => { if (!e.message.includes('401')) scanFiles(); });
 });

@@ -78,16 +78,36 @@ nav a.logout:hover { color: #e67e22; background: #333; }
 .btn-lang:hover { border-color: #e67e22; color: #e67e22; }
 .btn-test {
     background: #e67e22; color: white; border: none;
-    padding: 7px 14px; border-radius: 4px; cursor: pointer;
-    font-size: 0.82em; margin-top: 8px;
+    padding: 7px 14px; border-radius: 8px; cursor: pointer;
+    font-size: 0.82em;
     display: inline-flex; align-items: center;
 }
 .btn-test:hover { background: #d35400; }
 
 /* ===== MESSAGES ===== */
-.message { padding: 10px 14px; margin: 8px 0; border-radius: 5px; font-size: 0.88em; }
-.message.success { background: #1e3a2f; color: #5cb85c; border: 1px solid #2d5a3d; }
-.message.error   { background: #3a1e1e; color: #e74c3c; border: 1px solid #5a2d2d; }
+.message { 
+    padding: 12px 16px; 
+    margin: 12px 0; 
+    border-radius: 6px; 
+    font-size: 0.9em;
+    border-left: 4px solid;
+    display: none;
+    animation: slideIn 0.3s ease-out;
+}
+.message.success { 
+    background: #1e3a2f; 
+    color: #5cb85c; 
+    border-color: #5cb85c;
+}
+.message.error   { 
+    background: #3a1e1e; 
+    color: #e74c3c; 
+    border-color: #e74c3c;
+}
+@keyframes slideIn {
+    from { opacity: 0; transform: translateY(-10px); }
+    to { opacity: 1; transform: translateY(0); }
+}
 .test-result { margin-top: 8px; padding: 8px 12px; border-radius: 4px; font-size: 0.82em; display: inline-block; }
 .test-result.valid   { background: #1e3a2f; color: #5cb85c; }
 .test-result.invalid { background: #3a1e1e; color: #e74c3c; }
@@ -121,3 +141,31 @@ nav a.logout:hover { color: #e67e22; background: #333; }
 .modal-header h2 { margin: 0; color: #eee; font-size: 1.1em; }
 .close-btn { font-size: 22px; cursor: pointer; color: #666; background: none; border: none; }
 .close-btn:hover { color: #e67e22; }
+
+/* ===== FOOTER ===== */
+.app-footer {
+    background: #222;
+    border-top: 1px solid #3a3a3a;
+    padding: 16px 30px;
+    font-size: 0.85em;
+}
+.footer-content {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    color: #888;
+    max-width: 1400px;
+    margin: 0 auto;
+}
+.app-footer a {
+    color: #e67e22;
+    text-decoration: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    transition: color 0.2s;
+}
+.app-footer a:hover {
+    color: #f39c12;
+    text-decoration: underline;
+}

@@ -5,15 +5,83 @@
 /* ===== FORM ===== */
 .form-field { margin-bottom: 14px; }
 .form-field label { display: block; margin-bottom: 6px; font-weight: bold; color: #bbb; font-size: 0.88em; }
-.form-field input {
-    width: 100%; padding: 10px; border: 1px solid #444; border-radius: 5px;
-    font-family: monospace; font-size: 0.88em; background: #333; color: #eee;
+
+/* Layout deux colonnes */
+.form-columns {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 30px;
+    margin-bottom: 20px;
 }
-.form-field input:focus { outline: none; border-color: #e67e22; box-shadow: 0 0 4px rgba(230,126,34,0.3); }
+
+.form-columns .form-field {
+    margin-bottom: 0;
+}
+
+/* Sur petit écran, une seule colonne */
+@media (max-width: 1024px) {
+    .form-columns {
+        grid-template-columns: 1fr;
+        gap: 20px;
+    }
+}
+.form-field input {
+    padding: 10px; border: 2px solid #444;
+    font-family: monospace; font-size: 0.88em; background: #333; color: #eee;
+    transition: border-color 0.3s, box-shadow 0.3s;
+}
+.form-field input.wide {
+    width: 100%;
+    min-width: 300px;
+}
+.form-field input:focus { 
+    outline: none; 
+    border-color: #e67e22; 
+    box-shadow: 0 0 6px rgba(230,126,34,0.4);
+}
+.form-field input.saving {
+    border-color: #f39c12;
+    box-shadow: 0 0 8px rgba(243, 156, 18, 0.5);
+    background: #3a3a3a;
+}
 .hint { display: block; font-size: 0.78em; color: #666; margin-top: 4px; }
 .hint a { color: #e67e22; text-decoration: none; }
-.input-with-btn { display: flex; gap: 8px; }
+.input-with-btn { display: flex; gap: 8px; align-items: center; }
 .input-with-btn input { flex: 1; }
+#api-test-results { 
+    margin-top: 8px;
+    padding: 8px 12px;
+    border-radius: 4px;
+    font-size: 0.82em;
+}
+#api-test-results .test-result {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 0;
+}
+#api-test-results .test-result.valid {
+    color: #27ae60;
+}
+#api-test-results .test-result.invalid {
+    color: #e74c3c;
+}
+.btn-test {
+    flex-shrink: 0;
+}
+.btn-test.testing {
+    opacity: 0.7;
+}
+.btn-test.success {
+    background-color: #27ae60;
+    border-color: #229954;
+    color: white;
+}
+.btn-test.error {
+    background-color: #e74c3c;
+    border-color: #c0392b;
+    color: white;
+}
 
 /* ===== VARS TABLE ===== */
 .vars-table { width: 100%; border-collapse: collapse; font-size: 0.82em; margin: 10px 0; }
@@ -29,6 +97,66 @@
 .examples-box p { margin: 6px 0; font-size: 0.82em; color: #bbb; }
 .examples-box code { background: #333; padding: 1px 4px; border-radius: 2px; color: #e67e22; }
 .examples-box em { color: #888; }
+
+/* ===== PASSWORD TOGGLE ===== */
+.password-toggle-group {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+/* Custom checkbox toggle */
+.password-toggle {
+    appearance: none;
+    -webkit-appearance: none;
+    width: 50px;
+    height: 28px;
+    background: #444;
+    border: 2px solid #555;
+    border-radius: 14px;
+    cursor: pointer;
+    position: relative;
+    transition: all 0.3s ease;
+    outline: none;
+    flex-shrink: 0;
+}
+
+.password-toggle::before {
+    content: '';
+    position: absolute;
+    width: 22px;
+    height: 22px;
+    background: white;
+    border-radius: 50%;
+    left: 2px;
+    top: 2px;
+    transition: left 0.3s ease;
+}
+
+.password-toggle:hover {
+    border-color: #666;
+}
+
+.password-toggle:checked {
+    background: #e67e22;
+    border-color: #d35400;
+}
+
+.password-toggle:checked::before {
+    left: 24px;
+}
+
+.toggle-label {
+    font-size: 0.9em;
+    color: #bbb;
+    cursor: pointer;
+    user-select: none;
+    flex: 1;
+}
+
+.toggle-label:hover {
+    color: #e67e22;
+}
 
 /* ===== FILE PICKER ===== */
 .picker-path {

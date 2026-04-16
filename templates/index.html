@@ -29,7 +29,7 @@
     <nav>
         <a href="#" onclick="switchTab('files', event)" class="nav-link active" data-i18n="nav_files"><i class="mdi mdi-folder-play"></i></a>
         <a href="#" onclick="switchTab('config', event)" class="nav-link" data-i18n="nav_config"><i class="mdi mdi-cog"></i></a>
-        <a href="/logout" class="logout" data-i18n="nav_logout"><i class="mdi mdi-logout"></i></a>
+        <a href="/logout" class="logout" id="logout-btn" style="display:none;" data-i18n="nav_logout"><i class="mdi mdi-logout"></i></a>
     </nav>
 
     <div class="content">
@@ -65,64 +65,84 @@
                 <h3 data-i18n="cfg_tvdb_section"><i class="mdi mdi-api"></i></h3>
                 <div class="form-field">
                     <label data-i18n="cfg_tvdb_key"></label>
-                    <input type="password" id="tvdb_api_key" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx">
+                    <div class="input-with-btn">
+                        <input type="password" id="tvdb_api_key" class="wide" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx">
+                        <button class="btn-test" id="test-btn" onclick="testKeys()" data-i18n="cfg_test_key"><i class="mdi mdi-check-network"></i></button>
+                    </div>
                     <span class="hint">→ <a href="https://www.thetvdb.com/dashboard/account/apikey" target="_blank">thetvdb.com/dashboard/account/apikey</a></span>
+                    <div id="api-test-results"></div>
                 </div>
                 <div class="form-field">
                     <label data-i18n="cfg_tvdb_pin"></label>
-                    <input type="text" id="tvdb_pin" placeholder="PIN">
-                </div>
-                <button class="btn-test" onclick="testKeys()" data-i18n="cfg_test_key"><i class="mdi mdi-check-network"></i></button>
-                <div id="api-test-results"></div>
-            </div>
-
-            <div class="config-section">
-                <h3 data-i18n="cfg_paths_section"><i class="mdi mdi-folder-multiple"></i></h3>
-                <div class="form-field">
-                    <label data-i18n="cfg_movie_path"></label>
-                    <div class="input-with-btn">
-                        <input type="text" id="movie_path" placeholder="/downloads/movie">
-                        <button class="btn-test" onclick="pickFolder('movie_path')"><i class="mdi mdi-folder-open"></i></button>
-                    </div>
-                    <span class="hint" data-i18n="cfg_movie_path_hint"></span>
-                </div>
-                <div class="form-field">
-                    <label data-i18n="cfg_tv_path"></label>
-                    <div class="input-with-btn">
-                        <input type="text" id="tv_path" placeholder="/downloads/tv_shows">
-                        <button class="btn-test" onclick="pickFolder('tv_path')"><i class="mdi mdi-folder-open"></i></button>
-                    </div>
-                    <span class="hint" data-i18n="cfg_tv_path_hint"></span>
+                    <input type="text" id="tvdb_pin" class="wide" placeholder="PIN">
                 </div>
             </div>
 
             <div class="config-section">
                 <h3 data-i18n="cfg_security_section"><i class="mdi mdi-shield-lock"></i></h3>
                 <div class="form-field">
-                    <label data-i18n="cfg_password"></label>
-                    <input type="password" id="password" placeholder="...">
-                    <span class="hint" data-i18n="cfg_password_hint"></span>
+                    <div class="password-toggle-group">
+                        <input type="checkbox" id="password-enabled" class="password-toggle" onchange="togglePassword()">
+                        <label for="password-enabled" class="toggle-label">Activer la protection par mot de passe</label>
+                    </div>
+                </div>
+                <div class="form-field" id="password-field" style="display:none;">
+                    <label>Mot de passe</label>
+                    <input type="password" id="password" class="wide" placeholder="Entrez votre mot de passe">
+                    <span class="hint">Laisser vide pour désactiver</span>
+                </div>
+            </div>
+
+            <div class="config-section">
+                <h3 data-i18n="cfg_paths_section"><i class="mdi mdi-folder-multiple"></i></h3>
+                <div class="form-columns">
+                    <div>
+                        <div class="form-field">
+                            <label data-i18n="cfg_movie_path"></label>
+                            <div class="input-with-btn">
+                                <input type="text" id="movie_path" placeholder="/downloads/movie">
+                                <button class="btn-test" onclick="pickFolder('movie_path')"><i class="mdi mdi-folder-open"></i></button>
+                            </div>
+                            <span class="hint" data-i18n="cfg_movie_path_hint"></span>
+                        </div>
+                    </div>
+                    <div>
+                        <div class="form-field">
+                            <label data-i18n="cfg_tv_path"></label>
+                            <div class="input-with-btn">
+                                <input type="text" id="tv_path" placeholder="/downloads/tv_shows">
+                                <button class="btn-test" onclick="pickFolder('tv_path')"><i class="mdi mdi-folder-open"></i></button>
+                            </div>
+                            <span class="hint" data-i18n="cfg_tv_path_hint"></span>
+                        </div>
+                    </div>
                 </div>
             </div>
 
             <div class="config-section">
                 <h3 data-i18n="cfg_formats_section"><i class="mdi mdi-pencil-ruler"></i></h3>
-                <div class="form-field">
-                    <label data-i18n="cfg_movie_format"></label>
-                    <input type="text" id="movie_format" placeholder="{n} ({y})">
-                </div>
-                <div class="examples-box">
-                    <p><code>{n} ({y})</code> → <em>The Matrix (1999).mkv</em></p>
-                    <p><code>{n} ({y}) [imdbid-{imdb}] - {n:fr}</code> → <em>The Matrix (1999) [imdbid-tt0133093] - Matrix.mkv</em></p>
-                    <p><code>{n} - {director} ({y})</code> → <em>The Matrix - Wachowski (1999).mkv</em></p>
-                </div>
-                <div class="form-field" style="margin-top:16px;">
-                    <label data-i18n="cfg_tv_format"></label>
-                    <input type="text" id="tv_format" placeholder="{n} - {s00e00} - {t}">
-                </div>
-                <div class="examples-box">
-                    <p><code>{n} - {s00e00} - {t}</code> → <em>Breaking Bad - S01E01 - Pilot.mkv</em></p>
-                    <p><code>{n} ({y}) [tvdbid-{tvdbid}] - {s00e00} - {t}</code> → <em>Breaking Bad (2008) [tvdbid-81189] - S01E01 - Pilot.mkv</em></p>
+                <div class="form-columns">
+                    <div>
+                        <div class="form-field">
+                            <label data-i18n="cfg_movie_format"></label>
+                            <input type="text" id="movie_format" class="wide" placeholder="{n} ({y})">
+                        </div>
+                        <div class="examples-box">
+                            <p><code>{n} ({y})</code> → <em>The Matrix (1999).mkv</em></p>
+                            <p><code>{n} ({y}) [imdbid-{imdb}] - {n:fr}</code> → <em>The Matrix (1999) [imdbid-tt0133093] - Matrix.mkv</em></p>
+                            <p><code>{n} - {director} ({y})</code> → <em>The Matrix - Wachowski (1999).mkv</em></p>
+                        </div>
+                    </div>
+                    <div>
+                        <div class="form-field">
+                            <label data-i18n="cfg_tv_format"></label>
+                            <input type="text" id="tv_format" class="wide" placeholder="{n} - {s00e00} - {t}">
+                        </div>
+                        <div class="examples-box">
+                            <p><code>{n} - {s00e00} - {t}</code> → <em>Breaking Bad - S01E01 - Pilot.mkv</em></p>
+                            <p><code>{n} ({y}) [tvdbid-{tvdbid}] - {s00e00} - {t}</code> → <em>Breaking Bad (2008) [tvdbid-81189] - S01E01 - Pilot.mkv</em></p>
+                        </div>
+                    </div>
                 </div>
             </div>
 
@@ -166,14 +186,19 @@
                 </table>
             </div>
 
-            <div style="display:flex;gap:10px;margin-top:10px;">
-                <button class="btn btn-primary" onclick="saveConfig()" data-i18n="cfg_save"><i class="mdi mdi-content-save"></i></button>
-                <button class="btn btn-secondary" onclick="loadConfig()" data-i18n="cfg_reload"><i class="mdi mdi-reload"></i></button>
-            </div>
             <div id="config-message"></div>
         </div>
 
     </div>
+
+    <footer class="app-footer">
+        <div class="footer-content">
+            <span id="app-version"></span>
+            <a href="https://github.com/Gazz-yniere/Cleanflick" target="_blank" rel="noopener noreferrer">
+                <i class="mdi mdi-github"></i> GitHub
+            </a>
+        </div>
+    </footer>
 </div>
 
 <!-- Modal Recherche -->
@@ -196,6 +221,15 @@
         </div>
         <div id="folderPickerContent"></div>
     </div>
+
+    <footer class="app-footer">
+        <div class="footer-content">
+            <span id="app-version"></span>
+            <a href="https://github.com/Gazz-yniere/Cleanflick" target="_blank" rel="noopener noreferrer">
+                <i class="mdi mdi-github"></i> GitHub
+            </a>
+        </div>
+    </footer>
 </div>
 
 <script src="{{ url_for('static', filename='i18n.js') }}"></script>

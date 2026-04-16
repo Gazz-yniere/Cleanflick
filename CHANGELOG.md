@@ -1,5 +1,34 @@
 # Changelog
 
+## [1.0.2] - 2026-04-16
+
+### Fixed
+
+- Password protection now correctly tracks enabled/disabled state instead of resetting
+- API key field now properly maintains 50% width with button next to it
+- API test results now display below TVDB link instead of inline with button
+
+### Changed
+
+- Reorganized configuration panel into 2-column grid layout for better readability
+- Films/TV formats now displayed side-by-side with examples (desktop view)
+- Movie/TV folder paths now displayed side-by-side with pickers (desktop view)
+- Security section moved before paths section in config panel
+- Autosave triggers immediately on all config field changes (no delay)
+- API test button now changes color (green for success, red for error)
+- Rename history loader now automatically repairs corrupted files
+- Title cleaning applied to both backend (Python) and frontend (JavaScript)
+
+### Added
+
+- Password protection toggle now saves its enabled/disabled state (`password_enabled` flag)
+- API key test result displays with success/error indicator and ✓/✗ icon
+- Validation: password field requires non-empty value when protection toggle is enabled
+- Folder picker auto-saves selected paths when picking folders
+- Footer with GitHub link and app version display
+- Visual feedback for config auto-save with brief ✓ indicator
+- Responsive 2-column layout that collapses to single column on screens ≤1024px
+
 ## [1.0.1] - 2026-04-16
 
 ### Fixed

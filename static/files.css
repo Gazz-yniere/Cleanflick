@@ -25,6 +25,17 @@
 .files-table td { padding: 12px; border-bottom: 1px solid #3a3a3a; vertical-align: middle; color: #ccc; }
 .files-table tr:hover td { background: #333; }
 
+/* ===== FILE NAME CELL ===== */
+.file-name-cell {
+    word-break: break-word;
+    overflow-wrap: break-word;
+    white-space: normal;
+    max-height: 104px;
+    overflow-y: auto;
+    font-size: 0.85em;
+    line-height: 1.4;
+}
+
 /* ===== PREVIEW CELL ===== */
 .preview-wrap { display: flex; align-items: flex-start; gap: 12px; }
 .preview-poster {

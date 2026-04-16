@@ -23,7 +23,8 @@ DEFAULT_CONFIG = {
     "tv_path": "/downloads/tv_shows",
     "movie_format": "{n} ({y})",
     "tv_format": "{n} - {s00e00} - {t}",
-    "password": ""
+    "password": "",
+    "password_enabled": False
 }
 
 def load_rename_history():
@@ -102,7 +103,7 @@ scanned_files = []
 def login_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
-        if config.get('password') and not session.get('logged_in'):
+        if config.get('password_enabled') and not session.get('logged_in'):
             if request.path.startswith('/api/'):
                 return jsonify({'error': 'Unauthorized'}), 401
             return redirect('/login')
@@ -259,12 +260,27 @@ def api_get_config():
 def api_set_config():
     global config, scanner, api_handler, rename_engine
     data = request.json
+    
+    # Validation: si password_enabled=True, le password doit être non-vide
+    password_enabled = data.get('password_enabled', False)
+    password_val = data.get('password', '').strip()
+    
+    if password_enabled and not password_val:
+        return jsonify({"success": False, "message": "Le mot de passe ne peut pas être vide"}), 400
+    
+    # Appliquer les modifications
     for key, val in data.items():
         if key == 'tvdb_api_key' and val and '...' in val:
             continue  # Ne pas écraser avec la valeur masquée
         if key == 'password' and val == '***':
             continue  # Ne pas écraser avec la valeur masquée
         config[key] = val
+    
+    # Si password_enabled est passé à False, vider le password
+    if not password_enabled:
+        config['password'] = ''
+        config['password_enabled'] = False
+    
     save_config(config)
     config = load_config()
     scanner = MediaScanner(config['_movie_path'], config['_tv_path'])
