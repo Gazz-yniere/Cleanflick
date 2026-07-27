@@ -32,8 +32,10 @@ const TRANSLATIONS = {
         hist_reverted: 'Annulé',
         hist_confirm_title: "Effacer l'historique",
         hist_confirm_clear: "Êtes-vous sûr de vouloir effacer tout l'historique ? Cette action est irréversible.",
+        hist_change: 'Modification',
         btn_move: 'Déplacer',
         btn_move_all: 'Tout déplacer',
+        btn_rename: 'Renommer',
         btn_revert: 'Revert',
         btn_other: 'Rechercher',
         btn_ok: 'OK',
@@ -112,8 +114,10 @@ const TRANSLATIONS = {
         hist_reverted: 'Reverted',
         hist_confirm_title: 'Clear History',
         hist_confirm_clear: 'Are you sure you want to clear all history? This action cannot be undone.',
+        hist_change: 'Modification',
         btn_move: 'Move',
         btn_move_all: 'Move All',
+        btn_rename: 'Rename',
         btn_revert: 'Revert',
         btn_other: 'Search',
         btn_ok: 'OK',
@@ -161,6 +165,7 @@ const TRANSLATIONS = {
     },
     es: {
         nav_files: 'Archivos',
+        nav_history: 'Historial',
         nav_config: 'Configuración',
         nav_logout: 'Cerrar sesión',
         filter_all: 'Todos',
@@ -177,6 +182,19 @@ const TRANSLATIONS = {
         no_files: 'Haz clic en "Escanear" para cargar archivos',
         no_result: 'Sin resultados',
         no_files_found: 'No se encontraron archivos',
+        btn_refresh_history: 'Actualizar',
+        btn_clear_history: 'Borrar todo',
+        hist_date: 'Fecha',
+        hist_op: 'Tipo',
+        hist_empty: 'Sin historial',
+        hist_op_rename: 'Renombrado',
+        hist_op_move: 'Movido',
+        hist_op_revert: 'Revertido',
+        hist_file_missing: 'Archivo no encontrado',
+        hist_reverted: 'Revertido',
+        hist_confirm_title: 'Borrar historial',
+        hist_confirm_clear: '¿Estás seguro de que quieres borrar todo el historial? Esta acción es irreversible.',
+        hist_change: 'Modificación',
         btn_rename: 'Renombrar',
         btn_move: 'Mover',
         btn_move_all: 'Mover todo',
@@ -227,6 +245,7 @@ const TRANSLATIONS = {
     },
     de: {
         nav_files: 'Dateien',
+        nav_history: 'Verlauf',
         nav_config: 'Einstellungen',
         nav_logout: 'Abmelden',
         filter_all: 'Alle',
@@ -243,6 +262,19 @@ const TRANSLATIONS = {
         no_files: 'Klicken Sie auf "Scannen", um Dateien zu laden',
         no_result: 'Kein Ergebnis',
         no_files_found: 'Keine Dateien gefunden',
+        btn_refresh_history: 'Aktualisieren',
+        btn_clear_history: 'Alles löschen',
+        hist_date: 'Datum',
+        hist_op: 'Typ',
+        hist_empty: 'Kein Verlauf',
+        hist_op_rename: 'Umbenannt',
+        hist_op_move: 'Verschoben',
+        hist_op_revert: 'Rückgängig',
+        hist_file_missing: 'Datei nicht gefunden',
+        hist_reverted: 'Rückgängig gemacht',
+        hist_confirm_title: 'Verlauf löschen',
+        hist_confirm_clear: 'Sind Sie sicher, dass Sie den gesamten Verlauf löschen möchten? Diese Aktion kann nicht rückgängig gemacht werden.',
+        hist_change: 'Änderung',
         btn_rename: 'Umbenennen',
         btn_move: 'Verschieben',
         btn_move_all: 'Alles verschieben',
@@ -293,6 +325,7 @@ const TRANSLATIONS = {
     },
     it: {
         nav_files: 'File',
+        nav_history: 'Cronologia',
         nav_config: 'Impostazioni',
         nav_logout: 'Esci',
         filter_all: 'Tutti',
@@ -309,6 +342,19 @@ const TRANSLATIONS = {
         no_files: 'Clicca su "Scansiona" per caricare i file',
         no_result: 'Nessun risultato',
         no_files_found: 'Nessun file trovato',
+        btn_refresh_history: 'Aggiorna',
+        btn_clear_history: 'Cancella tutto',
+        hist_date: 'Data',
+        hist_op: 'Tipo',
+        hist_empty: 'Nessuna cronologia',
+        hist_op_rename: 'Rinominato',
+        hist_op_move: 'Spostato',
+        hist_op_revert: 'Ripristinato',
+        hist_file_missing: 'File non trovato',
+        hist_reverted: 'Ripristinato',
+        hist_confirm_title: 'Cancella cronologia',
+        hist_confirm_clear: 'Sei sicuro di voler cancellare tutta la cronologia? Questa azione è irreversibile.',
+        hist_change: 'Modifica',
         btn_rename: 'Rinomina',
         btn_move: 'Sposta',
         btn_move_all: 'Sposta tutto',
@@ -359,6 +405,7 @@ const TRANSLATIONS = {
     },
     pt: {
         nav_files: 'Arquivos',
+        nav_history: 'Histórico',
         nav_config: 'Configuração',
         nav_logout: 'Sair',
         filter_all: 'Todos',
@@ -375,6 +422,19 @@ const TRANSLATIONS = {
         no_files: 'Clique em "Escanear" para carregar arquivos',
         no_result: 'Nenhum resultado',
         no_files_found: 'Nenhum arquivo encontrado',
+        btn_refresh_history: 'Atualizar',
+        btn_clear_history: 'Limpar tudo',
+        hist_date: 'Data',
+        hist_op: 'Tipo',
+        hist_empty: 'Sem histórico',
+        hist_op_rename: 'Renomeado',
+        hist_op_move: 'Movido',
+        hist_op_revert: 'Revertido',
+        hist_file_missing: 'Arquivo não encontrado',
+        hist_reverted: 'Revertido',
+        hist_confirm_title: 'Limpar histórico',
+        hist_confirm_clear: 'Tem certeza de que deseja limpar todo o histórico? Esta ação é irreversível.',
+        hist_change: 'Modificação',
         btn_rename: 'Renomear',
         btn_move: 'Mover',
         btn_move_all: 'Mover tudo',
@@ -437,17 +497,11 @@ function setLang(lang) {
     currentLang = lang;
     localStorage.setItem('cleanflick_lang', lang);
     applyTranslations();
-    // Re-rendre les boutons du tableau
-    if (typeof allFiles !== 'undefined' && allFiles.length > 0) {
-        document.querySelectorAll('tr[data-idx]').forEach(row => {
-            const idx = parseInt(row.getAttribute('data-idx'));
-            const file = allFiles[idx];
-            if (!file) return;
-            const cell = row.querySelector('.actions-cell');
-            if (cell && typeof renderActions === 'function')
-                cell.innerHTML = renderActions(file, idx);
-        });
-    }
+    // Re-rendre le tableau des fichiers
+    if (typeof renderTable === 'function') renderTable();
+    // Re-rendre l'historique si visible
+    const histSection = document.getElementById('history');
+    if (histSection?.classList.contains('active') && typeof loadHistory === 'function') loadHistory();
 }
 
 function cycleLang() {

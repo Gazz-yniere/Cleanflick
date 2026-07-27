@@ -1,6 +1,5 @@
 services:
   cleanflick:
-    #build: .
     image: gazzyniere/cleanflick:latest  # or build: . to build locally
     #build: .
     #image: cleanflick:local

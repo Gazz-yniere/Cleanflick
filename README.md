@@ -273,6 +273,20 @@ environment:
 
 ## Changelog
 
+### [1.0.4] - 2026-06-18
+
+**Added**
+- `hist_change` i18n key for the history table column header — translated in all 6 languages
+
+**Fixed**
+- Rename and Move buttons displayed raw key `btn-rename` instead of translated label
+- Action buttons in file table wrapped to a second line instead of staying on one row
+- File name column overflowed into the poster/preview column on long filenames
+- Folder picker modal contained a stray GitHub footer link in the middle of the UI
+- History tab label, buttons and all history-related strings were not translated in ES, DE, IT, PT
+- Operation type badges and Revert button in history table were not re-rendered on language switch
+- Language switch now correctly re-renders both the file table and the history table
+
 ### [1.0.3] - 2026-06-17
 
 **Added**

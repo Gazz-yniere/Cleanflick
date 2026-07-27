@@ -50,6 +50,7 @@
 .rename-preview      { color: var(--c-accent); font-size: 0.82em; margin: 4px 0; word-break: break-all; font-family: monospace; }
 .preview-meta        { font-size: 0.78em; color: var(--c-text3); display: flex; gap: 8px; flex-wrap: wrap; margin-top: 4px; }
 .no-preview          { color: var(--c-text4); font-size: 0.88em; font-style: italic; }
+.file-name-cell { word-break: break-all; font-size: 0.82em; color: var(--c-text2); }
 .loading-cell        { color: var(--c-accent); font-size: 0.88em; }
 
 /* ── Actions cell ─────────────────────────────────────────────────────────── */
@@ -58,7 +59,7 @@
     min-width: 300px; position: relative; overflow: hidden;
 }
 .actions-cell .btn-group {
-    display: flex; flex-wrap: wrap; gap: 4px;
+    display: flex; flex-wrap: nowrap; gap: 4px;
     justify-content: flex-end; align-items: center;
 }
 .btn-small {
