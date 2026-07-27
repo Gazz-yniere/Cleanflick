@@ -91,16 +91,15 @@ class RenameEngine:
     }
 
     def _interpolate(self, template: str, variables: Dict) -> str:
-        """Remplace {var} et {var:02d} et {n:fr} dans le template"""
+        """Remplace {var}, {var:02d} et {n:fr}/{title:fr}/{t:es} dans le template"""
         def replace(m):
             name, fmt = m.group(1), m.group(2)
-            # Support {n:fr} = traduction
-            if name == 'n' and fmt:
+            val = variables.get(name)
+            if fmt:
                 code = fmt[1:].lower()
                 trans = variables.get('_translations') or {}
-                val = trans.get(code) or trans.get(self.LANG_MAP.get(code, '')) or ''
-                return val or variables.get('n', '')
-            val = variables.get(name)
+                if re.match(r'^[a-zA-Z]{2,3}$', code) and name in ('n', 'title', 'original_title', 't', 'episode_title'):
+                    return trans.get(code) or trans.get(self.LANG_MAP.get(code, '')) or val or ''
             if val is None or str(val).strip() in ("", "None"):
                 return ""
             val = str(val).strip()

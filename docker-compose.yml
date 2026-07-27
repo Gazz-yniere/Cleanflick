@@ -1,6 +1,8 @@
 services:
   cleanflick:
     image: gazzyniere/cleanflick:latest  # or build: . to build locally
+    #build: .
+    #image: cleanflick:local
     container_name: cleanflick
     ports:
       - "5000:5000"
@@ -8,8 +10,13 @@ services:
       - ./downloads:/downloads
       - ./config.json:/app/config.json
       - ./rename_history.json:/app/rename_history.json
+      # Dossier de stockage des films (hôte:conteneur)
+      - ./output/movies:/movies
+      # Dossier de stockage des séries (hôte:conteneur)
+      - ./output/tv_shows:/tv_shows
     environment:
       - FLASK_ENV=production
       - PYTHONUNBUFFERED=1
       - SECRET_KEY=change-me-to-a-random-string  # generate with: python -c "import secrets; print(secrets.token_hex(32))"
+      - CLEANFLICK_PASSWORD=example  # Set a password to enable login protection. Empty = no login page.
     restart: unless-stopped

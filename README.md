@@ -2,83 +2,145 @@
   <img src="static/CleanFlick.png" alt="CleanFlick" width="120">
   <h1>CleanFlick</h1>
   <p>Automatic media file renamer powered by TVDB API</p>
-
-  ![Python](https://img.shields.io/badge/Python-3.11-blue?logo=python)
-  ![Flask](https://img.shields.io/badge/Flask-2.3-lightgrey?logo=flask)
-  ![TVDB](https://img.shields.io/badge/API-TVDB%20v4-orange)
-  ![Docker](https://img.shields.io/badge/Docker-ready-blue?logo=docker)
-  ![License](https://img.shields.io/badge/License-MIT-green)
 </div>
 
----
-
-## ✨ Features
-
-- 🔍 Auto-detection of movies and TV shows via TVDB v4
-- 📝 Filebot-style naming format (`{n}`, `{y}`, `{s00e00}`, `{t}`, `{imdb}`, `{n:fr}`...)
-- 🌍 Multi-language title support (`{n:fr}`, `{n:de}`, `{n:ja}`...)
-- 🔗 External IDs in filenames (IMDb, TVDB, TMDB)
-- 📂 Recursive folder scanning
-- ↩ Rename history with revert support
-- 🔒 Optional password protection
-- 🇫🇷 🇬🇧 French / English interface
-- 🐳 Docker ready
+<p align="center">
+  <a href="https://www.python.org/"><img src="https://img.shields.io/badge/python-3.11+-blue?logo=python" alt="Python"></a>
+  <a href="https://flask.palletsprojects.com/"><img src="https://img.shields.io/badge/Flask-2.3-green?logo=flask" alt="Flask"></a>
+  <img src="https://img.shields.io/badge/TVDB-v4-orange" alt="TVDB v4">
+  <a href="https://www.docker.com/"><img src="https://img.shields.io/badge/Docker-blue?logo=docker" alt="Docker"></a>
+  <img src="https://img.shields.io/badge/license-MIT-green" alt="License">
+</p>
 
 ---
 
-## 🚀 Quick Start
+## Table of Contents
 
-### Docker (Recommended)
+- [Features](#features)
+- [Getting Started](#getting-started)
+  - [Docker](#docker)
+  - [Local Installation](#local-installation)
+- [Configuration](#configuration)
+  - [TVDB API Key](#tvdb-api-key)
+  - [Config File](#config-file)
+- [Naming Format](#naming-format)
+  - [Movie Variables](#movie-variables)
+  - [TV Show Variables](#tv-show-variables)
+  - [Format Examples](#format-examples)
+- [Project Structure](#project-structure)
+- [Docker Volumes](#docker-volumes)
+- [Security](#security)
+- [Changelog](#changelog)
+- [License](#license)
+
+---
+
+## Features
+
+- **TVDB v4 API** integration for accurate movie and TV show metadata
+- **Filebot-style naming** with customizable format strings (`{n}`, `{y}`, `{s00e00}`, `{t}`, `{imdb}`...)
+- **Multi-language titles** (`{n:fr}`, `{n:de}`, `{n:ja}`...)
+- **External IDs** in filenames (IMDb, TVDB, TMDB)
+- **Recursive folder scanning** with auto-refresh every 8 seconds
+- **Rename history** with revert support (persistent across restarts)
+- **Manual search** with full TVDB results selection
+- **Rename All / Move All** batch processing
+- **Real-time move progress** with speed, ETA, and file-gone verification
+- **Folder picker** for media paths
+- **Password protection** (optional)
+- **6 languages** interface (FR, EN, ES, DE, IT, PT) with language switch
+- **Dark theme** (orange & dark grey)
+- **Docker support** for easy deployment
+
+---
+
+## Getting Started
+
+### Docker
+
+The fastest way to run CleanFlick:
 
 ```bash
-cp config.example.json config.json
-# Edit config.json with your TVDB API key
+# Clone the repository
+git clone https://github.com/gazzyniere/CleanFlick.git
+cd CleanFlick
+
+# Build and start
 docker-compose up -d
 ```
-→ http://localhost:5000
 
-### Local
+Open **http://localhost:5000** in your browser.
+
+> ⚠️ **Before running in production**, edit `docker-compose.yml` to set a strong `SECRET_KEY` and a `CLEANFLICK_PASSWORD`. See the [Security](#security) section below.
+
+### Local Installation
 
 ```bash
+# Clone the repository
+git clone https://github.com/gazzyniere/CleanFlick.git
+cd CleanFlick
+
+# Install dependencies
 pip install -r requirements.txt
+
+# Configure
 cp config.example.json config.json
 # Edit config.json with your TVDB API key
+
+# Run
 python app.py
 ```
 
+Open **http://localhost:5000** in your browser.
+
 ---
 
-## ⚙️ Configuration
+## Configuration
+
+### TVDB API Key
+
+1. Create a free account at [https://www.thetvdb.com](https://www.thetvdb.com)
+2. Go to **Dashboard → API Access**
+3. Copy your API key (UUID format)
+4. Paste it in **Settings → TVDB API Key** or in `config.json`
+
+### Config File
 
 Copy `config.example.json` to `config.json` and fill in your settings:
 
 ```json
 {
   "tvdb_api_key": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
-  "movie_path": "/downloads/movie",
-  "tv_path": "/downloads/tv_shows",
+  "tvdb_pin": "",
+  "input_path": "/downloads",
+  "movie_output_path": "/movies",
+  "tv_output_path": "/tv_shows",
   "movie_format": "{n} ({y})",
-  "tv_format": "{n} - {s00e00} - {t}",
-  "password": ""
+  "tv_format": "{n} - {s00e00} - {t}"
 }
 ```
 
-### TVDB API Key
-1. Create a free account at https://www.thetvdb.com
-2. Go to **Dashboard → API Access**
-3. Copy your API key (UUID format)
-4. Paste it in **Settings → TVDB API Key** or directly in `config.json`
+| Field | Description | Default |
+|-------|-------------|---------|
+| `tvdb_api_key` | Your TVDB v4 API key | *(required)* |
+| `tvdb_pin` | TVDB PIN (optional) | `""` |
+| `input_path` | Source folder for media files | `/downloads` |
+| `movie_output_path` | Destination for renamed movies | `/movies` |
+| `tv_output_path` | Destination for renamed TV shows | `/tv_shows` |
+| `movie_format` | Naming format for movies | `{n} ({y})` |
+| `tv_format` | Naming format for TV shows | `{n} - {s00e00} - {t}` |
 
 ---
 
-## 📝 Naming Format
+## Naming Format
 
 ### Movie Variables
+
 | Variable | Description | Example |
 |----------|-------------|---------|
 | `{n}` | Title | `The Matrix` |
 | `{y}` | Year | `1999` |
-| `{ny}` | Title + Year | `The Matrix (1999)` |
+| `{ny}` | Title (no year in title) | `The Matrix` |
 | `{imdb}` | IMDb ID | `tt0133093` |
 | `{tmdb}` | TMDB ID | `603` |
 | `{tvdbid}` | TVDB ID | `2239` |
@@ -92,81 +154,99 @@ Copy `config.example.json` to `config.json` and fill in your settings:
 | `{n:ja}` | Japanese title | `マトリックス` |
 
 ### TV Show Variables
+
 | Variable | Description | Example |
 |----------|-------------|---------|
-| `{n}` | Series title | `Breaking Bad` |
+| `{n}` | Show title | `Breaking Bad` |
 | `{y}` | Year | `2008` |
-| `{s00e00}` | S01E01 format | `S01E01` |
-| `{sxe}` | 1x01 format | `1x01` |
+| `{s}` | Season number | `1` |
 | `{s:02d}` | Season padded | `01` |
+| `{e}` | Episode number | `1` |
 | `{e:02d}` | Episode padded | `01` |
+| `{s00e00}` | Season + Episode | `S01E01` |
 | `{t}` | Episode title | `Pilot` |
 | `{absolute}` | Absolute number | `42` |
 | `{airdate}` | Air date | `2008-01-20` |
 | `{tvdbid}` | TVDB ID | `81189` |
 | `{network}` | Network | `AMC` |
+| `{n:fr}` | French title | `Breaking Bad` |
 
 ### Format Examples
 
 **Movies:**
+
 ```
 {n} ({y})                              → The Matrix (1999).mkv
 {n} ({y}) [imdbid-{imdb}]             → The Matrix (1999) [imdbid-tt0133093].mkv
-{n} ({y}) [imdbid-{imdb}] - {n:fr}   → The Matrix (1999) [imdbid-tt0133093] - Matrix.mkv
+{n} ({y}) [imdbid-{imdb}] - {n:fr}    → The Matrix (1999) [imdbid-tt0133093] - Matrix.mkv
 ```
 
 **TV Shows:**
+
 ```
 {n} - {s00e00} - {t}                              → Breaking Bad - S01E01 - Pilot.mkv
-{n} ({y}) [tvdbid-{tvdbid}] - {s00e00} - {t}     → Breaking Bad (2008) [tvdbid-81189] - S01E01 - Pilot.mkv
+{n} ({y}) [tvdbid-{tvdbid}] - {s00e00} - {t}    → Breaking Bad (2008) [tvdbid-81189] - S01E01 - Pilot.mkv
 ```
 
 ---
 
-## 🐳 Docker Volumes
+## Project Structure
+
+```
+CleanFlick/
+├── app.py                    # Flask application & routes
+├── scanner.py                # Media file scanner
+├── api_handler.py            # TVDB API handler
+├── rename_engine.py          # Rename logic
+├── repair_history.py         # History repair utility (run manually if history is corrupted)
+├── config.example.json       # Configuration template
+├── requirements.txt          # Python dependencies
+├── Dockerfile                # Docker build
+├── docker-compose.yml        # Docker Compose config
+├── templates/
+│   ├── index.html            # Main page
+│   └── login.html            # Login page
+├── static/
+│   ├── app.js                # Frontend logic
+│   ├── i18n.js               # Translations (fr, en, es, de, it, pt)
+│   ├── base.css              # Base styles & CSS variables
+│   ├── files.css             # Files & history table styles
+│   ├── config.css            # Config page styles
+│   ├── login.css             # Login page styles
+│   ├── CleanFlick.png        # Logo
+│   └── CleanFlick.ico        # Favicon
+```
+
+---
+
+## Docker Volumes
 
 ```yaml
 volumes:
   - ./downloads:/downloads
   - ./config.json:/app/config.json
   - ./rename_history.json:/app/rename_history.json
+  - ./output/movies:/movies
+  - ./output/tv_shows:/tv_shows
 ```
 
 ---
 
-## 📁 Project Structure
+## Security
 
-```
-CleanFlick/
-├── app.py                  # Flask backend + routes
-├── scanner.py              # Recursive folder scanner
-├── api_handler.py          # TVDB v4 API client
-├── rename_engine.py        # Filebot-style rename engine
-├── templates/
-│   ├── index.html          # Main UI
-│   └── login.html          # Login page
-├── static/
-│   ├── app.js              # Frontend logic
-│   ├── i18n.js             # FR/EN translations
-│   ├── base.css            # Base styles
-│   ├── files.css           # Files table styles
-│   ├── config.css          # Config page styles
-│   ├── login.css           # Login page styles
-│   ├── CleanFlick.png      # Logo
-│   └── CleanFlick.ico      # Favicon
-├── config.example.json     # Config template
-├── requirements.txt
-├── Dockerfile
-└── docker-compose.yml
+### Password Protection (Docker)
+
+CleanFlick uses the `CLEANFLICK_PASSWORD` environment variable from `docker-compose.yml` for authentication:
+
+- **Set a password** → login page is enabled
+- **Leave empty** (`CLEANFLICK_PASSWORD=`) → no login page, direct access
+
+```yaml
+environment:
+  - CLEANFLICK_PASSWORD=your-secure-password
 ```
 
----
-
-## 🔒 Security
-
-- Set a password in **Settings → Security** or in `config.json`
-- Leave empty to disable protection
-- `config.json` is excluded from git (contains your API key)
+> **Note:** The password is stored only as an environment variable, never in `config.json`.
 
 ### SECRET_KEY (Docker)
 
@@ -191,6 +271,76 @@ environment:
 
 ---
 
-## 📄 License
+## Changelog
 
-MIT
+### [1.0.3] - 2026-06-17
+
+**Added**
+- Real-time move progress bar with speed (MB/s) and ETA for cross-drive transfers
+- Smart same-drive detection: instant rename via `shutil.move` with shimmer animation instead of fake byte-level progress
+- File-gone verification after move: polls `/api/scan` until the source file is confirmed absent before removing the row
+- Progress bar fills gradually during verification phase (0% → 95%) then shows ✓ when confirmed
+- Custom confirmation modal for history clear — replaces native `confirm()` dialog, styled to match the app theme
+
+**Changed**
+- History table rows are now half the height (52px) for a more compact view
+- Move progress display now has three distinct phases: `moving` (shimmer), `copying` (real %), `cleaning` (shimmer at 99%)
+- File row stays visible with "✓ Déplacé" for 800ms after confirmation before disappearing
+- i18n: added `hist_confirm_title` key in FR and EN; `hist_confirm_clear` is now a full sentence
+
+**Fixed**
+- Removed double `os.remove()` call in `_run_file_op` (source file was already deleted by `_move_path`)
+- Progress text now always renders on top of the progress bar (`isolation: isolate`)
+
+### [1.0.2] - 2026-06-10
+
+**Changed**
+- Refactored Python backend and JavaScript frontend — no functional changes
+- CSS: introduced CSS custom properties for colors and spacing across all stylesheets
+- HTML: removed all inline `style=""` attributes; fixed `login.html` hardcoded paths
+
+**Fixed**
+- `repair_history.py` was writing `{}` instead of `[]` when resetting history
+- `rename_history.json.example` contained wrong format (`{}` → `[]`)
+
+**Removed**
+- `_archive/` folder (obsolete test scripts)
+
+### [1.0.1] - 2026-04-16
+
+**Fixed**
+- Fixed JSON corruption errors in rename history file — now auto-recovers with backup
+- Titles with colons or hyphens (e.g., "Arrow: The Series") now display correctly
+- Episode titles with colons or hyphens are properly cleaned in filenames
+
+**Changed**
+- Rename history loader now automatically repairs corrupted files
+- Better error reporting in frontend with clearer error messages
+- Title cleaning applied to both backend (Python) and frontend (JavaScript)
+
+**Added**
+- `repair_history.py` script to manually fix corrupted rename history files
+
+### [1.0.0] - 2025-04-01
+
+**Added**
+- TVDB v4 API integration for movies and TV shows
+- Filebot-style naming format
+- Multi-language title support
+- External IDs in filenames (IMDb, TVDB, TMDB)
+- Recursive folder scanning
+- Rename history with revert support
+- Optional password protection
+- French / English interface
+- Manual search with full TVDB results selection
+- Rename All and Move All batch actions
+- Folder picker
+- Docker support
+- MDI icons throughout the UI
+- Dark theme (orange & dark grey)
+
+---
+
+## License
+
+This project is licensed under the **MIT License** - see the [LICENSE](LICENSE) file for details.

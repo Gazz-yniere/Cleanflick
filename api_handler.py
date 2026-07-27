@@ -1,712 +1,399 @@
 import tvdb_v4_official
-import time
-from typing import Dict, List, Optional
+import re
 import logging
+from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
 
 class TVDBAPIHandler:
-    """Gestionnaire API TVDB v4 officiel"""
-    
     def __init__(self, api_key: str, pin: Optional[str] = None):
-        """
-        Initialise le client TVDB
-        
-        Args:
-            api_key: Clé API TVDB
-            pin: PIN utilisateur (optionnel)
-        """
         self.api_key = api_key
         self.pin = pin
         try:
-            if pin:
-                self.client = tvdb_v4_official.TVDB(api_key, pin=pin)
-            else:
-                self.client = tvdb_v4_official.TVDB(api_key)
-            logger.info("TVDB API client initialized successfully")
+            self.client = tvdb_v4_official.TVDB(api_key, pin=pin) if pin else tvdb_v4_official.TVDB(api_key)
+            logger.info("TVDB API client initialized")
         except Exception as e:
             logger.error(f"Failed to initialize TVDB client: {e}")
             raise
-    
+
+    # ── Helpers ──────────────────────────────────────────────────────────────
+
+    def _remote_ids(self, data: dict) -> tuple[str, str]:
+        ids = data.get('remoteIds') or data.get('remote_ids', [])
+        imdb = next((r['id'] for r in ids if r.get('sourceName') == 'IMDB'), '')
+        tmdb = next((r['id'] for r in ids if 'TheMovieDB' in r.get('sourceName', '')), '')
+        return imdb, tmdb
+
+    def _cert(self, data: dict) -> str:
+        ratings = data.get('contentRatings') or []
+        for cr in ratings:
+            if cr.get('country') in ('usa', 'us', 'USA'):
+                return cr.get('name', '')
+        return ratings[0].get('name', '') if ratings else ''
+
+    def _poster(self, data: dict, poster_type: int) -> str:
+        p = data.get('image', '')
+        if not p:
+            for art in data.get('artworks', []):
+                if art.get('type') == poster_type:
+                    return art.get('image', '')
+        return p
+
+    def _normalize_year(self, year) -> Optional[int]:
+        try:
+            return int(year) if year not in (None, '', 'None') else None
+        except (TypeError, ValueError):
+            return None
+
+    # ── Search ───────────────────────────────────────────────────────────────
+
+    def _parse_search_result(self, result: dict, media_type: str) -> dict:
+        air_time = result.get('first_air_time') or result.get('first_air_date', '')
+        year = result.get('year') or (air_time.split('-')[0] if air_time else None)
+        year = self._normalize_year(year)
+        tvdb_id = result.get('tvdb_id') or result.get('id')
+        remote_ids = result.get('remote_ids', [])
+        imdb = next((r['id'] for r in remote_ids if r.get('sourceName') == 'IMDB'), '')
+        tmdb = next((r['id'] for r in remote_ids if 'TheMovieDB' in r.get('sourceName', '')), '')
+        return {
+            'id': tvdb_id, 'id_tvdb': str(tvdb_id),
+            'imdb_id': imdb, 'tmdb_id': tmdb,
+            'title': result.get('name', ''), 'year': year,
+            'source': 'tvdb', 'type': result.get('type', media_type),
+            'overview': result.get('overview', ''),
+            'poster': result.get('image_url', ''),
+            'translations': result.get('translations', {}),
+        }
+
     def search_series(self, title: str, year: Optional[int] = None) -> List[Dict]:
         try:
-            search_results = self.client.search(title, type="series")
-            if not search_results:
-                return []
-            
             results = []
-            for result in search_results[:10]:
+            filtered = []
+            for r in (self.client.search(title, type="series") or [])[:10]:
                 try:
-                    # first_air_time est le bon champ (pas first_air_date)
-                    air_time = result.get('first_air_time') or result.get('first_air_date', '')
-                    result_year = result.get('year') or (air_time.split('-')[0] if air_time else None)
-                    if result_year:
-                        result_year = int(result_year)
-                    
-                    if year and result_year and abs(result_year - year) > 1:
+                    item = self._parse_search_result(r, 'series')
+                    results.append(item)
+                    if year and item['year'] and abs(item['year'] - year) > 1:
                         continue
-                    
-                    tvdb_id = result.get('tvdb_id') or result.get('id')
-                    remote_ids = result.get('remote_ids', [])
-                    imdb_id = next((r['id'] for r in remote_ids if r.get('sourceName') == 'IMDB'), '')
-                    tmdb_id = next((r['id'] for r in remote_ids if 'TheMovieDB' in r.get('sourceName', '')), '')
-                    results.append({
-                        'id': tvdb_id,
-                        'id_tvdb': str(tvdb_id),
-                        'imdb_id': imdb_id,
-                        'tmdb_id': tmdb_id,
-                        'title': result.get('name', ''),
-                        'year': result_year,
-                        'source': 'tvdb',
-                        'type': result.get('type', 'series'),
-                        'overview': result.get('overview', ''),
-                        'poster': result.get('image_url', ''),
-                        'translations': result.get('translations', {}),
-                        'url': f"https://www.thetvdb.com/series/{tvdb_id}"
-                    })
+                    filtered.append(item)
                 except Exception as e:
                     logger.debug(f"Error parsing series result: {e}")
-                    continue
-            
-            logger.info(f"Found {len(results)} series for '{title}'")
-            return results
+            picked = filtered or results
+            logger.info(f"Found {len(picked)} series for '{title}'")
+            return picked
         except Exception as e:
             logger.error(f"Series search error: {e}")
             return []
-    
+
     def search_movie(self, title: str, year: Optional[int] = None) -> List[Dict]:
         try:
-            search_results = self.client.search(title, type="movie")
-            if not search_results:
-                return []
-            
             results = []
-            for result in search_results[:10]:
+            filtered = []
+            for r in (self.client.search(title, type="movie") or [])[:10]:
                 try:
-                    # 'year' est directement disponible dans les résultats de recherche
-                    result_year = result.get('year')
-                    if result_year:
-                        result_year = int(result_year)
-                    # Fallback sur first_air_time
-                    if not result_year:
-                        air_time = result.get('first_air_time', '')
-                        result_year = int(air_time.split('-')[0]) if air_time else None
-                    
-                    if year and result_year and abs(result_year - year) > 1:
+                    item = self._parse_search_result(r, 'movie')
+                    item['director'] = r.get('director', '')
+                    item['genres'] = ', '.join(r['genres']) if isinstance(r.get('genres'), list) else ''
+                    results.append(item)
+                    if year and item['year'] and abs(item['year'] - year) > 1:
                         continue
-                    
-                    tvdb_id = result.get('tvdb_id') or result.get('id')
-                    # Extraire les IDs externes depuis remote_ids
-                    remote_ids = result.get('remote_ids', [])
-                    imdb_id = next((r['id'] for r in remote_ids if r.get('sourceName') == 'IMDB'), '')
-                    tmdb_id = next((r['id'] for r in remote_ids if 'TheMovieDB' in r.get('sourceName', '')), '')
-                    results.append({
-                        'id': tvdb_id,
-                        'id_tvdb': str(tvdb_id),
-                        'imdb_id': imdb_id,
-                        'tmdb_id': tmdb_id,
-                        'title': result.get('name', ''),
-                        'year': result_year,
-                        'source': 'tvdb',
-                        'type': result.get('type', 'movie'),
-                        'overview': result.get('overview', ''),
-                        'poster': result.get('image_url', ''),
-                        'director': result.get('director', ''),
-                        'genres': ', '.join(result.get('genres', [])) if isinstance(result.get('genres'), list) else '',
-                        'translations': result.get('translations', {}),
-                        'url': f"https://www.thetvdb.com/movies/{tvdb_id}"
-                    })
+                    filtered.append(item)
                 except Exception as e:
                     logger.debug(f"Error parsing movie result: {e}")
-                    continue
-            
-            logger.info(f"Returned {len(results)} movies for '{title}'")
-            return results
+            picked = filtered or results
+            logger.info(f"Found {len(picked)} movies for '{title}'")
+            return picked
         except Exception as e:
-            logger.error(f"Movie search error: {e}", exc_info=True)
+            logger.error(f"Movie search error: {e}")
             return []
-    
-    def get_series_extended(self, series_id: int) -> Dict:
-        """
-        Récupère les détails complets d'une série (avec saisons et épisodes)
-        
-        Args:
-            series_id: ID TVDB de la série
-            
-        Returns:
-            Dictionnaire avec détails étendus
-        """
-        try:
-            series = self.client.get_series_extended(series_id)
-            
-            details = {
-                'id': series_id,
-                'id_tvdb': str(series_id),
-                'title': series.get('name', ''),
-                'overview': series.get('overview', ''),
-                'status': series.get('status', {}).get('name', ''),
-                'year': series.get('first_air_date', '')[:4] if series.get('first_air_date') else None,
-                'source': 'tvdb',
-                'url': f"https://www.thetvdb.com/series/{series_id}",
-                'seasons': []
-            }
-            
-            # Ajouter les saisons
-            if 'seasons' in series:
-                for season in series['seasons']:
-                    season_info = {
-                        'id': season.get('id'),
-                        'number': season.get('number'),
-                        'type': season.get('type', {}).get('name', 'Aired Order'),
-                        'episodes': []
-                    }
-                    details['seasons'].append(season_info)
-            
-            # Ajouter les images
-            if 'artworks' in series:
-                for artwork in series['artworks']:
-                    if artwork.get('type') == 1:  # Type 1 = Poster
-                        details['poster'] = artwork.get('image', '')
-                        break
-            
-            logger.info(f"Retrieved series details for '{details.get('title', series_id)}'")
-            return details
-            
-        except Exception as e:
-            logger.error(f"Series extended details error: {e}")
-            return {'id': series_id, 'id_tvdb': str(series_id), 'source': 'tvdb'}
-    
+
+    # ── Auto search ──────────────────────────────────────────────────────────
+
+    def _looks_like_tv(self, title='', filename='', season=None, episode=None) -> bool:
+        if season or episode:
+            return True
+        patterns = [r'[Ss]\d{1,2}[Ee]\d{1,2}', r'\b\d{1,2}x\d{2}\b', r'\bsea?son\s*\d+\b', r'\bepisode\s*\d+\b']
+        return any(re.search(p, f"{title} {filename}", re.IGNORECASE) for p in patterns)
+
+    def _score(self, results, title, year) -> int:
+        if not results:
+            return -1
+        score = len(results)
+        top = results[0]
+        if str(top.get('title', '')).strip().lower() == str(title or '').strip().lower():
+            score += 3
+        if year and top.get('year'):
+            try:
+                if abs(int(top['year']) - int(year)) <= 1:
+                    score += 2
+            except (TypeError, ValueError):
+                pass
+        return score
+
+    def search_auto(self, title, year=None, filename='', season=None, episode=None, media_hint='') -> Dict:
+        year = self._normalize_year(year)
+        movies = self.search_movie(title, year)
+        series = self.search_series(title, year)
+        is_tv = self._looks_like_tv(title, filename, season, episode)
+
+        ms = self._score(movies, title, year) + (1 if media_hint == 'movie' else 0)
+        ss = self._score(series, title, year) + (5 if is_tv else 0) + (1 if media_hint == 'tv' else 0)
+
+        if ss > ms:
+            if series:
+                return {'media_type': 'tv', 'results': series}
+            if movies:
+                return {'media_type': 'movie', 'results': movies}
+        elif ms > ss:
+            if movies:
+                return {'media_type': 'movie', 'results': movies}
+            if series:
+                return {'media_type': 'tv', 'results': series}
+        if is_tv and series:
+            return {'media_type': 'tv', 'results': series}
+        if movies:
+            return {'media_type': 'movie', 'results': movies}
+        if series:
+            return {'media_type': 'tv', 'results': series}
+        return {'media_type': 'tv' if is_tv else 'movie', 'results': []}
+
+    # ── Details ──────────────────────────────────────────────────────────────
+
     def get_series_details(self, series_id: int, search_data: Dict = None) -> Dict:
         try:
-            series = self.client.get_series_extended(series_id)
-            
-            # remoteIds
-            remote_ids = series.get('remoteIds') or []
-            imdb_id = next((r['id'] for r in remote_ids if r.get('sourceName') == 'IMDB'), '')
-            tmdb_id = next((r['id'] for r in remote_ids if 'TheMovieDB' in r.get('sourceName', '')), '')
-            if not imdb_id and search_data:
-                imdb_id = search_data.get('imdb_id', '')
-            if not tmdb_id and search_data:
-                tmdb_id = search_data.get('tmdb_id', '')
-            
-            translations = (search_data or {}).get('translations', {})
-            orig_lang = series.get('originalLanguage', 'en')
-            original_title = translations.get(orig_lang, '') or series.get('name', '')
-            
-            # firstAired est le bon champ dans extended
-            first_aired = series.get('firstAired') or series.get('first_air_date') or series.get('first_air_time', '')
-            year = first_aired[:4] if first_aired else series.get('year', '')
-            
-            genres_list = [g.get('name', '') for g in series.get('genres', [])]
-            
-            # certification
-            cert = ''
-            for cr in (series.get('contentRatings') or []):
-                if cr.get('country') in ('usa', 'us', 'USA'):
-                    cert = cr.get('name', '')
-                    break
-            if not cert and series.get('contentRatings'):
-                cert = series['contentRatings'][0].get('name', '')
-            
-            # network depuis companies
+            s = self.client.get_series_extended(series_id)
+            imdb, tmdb = self._remote_ids(s)
+            sd = search_data or {}
+            imdb = imdb or sd.get('imdb_id', '')
+            tmdb = tmdb or sd.get('tmdb_id', '')
+            translations = sd.get('translations', {})
+
+            first_aired = s.get('firstAired') or s.get('first_air_date') or s.get('first_air_time', '')
+            year = first_aired[:4] if first_aired else s.get('year', '')
+            genres = [g.get('name', '') for g in s.get('genres', [])]
+
             network = ''
-            for company in (series.get('companies') or []):
-                if isinstance(company, dict):
-                    ctype = company.get('companyType', {}).get('companyTypeName', '') if isinstance(company.get('companyType'), dict) else ''
+            for co in (s.get('companies') or []):
+                if isinstance(co, dict):
+                    ctype = co.get('companyType', {}).get('companyTypeName', '') if isinstance(co.get('companyType'), dict) else ''
                     if 'network' in ctype.lower() or not network:
-                        network = company.get('name', '')
+                        network = co.get('name', '')
                         if 'network' in ctype.lower():
                             break
-            
-            # poster
-            poster = series.get('image', '')
-            if not poster:
-                for art in series.get('artworks', []):
-                    if art.get('type') == 2:  # type 2 = series poster
-                        poster = art.get('image', '')
-                        break
-            
-            # actors/creators depuis characters
+
             creators, actors = [], []
-            for char in (series.get('characters') or []):
-                ptype = char.get('peopleType', '')
-                name = char.get('personName', '') or char.get('name', '')
+            for ch in (s.get('characters') or []):
+                ptype, name = ch.get('peopleType', ''), ch.get('personName', '') or ch.get('name', '')
                 if not name:
                     continue
                 if ptype in ('Creator', 'ShowRunner'):
                     creators.append(name)
                 elif ptype in ('Actor', 'Actress') and len(actors) < 5:
                     actors.append(name)
-            
-            # saisons (exclure les saisons spéciales type=0)
-            real_seasons = [s for s in (series.get('seasons') or []) if s.get('type', {}).get('type') == 'official']
-            season_count = len(real_seasons) if real_seasons else len(series.get('seasons') or [])
-            
+
+            real_seasons = [x for x in (s.get('seasons') or []) if x.get('type', {}).get('type') == 'official']
+            season_count = len(real_seasons) or len(s.get('seasons') or [])
+
             details = {
-                'id': series_id,
-                'tvdbid': str(series_id),
-                'imdbid': imdb_id,
-                'imdb': imdb_id,
-                'tmdbid': tmdb_id,
-                'tmdb': tmdb_id,
-                'title': series.get('name', ''),
-                'n': series.get('name', ''),
-                'original_title': original_title,
+                'id': series_id, 'tvdbid': str(series_id),
+                'imdbid': imdb, 'imdb': imdb, 'tmdbid': tmdb, 'tmdb': tmdb,
+                'title': s.get('name', ''), 'n': s.get('name', ''),
+                'original_title': translations.get(s.get('originalLanguage', 'en'), '') or s.get('name', ''),
                 'translations': translations,
-                'year': str(year) if year else '',
-                'y': str(year) if year else '',
+                'year': str(year) if year else '', 'y': str(year) if year else '',
                 'startdate': first_aired,
-                'genres': ', '.join(genres_list),
-                'genre': genres_list[0] if genres_list else '',
-                'certification': cert,
-                'language': orig_lang,
-                'country': series.get('originalCountry', ''),
+                'genres': ', '.join(genres), 'genre': genres[0] if genres else '',
+                'certification': self._cert(s),
+                'language': s.get('originalLanguage', ''),
+                'country': s.get('originalCountry', ''),
                 'network': network,
-                'status': series.get('status', {}).get('name', '') if isinstance(series.get('status'), dict) else '',
-                'season_count': season_count,
-                'sc': season_count,
-                'score': series.get('score'),
-                'rating': None,
-                'director': ', '.join(creators) if creators else '',
-                'actors': actors,
-                'actor': actors[0] if actors else '',
-                'poster': poster,
-                'overview': '',
-                'source': 'tvdb',
-                'url': f"https://www.thetvdb.com/series/{series_id}"
+                'status': s.get('status', {}).get('name', '') if isinstance(s.get('status'), dict) else '',
+                'season_count': season_count, 'sc': season_count,
+                'score': s.get('score'), 'rating': None,
+                'director': ', '.join(creators),
+                'actors': actors, 'actor': actors[0] if actors else '',
+                'poster': self._poster(s, 2),
+                'overview': '', 'source': 'tvdb',
             }
-            
-            logger.info(f"Series details: {details['title']} ({details['year']}) network={details['network']}")
+            logger.info(f"Series: {details['title']} ({details['year']})")
             return details
         except Exception as e:
             logger.error(f"Series details error: {e}")
             return {'id': series_id, 'tvdbid': str(series_id), 'title': '', 'year': '', 'source': 'tvdb'}
-    
+
     def get_movie_details(self, movie_id: int, search_data: Dict = None) -> Dict:
         try:
-            movie = self.client.get_movie_extended(movie_id)
-            
-            # remoteIds depuis extended (plus complet que search)
-            remote_ids = movie.get('remoteIds') or []
-            imdb_id = next((r['id'] for r in remote_ids if r.get('sourceName') == 'IMDB'), '')
-            tmdb_id = next((r['id'] for r in remote_ids if 'TheMovieDB' in r.get('sourceName', '')), '')
-            wikidata_id = next((r['id'] for r in remote_ids if r.get('sourceName') == 'Wikidata'), '')
-            # Fallback depuis search_data si extended n'a pas les IDs
-            if not imdb_id and search_data:
-                imdb_id = search_data.get('imdb_id', '')
-            if not tmdb_id and search_data:
-                tmdb_id = search_data.get('tmdb_id', '')
-            
-            # Translations depuis search_data (plus complètes)
-            translations = (search_data or {}).get('translations', {})
-            orig_lang = movie.get('originalLanguage', 'en')
-            original_title = translations.get(orig_lang, '') or movie.get('name', '')
-            
-            # year: champ direct, sinon releases[0]['date']
-            year = movie.get('year')
-            if not year:
-                releases = movie.get('releases', [])
-                if releases:
-                    year = releases[0].get('date', '')[:4] or None
-            
-            # release_date depuis releases
-            release_date = ''
-            releases = movie.get('releases', [])
-            if releases:
-                release_date = releases[0].get('date', '')
-            
-            # genres
-            genres_list = [g.get('name', '') for g in movie.get('genres', [])]
-            
-            # certification
-            cert = ''
-            for cr in (movie.get('contentRatings') or []):
-                if cr.get('country') in ('usa', 'us', 'USA'):
-                    cert = cr.get('name', '')
-                    break
-            if not cert and movie.get('contentRatings'):
-                cert = movie['contentRatings'][0].get('name', '')
-            
-            # country / language
-            country = movie.get('originalCountry', '')
-            language = movie.get('originalLanguage', 'en')
-            
-            # studios
-            studio = ''
-            for company in (movie.get('companies') or []):
-                if isinstance(company, dict):
-                    studio = company.get('name', '')
-                    break
-            
-            # poster
-            poster = movie.get('image', '')
-            if not poster:
-                for art in movie.get('artworks', []):
-                    if art.get('type') == 14:  # type 14 = movie poster
-                        poster = art.get('image', '')
-                        break
-            
-            # characters: director/actors depuis le champ 'director' de la recherche
-            # get_movie_extended retourne characters avec peopleType
+            m = self.client.get_movie_extended(movie_id)
+            imdb, tmdb = self._remote_ids(m)
+            wikidata = next((r['id'] for r in (m.get('remoteIds') or []) if r.get('sourceName') == 'Wikidata'), '')
+            sd = search_data or {}
+            imdb = imdb or sd.get('imdb_id', '')
+            tmdb = tmdb or sd.get('tmdb_id', '')
+            translations = sd.get('translations', {})
+
+            year = m.get('year')
+            releases = m.get('releases', [])
+            if not year and releases:
+                year = releases[0].get('date', '')[:4] or None
+            release_date = releases[0].get('date', '') if releases else ''
+
+            genres = [g.get('name', '') for g in m.get('genres', [])]
+            studio = next((co.get('name', '') for co in (m.get('companies') or []) if isinstance(co, dict)), '')
+
             directors, actors = [], []
-            for char in (movie.get('characters') or []):
-                ptype = char.get('peopleType', '')
-                name = char.get('personName', '') or char.get('name', '')
+            for ch in (m.get('characters') or []):
+                ptype, name = ch.get('peopleType', ''), ch.get('personName', '') or ch.get('name', '')
                 if not name:
                     continue
                 if ptype == 'Director':
                     directors.append(name)
                 elif ptype in ('Actor', 'Actress'):
                     actors.append(name)
-            
+
             details = {
-                'id': movie_id,
-                'tvdbid': str(movie_id),
-                'imdbid': imdb_id,
-                'imdb': imdb_id,
-                'tmdbid': tmdb_id,
-                'tmdb': tmdb_id,
-                'wikidataid': wikidata_id,
-                'title': movie.get('name', ''),
-                'n': movie.get('name', ''),
-                'original_title': original_title,
+                'id': movie_id, 'tvdbid': str(movie_id),
+                'imdbid': imdb, 'imdb': imdb, 'tmdbid': tmdb, 'tmdb': tmdb,
+                'wikidataid': wikidata,
+                'title': m.get('name', ''), 'n': m.get('name', ''),
+                'original_title': translations.get(m.get('originalLanguage', 'en'), '') or m.get('name', ''),
                 'translations': translations,
-                'year': str(year) if year else '',
-                'y': str(year) if year else '',
-                'release_date': release_date,
-                'd': release_date,
-                'runtime': movie.get('runtime'),
-                'score': movie.get('score'),
-                'rating': None,
-                'genres': ', '.join(genres_list),
-                'genre': genres_list[0] if genres_list else '',
-                'certification': cert,
-                'language': orig_lang,
-                'country': country,
+                'year': str(year) if year else '', 'y': str(year) if year else '',
+                'release_date': release_date, 'd': release_date,
+                'runtime': m.get('runtime'), 'score': m.get('score'), 'rating': None,
+                'genres': ', '.join(genres), 'genre': genres[0] if genres else '',
+                'certification': self._cert(m),
+                'language': m.get('originalLanguage', ''),
+                'country': m.get('originalCountry', ''),
                 'studio': studio,
-                'director': ', '.join(directors) if directors else '',
-                'actors': actors,
-                'actor': actors[0] if actors else '',
-                'poster': poster,
-                'overview': '',
-                'status': movie.get('status', {}).get('name', '') if isinstance(movie.get('status'), dict) else '',
-                'source': 'tvdb',
-                'url': f"https://www.thetvdb.com/movies/{movie_id}"
+                'director': ', '.join(directors),
+                'actors': actors, 'actor': actors[0] if actors else '',
+                'poster': self._poster(m, 14),
+                'overview': '', 'source': 'tvdb',
+                'status': m.get('status', {}).get('name', '') if isinstance(m.get('status'), dict) else '',
             }
-            
-            logger.info(f"Movie details: {details['title']} ({details['year']}) dir={details['director']}")
+            logger.info(f"Movie: {details['title']} ({details['year']})")
             return details
         except Exception as e:
-            logger.error(f"Movie details error: {e}", exc_info=True)
+            logger.error(f"Movie details error: {e}")
             return {'id': movie_id, 'tvdbid': str(movie_id), 'title': '', 'year': '', 'source': 'tvdb'}
-    
+
     def get_series_episodes(self, series_id: int, season: Optional[int] = None, page: int = 0) -> Dict:
-        """
-        Récupère les épisodes d'une série avec tous les détails Filebot
-        Supporte la pagination pour trouver l'épisode demandé
-        
-        Args:
-            series_id: ID TVDB de la série
-            season: Numéro de saison (optionnel)
-            page: Numéro de page (par défaut 0)
-            
-        Returns:
-            Dictionnaire avec informations et épisodes
-        """
         try:
-            current_page = page
             all_episodes = []
-            
-            # Faire au moins un appel
-            while True:
+            current_page = page
+            total_pages = 1
+            while current_page <= 20:
                 result = self.client.get_series_episodes(series_id, page=current_page)
-                
                 found_season = False
-                if 'episodes' in result:
-                    for episode in result['episodes']:
-                        ep_season = episode.get('seasonNumber')
-                        
-                        # Si on cherche une saison spécifique
-                        if season is not None:
-                            if ep_season == season:
-                                found_season = True
-                                all_episodes.append(self._parse_episode(episode))
-                            elif ep_season > season and found_season:
-                                # On a dépassé la saison cherchée et on l'avait trouvée
-                                return {
-                                    'series_id': series_id,
-                                    'episodes': all_episodes,
-                                    'page': current_page,
-                                    'total_pages': result.get('totalPages', 1),
-                                    'source': 'tvdb'
-                                }
-                        else:
-                            all_episodes.append(self._parse_episode(episode))
-                
-                # Vérifier si on doit continuer la pagination
+                for ep in result.get('episodes', []):
+                    ep_season = ep.get('seasonNumber')
+                    if season is not None:
+                        if ep_season == season:
+                            found_season = True
+                            all_episodes.append(self._parse_episode(ep))
+                        elif ep_season > season and found_season:
+                            return {'series_id': series_id, 'episodes': all_episodes, 'source': 'tvdb'}
+                    else:
+                        all_episodes.append(self._parse_episode(ep))
                 total_pages = result.get('totalPages', 1)
                 if current_page >= total_pages - 1:
                     break
-                    
-                # Si on cherche une saison spécifique et qu'on ne l'a pas encore trouvée ou qu'on est dedans
-                # on continue à la page suivante
                 current_page += 1
-                
-                # Sécurité pour éviter les boucles infinies ou trop d'appels
-                if current_page > 20: # Max 10000 épisodes
-                    break
-            
-            return {
-                'series_id': series_id,
-                'episodes': all_episodes,
-                'page': current_page,
-                'total_pages': total_pages,
-                'source': 'tvdb'
-            }
-            
+            return {'series_id': series_id, 'episodes': all_episodes, 'source': 'tvdb'}
         except Exception as e:
             logger.error(f"Series episodes error: {e}")
-            return {
-                'series_id': series_id,
-                'episodes': [],
-                'page': page,
-                'source': 'tvdb'
-            }
+            return {'series_id': series_id, 'episodes': [], 'source': 'tvdb'}
 
-    def _parse_episode(self, episode: Dict) -> Dict:
-        """Parse un épisode brut TVDB en format compatible Filebot"""
-        ep_info = {
-            # Identifiants
-            'id': episode.get('id'),
-            'tvdbid': str(episode.get('id')),
-            
-            # Numérotation
-            'season': episode.get('seasonNumber'),
-            's': episode.get('seasonNumber'),
-            'episode': episode.get('number'),
-            'e': episode.get('number'),
-            'absolute': episode.get('absoluteNumber'),
-            
-            # Format de numérotation
-            'sxe': f"{episode.get('seasonNumber')}x{str(episode.get('number')).zfill(2)}" if episode.get('seasonNumber') and episode.get('number') else None,
-            's00e00': f"S{str(episode.get('seasonNumber')).zfill(2)}E{str(episode.get('number')).zfill(2)}" if episode.get('seasonNumber') and episode.get('number') else None,
-            
-            # Titres
-            'title': episode.get('name', ''),
-            't': episode.get('name', ''),
-            'episode_title': episode.get('name', ''),
-            
-            # Description
-            'overview': episode.get('overview', ''),
-            
-            # Dates
-            'airdate': episode.get('aired', ''),
-            'd': episode.get('aired', ''),
-            
-            # Runtime
-            'runtime': episode.get('runtime'),
-            
-            # Notes
-            'rating': round(episode.get('score', 0) / 10, 1) if episode.get('score') else None,
-            'score': episode.get('score'),
-            
-            # Source
-            'source': 'tvdb',
-            'url': f"https://www.thetvdb.com/episodes/{episode.get('id')}"
+    def _parse_episode(self, ep: dict) -> dict:
+        s, e = ep.get('seasonNumber'), ep.get('number')
+        return {
+            'id': ep.get('id'), 'tvdbid': str(ep.get('id')),
+            'season': s, 's': s, 'episode': e, 'e': e,
+            'absolute': ep.get('absoluteNumber'),
+            'sxe': f"{s}x{str(e).zfill(2)}" if s and e else None,
+            's00e00': f"S{str(s).zfill(2)}E{str(e).zfill(2)}" if s and e else None,
+            'title': ep.get('name', ''), 't': ep.get('name', ''),
+            'episode_title': ep.get('name', ''),
+            'overview': ep.get('overview', ''),
+            'airdate': ep.get('aired', ''), 'd': ep.get('aired', ''),
+            'runtime': ep.get('runtime'),
+            'rating': round(ep.get('score', 0) / 10, 1) if ep.get('score') else None,
+            'score': ep.get('score'), 'source': 'tvdb',
+            **(({'image': ep['image'], 'poster': ep['image']}) if 'image' in ep else {}),
         }
-        
-        if 'image' in episode:
-            ep_info['image'] = episode['image']
-            ep_info['poster'] = episode['image']
-            
-        return ep_info
-    
-    def get_episode_details(self, episode_id: int) -> Dict:
-        """
-        Récupère les détails d'un épisode
-        
-        Args:
-            episode_id: ID TVDB de l'épisode
-            
-        Returns:
-            Dictionnaire avec détails de l'épisode
-        """
-        try:
-            episode = self.client.get_episode_extended(episode_id)
-            
-            details = {
-                'id': episode_id,
-                'title': episode.get('name', ''),
-                'overview': episode.get('overview', ''),
-                'season': episode.get('seasonNumber'),
-                'episode': episode.get('number'),
-                'air_date': episode.get('aired', ''),
-                'runtime': episode.get('runtime'),
-                'source': 'tvdb',
-                'url': f"https://www.thetvdb.com/episodes/{episode_id}"
-            }
-            
-            if 'image' in episode:
-                details['image'] = episode['image']
-            
-            logger.info(f"Retrieved episode details: S{details.get('season')}E{details.get('episode')}")
-            return details
-            
-        except Exception as e:
-            logger.error(f"Episode details error: {e}")
-            return {'id': episode_id, 'source': 'tvdb'}
 
 
 class APIHandler:
-    """Orchestrateur API (compatible avec l'ancienne interface)"""
-    
     def __init__(self, config: Dict = None):
-        """
-        Initialise le gestionnaire API
-        
-        Args:
-            config: Configuration contenant les clés API
-        """
         self.config = config or {}
-        self.tvdb_pin = self.config.get('tvdb_pin') or None
-        
-        # Accepter la clé depuis tvdb_api_key OU tmdb_api_key (UUID TVDB)
-        # Un UUID TVDB ressemble à: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
-        import re
-        uuid_pattern = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', re.I)
-        
         tvdb_key = self.config.get('tvdb_api_key', '').strip()
         if not tvdb_key:
-            # Fallback: si tmdb_api_key ressemble à un UUID TVDB, l'utiliser
             candidate = self.config.get('tmdb_api_key', '').strip()
-            if candidate and uuid_pattern.match(candidate):
+            if candidate and re.match(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', candidate, re.I):
                 tvdb_key = candidate
-                logger.info("Using tmdb_api_key field as TVDB key (UUID format detected)")
-        
         self.tvdb_api_key = tvdb_key
-        
-        if self.tvdb_api_key:
+        pin = self.config.get('tvdb_pin') or None
+        if tvdb_key:
             try:
-                self.tvdb = TVDBAPIHandler(self.tvdb_api_key, self.tvdb_pin)
-                logger.info(f"TVDB initialized with key: {self.tvdb_api_key[:8]}...")
+                self.tvdb = TVDBAPIHandler(tvdb_key, pin)
+                logger.info(f"TVDB initialized with key: {tvdb_key[:8]}...")
             except Exception as e:
                 logger.error(f"Failed to initialize TVDB handler: {e}")
                 self.tvdb = None
         else:
             logger.warning("No TVDB API key provided")
             self.tvdb = None
-    
+
+    def _require_tvdb(self):
+        if not self.tvdb:
+            logger.error("TVDB handler not initialized")
+        return self.tvdb
+
     def search_movie(self, title: str, year: Optional[int] = None) -> List[Dict]:
-        """
-        Recherche un film
-        
-        Args:
-            title: Titre du film
-            year: Année (optionnel)
-            
-        Returns:
-            Liste des résultats
-        """
-        if not self.tvdb:
-            logger.error("TVDB handler not initialized")
-            return []
-        
-        return self.tvdb.search_movie(title, year)
-    
+        return self.tvdb.search_movie(title, year) if self._require_tvdb() else []
+
     def search_tv(self, title: str, year: Optional[int] = None) -> List[Dict]:
-        """
-        Recherche une série
-        
-        Args:
-            title: Titre de la série
-            year: Année (optionnel)
-            
-        Returns:
-            Liste des résultats
-        """
-        if not self.tvdb:
-            logger.error("TVDB handler not initialized")
-            return []
-        
-        return self.tvdb.search_series(title, year)
-    
+        return self.tvdb.search_series(title, year) if self._require_tvdb() else []
+
+    def search_auto(self, title, year=None, filename='', season=None, episode=None, media_hint='') -> Dict:
+        if not self._require_tvdb():
+            return {'media_type': 'movie', 'results': []}
+        return self.tvdb.search_auto(title, year, filename, season, episode, media_hint)
+
     def get_movie_details(self, movie_id: str, source: str = 'tvdb', search_data: Dict = None) -> Dict:
-        if not self.tvdb or source != 'tvdb':
+        if not self._require_tvdb() or source != 'tvdb':
             return {'id': movie_id, 'source': source}
         try:
             return self.tvdb.get_movie_details(int(movie_id), search_data)
         except ValueError:
-            logger.error(f"Invalid movie ID: {movie_id}")
             return {'id': movie_id, 'source': source}
-    
+
     def get_tv_details(self, tv_id: str, season: int = 1, episode: int = 1, source: str = 'tvdb', search_data: Dict = None) -> Dict:
-        if not self.tvdb or source != 'tvdb':
+        if not self._require_tvdb() or source != 'tvdb':
             return {'id': tv_id, 'source': source}
         try:
             series_id = int(tv_id)
             details = self.tvdb.get_series_details(series_id, search_data)
-            
-            # Ajouter les numéros de saison/épisode même sans détails complets
-            details['season'] = season
-            details['s'] = season
-            details['episode'] = episode
-            details['e'] = episode
-            details['sxe'] = f"{season}x{str(episode).zfill(2)}"
-            details['s00e00'] = f"S{str(season).zfill(2)}E{str(episode).zfill(2)}"
-            
-            # Si season/episode sont demandés, chercher les détails complets de l'épisode
+            details.update({
+                'season': season, 's': season, 'episode': episode, 'e': episode,
+                'sxe': f"{season}x{str(episode).zfill(2)}",
+                's00e00': f"S{str(season).zfill(2)}E{str(episode).zfill(2)}",
+            })
             if season and episode:
                 try:
-                    ep_details = self.tvdb.get_series_episodes(series_id, season=season)
-                    for ep in ep_details.get('episodes', []):
+                    for ep in self.tvdb.get_series_episodes(series_id, season=season).get('episodes', []):
                         if ep.get('season') == season and ep.get('episode') == episode:
-                            # Ajouter TOUS les détails de l'épisode
                             details['episode_title'] = ep.get('episode_title', ep.get('title', ''))
-                            details['t'] = ep.get('episode_title', ep.get('title', ''))  # Alias court
+                            details['t'] = details['episode_title']
                             details['episode_overview'] = ep.get('overview', '')
                             details['airdate'] = ep.get('airdate', '')
                             details['absolute'] = ep.get('absolute')
                             details['episode_rating'] = ep.get('rating')
-                            details['episode_score'] = ep.get('score')
                             details['episode_runtime'] = ep.get('runtime')
                             break
                 except Exception as e:
-                    logger.warning(f"Could not fetch episode details for S{season}E{episode}: {e}")
-                    # Continuer avec les détails de la série seule
-            
+                    logger.warning(f"Could not fetch episode S{season}E{episode}: {e}")
             return details
         except ValueError:
-            logger.error(f"Invalid series ID: {tv_id}")
             return {'id': tv_id, 'source': source}
-    
-    def get_episode_details(self, title_id: str, season: int, episode: int, source: str = 'tvdb') -> Optional[Dict]:
-        """
-        Récupère les infos d'un épisode
-        
-        Args:
-            title_id: ID de la série
-            season: Numéro de saison
-            episode: Numéro d'épisode
-            source: Source (tvdb par défaut)
-            
-        Returns:
-            Dictionnaire avec détails ou None
-        """
-        if not self.tvdb or source != 'tvdb':
-            return None
-        
-        try:
-            series_id = int(title_id)
-            episodes = self.tvdb.get_series_episodes(series_id, season=season)
-            
-            # Chercher l'épisode demandé
-            for ep in episodes.get('episodes', []):
-                if ep.get('season') == season and ep.get('episode') == episode:
-                    return ep
-            
-            logger.warning(f"Episode not found: S{season}E{episode}")
-            return None
-        except ValueError:
-            logger.error(f"Invalid series ID: {title_id}")
-            return None

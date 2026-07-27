@@ -4,13 +4,14 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>CleanFlick</title>
-    <link rel="icon" type="image/x-icon" href="/static/CleanFlick.ico">
+    <link rel="icon" type="image/x-icon" href="{{ url_for('static', filename='CleanFlick.ico') }}">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@mdi/font@7.4.47/css/materialdesignicons.min.css">
-    <link rel="stylesheet" href="/static/login.css">
+    <link rel="stylesheet" href="{{ url_for('static', filename='base.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='login.css') }}">
 </head>
 <body>
 <div class="card">
-    <img src="/static/CleanFlick.png" alt="CleanFlick">
+    <img src="{{ url_for('static', filename='CleanFlick.png') }}" alt="CleanFlick">
     <h1>CleanFlick</h1>
     <p>Accès protégé</p>
     {% if error %}
@@ -18,9 +19,7 @@
     {% endif %}
     <form method="POST">
         <input type="password" name="password" placeholder="Mot de passe" autofocus>
-        <button type="submit">
-            <i class="mdi mdi-login"></i> Connexion
-        </button>
+        <button type="submit"><i class="mdi mdi-login"></i> Connexion</button>
     </form>
 </div>
 </body>

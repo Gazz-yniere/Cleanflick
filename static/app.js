@@ -1,21 +1,20 @@
 'use strict';
 
-// ============= State =============
+// ── State ─────────────────────────────────────────────────────────────────────
 let currentFilter = '';
 let allFiles = [];
 let filesPreviews = {};
 let globalConfig = { movie_format: '{n} ({y})', tv_format: '{n} - {s00e00} - {t}' };
-let renameHistory = {};
+let activeTransfers = {};  // job_id -> { idx, pollInterval, startTime }
 
-// ============= i18n helper (fallback si i18n.js absent) =============
+// ── i18n ──────────────────────────────────────────────────────────────────────
 function tr(key) {
-    if (typeof TRANSLATIONS !== 'undefined' && typeof currentLang !== 'undefined') {
+    if (typeof TRANSLATIONS !== 'undefined' && typeof currentLang !== 'undefined')
         return TRANSLATIONS[currentLang]?.[key] || TRANSLATIONS['fr']?.[key] || key;
-    }
     return key;
 }
 
-// ============= Lang map =============
+// ── Lang map (mirrors Python) ─────────────────────────────────────────────────
 const LANG_MAP = {
     fr:'fra', de:'deu', es:'spa', it:'ita', pt:'por', ru:'rus',
     ja:'jpn', ko:'kor', zh:'zho', ar:'ara', pl:'pol', nl:'nld',
@@ -23,23 +22,21 @@ const LANG_MAP = {
     hu:'hun', he:'heb', ro:'ron', uk:'ukr'
 };
 
-// ============= Format =============
+// ── Format ────────────────────────────────────────────────────────────────────
 function cleanTitle(title) {
-    // Nettoie les titres en supprimant les séparateurs doubles (: et -)
-    // qui créent des caractères bizarres (ex: 'Arrow: The Series' -> 'Arrow The Series')
     if (!title) return '';
-    title = title.replace(/[\:-]/g, ' ').replace(/\s+/g, ' ').trim();
-    return title;
+    return title.replace(/[\:-]/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
 function interpolate(template, vars) {
     return template.replace(/\{([a-zA-Z_]\w*)(:[^}]*)?\}/g, (_, name, fmt) => {
-        if (name === 'n' && fmt) {
+        const val = vars[name];
+        if (fmt) {
             const code = fmt.slice(1).toLowerCase();
             const trans = vars._translations || {};
-            return trans[code] || trans[LANG_MAP[code]] || vars.n || '';
+            if (/^[a-zA-Z]{2,3}$/.test(code) && ['n','title','original_title','t','episode_title'].includes(name))
+                return trans[code] || trans[LANG_MAP[code]] || val || '';
         }
-        const val = vars[name];
         if (val === undefined || val === null || String(val).trim() === '' || String(val) === 'None') return '';
         const s = String(val).trim();
         if (fmt) {
@@ -53,18 +50,19 @@ function interpolate(template, vars) {
 }
 
 function generateFilename(file, details) {
+    if (!file?.filename) return '';
     const ext = file.filename.slice(file.filename.lastIndexOf('.'));
     const fmt = file.media_type === 'movie' ? globalConfig.movie_format : globalConfig.tv_format;
     const s = file.season || 1, e = file.episode || 1;
     const cleanedTitle = cleanTitle(details.title || '');
-    const cleanedEpisodeTitle = cleanTitle(details.episode_title || details.t || '');
+    const cleanedEpTitle = cleanTitle(details.episode_title || details.t || '');
     const vars = {
         n: cleanedTitle, title: cleanedTitle,
         ny: cleanedTitle && details.year ? `${cleanedTitle} (${details.year})` : cleanedTitle,
         y: details.year || '', year: details.year || '',
         d: details.airdate || details.release_date || '',
         airdate: details.airdate || '', release_date: details.release_date || '',
-        t: cleanedEpisodeTitle, episode_title: cleanedEpisodeTitle,
+        t: cleanedEpTitle, episode_title: cleanedEpTitle,
         s, season: s, e, episode: e,
         s00e00: `S${String(s).padStart(2,'0')}E${String(e).padStart(2,'0')}`,
         sxe: `${s}x${String(e).padStart(2,'0')}`,
@@ -76,10 +74,8 @@ function generateFilename(file, details) {
         language: details.language || '', country: details.country || '',
         status: details.status || '',
         tvdbid: details.tvdbid || String(details.id || ''),
-        imdbid: details.imdbid || details.imdb || '',
-        imdb:   details.imdbid || details.imdb || '',
-        tmdbid: details.tmdbid || details.tmdb || '',
-        tmdb:   details.tmdbid || details.tmdb || '',
+        imdbid: details.imdbid || details.imdb || '', imdb: details.imdbid || details.imdb || '',
+        tmdbid: details.tmdbid || details.tmdb || '', tmdb: details.tmdbid || details.tmdb || '',
         _translations: details.translations || {},
     };
     const result = interpolate(fmt, vars)
@@ -88,84 +84,126 @@ function generateFilename(file, details) {
     return result ? result + ext : file.filename;
 }
 
-// ============= Navigation =============
-function switchTab(tab, e) {
-    if (e) e.preventDefault();
-    document.querySelectorAll('.section').forEach(el => el.classList.remove('active'));
-    document.querySelectorAll('.nav-link').forEach(el => el.classList.remove('active'));
-    const section = document.getElementById(tab);
-    if (section) section.classList.add('active');
-    if (e && e.target) e.target.classList.add('active');
-    if (tab === 'config') loadConfig();
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function pathKey(path) { return encodeURIComponent(path); }
+function pathFromKey(key) { return decodeURIComponent(key); }
+function findFileRow(filePath) { return document.querySelector(`tr[data-file-path="${pathKey(filePath)}"]`); }
+function getVal(id) { return document.getElementById(id)?.value || ''; }
+function setVal(id, v) { const el = document.getElementById(id); if (el) el.value = v; }
+
+function postJSON(url, body) {
+    return fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+        .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); });
 }
 
-// ============= Scan =============
+// ── Navigation ────────────────────────────────────────────────────────────────
+function switchTab(tab, e) {
+    if (e) e.preventDefault();
+    if (Object.keys(pendingConfigChanges).length > 0) {
+        const cfg = { ...pendingConfigChanges };
+        pendingConfigChanges = {};
+        if (configSaveTimer) clearTimeout(configSaveTimer);
+        saveConfig(cfg);
+    }
+    document.querySelectorAll('.section').forEach(el => el.classList.remove('active'));
+    document.querySelectorAll('.nav-link').forEach(el => el.classList.remove('active'));
+    document.getElementById(tab)?.classList.add('active');
+    if (e?.target) e.target.closest('.nav-link').classList.add('active');
+    if (tab === 'config') loadConfig();
+    if (tab === 'history') loadHistory();
+}
+
+// ── Scan ──────────────────────────────────────────────────────────────────────
 function scanFiles() {
     const tbody = document.getElementById('files-tbody');
-    tbody.innerHTML = `<tr><td colspan="3" style="text-align:center;padding:20px;color:#e67e22;">◌ ${tr('scanning')}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="4" style="text-align:center;padding:20px;color:#e67e22;">◌ ${tr('scanning')}</td></tr>`;
     fetch('/api/scan')
         .then(r => { if (r.status === 401) { window.location='/login'; throw new Error('401'); } if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
         .then(data => {
             allFiles = data;
             filesPreviews = {};
-            filterFiles(currentFilter);
-            loadPreviewsAsync(data);
+            // Render le tableau d'abord, puis charger les previews
+            renderTable();
+            allFiles.forEach(file => loadPreviewForFile(file));
         })
-        .catch(e => {
-            if (!e.message.includes('401'))
-                tbody.innerHTML = `<tr><td colspan="3" class="message error">${tr('err_scan')} ${esc(e.message)}</td></tr>`;
+        .catch(e => { if (!e.message.includes('401')) tbody.innerHTML = `<tr><td colspan="4" class="message error">${tr('err_scan')} ${esc(e.message)}</td></tr>`; });
+}
+
+function loadPreviewForFile(file) {
+    filesPreviews[file.path] = { loading: true, data: null, error: null };
+    updateFileRow(file.path);
+    
+    postJSON('/api/search/auto', {
+        title: file.title,
+        filename: file.filename,
+        season: file.season,
+        episode: file.episode,
+        media_hint: file.media_type
+    })
+    .then(result => {
+        const results = result?.results || [];
+        if (!results.length) {
+            filesPreviews[file.path] = { loading: false, data: null, error: null };
+            updateFileRow(file.path);
+            return Promise.resolve();
+        }
+        
+        const top = results[0];
+        const url = result.media_type === 'movie'
+            ? `/api/movie/${top.id}?source=tvdb`
+            : `/api/tv/${top.id}?season=${file.season || 1}&episode=${file.episode || 1}&source=tvdb`;
+        
+        return fetch(url).then(r => {
+            if (!r.ok) throw new Error(`HTTP ${r.status}`);
+            return r.json();
+        }).then(details => {
+            details.imdbid = details.imdbid || top.imdb_id || '';
+            details.imdb = details.imdbid;
+            details.tmdbid = details.tmdbid || top.tmdb_id || '';
+            details.tmdb = details.tmdbid;
+            if (!details.translations || !Object.keys(details.translations).length)
+                details.translations = top.translations || {};
+            
+            filesPreviews[file.path] = { loading: false, data: { source: top, details }, error: null };
+            updateFileRow(file.path);
         });
+    })
+    .catch(e => {
+        console.error('Preview load error for', file.path, ':', e);
+        filesPreviews[file.path] = { loading: false, data: null, error: e.message };
+        updateFileRow(file.path);
+    });
 }
 
+// Deprecated: use loadPreviewForFile instead
 function loadPreviewsAsync(files) {
-    files.forEach(file => {
-        filesPreviews[file.path] = { loading: true, data: null, error: null };
-        const endpoint = file.media_type === 'movie' ? '/api/search/movie' : '/api/search/tv';
-        fetch(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title: file.title }) })
-        .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
-        .then(results => {
-            if (!results || results.length === 0) return null;
-            const top = results[0];
-            const url = file.media_type === 'movie'
-                ? `/api/movie/${top.id}?source=tvdb`
-                : `/api/tv/${top.id}?season=${file.season || 1}&episode=${file.episode || 1}&source=tvdb`;
-            return fetch(url).then(r => r.json()).then(details => {
-                details.imdbid = details.imdbid || top.imdb_id || '';
-                details.imdb   = details.imdbid;
-                details.tmdbid = details.tmdbid || top.tmdb_id || '';
-                details.tmdb   = details.tmdbid;
-                if (!details.translations || !Object.keys(details.translations).length)
-                    details.translations = top.translations || {};
-                return { source: top, details };
-            });
-        })
-        .then(data => { filesPreviews[file.path] = { loading: false, data, error: null }; updateFileRow(file); })
-        .catch(e => { filesPreviews[file.path] = { loading: false, data: null, error: e.message }; updateFileRow(file); });
-    });
+    if (!files) return;
+    files.forEach(file => loadPreviewForFile(file));
 }
 
-// ============= Render =============
-function filterFiles(type) {
-    currentFilter = type;
-    document.querySelectorAll('.filter-btn').forEach(btn => {
-        btn.classList.toggle('active',
-            (type === '' && btn.dataset.filter === '') ||
-            (type === 'movie' && btn.dataset.filter === 'movie') ||
-            (type === 'tv' && btn.dataset.filter === 'tv')
-        );
-    });
-    const filtered = type ? allFiles.filter(f => f.media_type === type) : allFiles;
+// ── Render ────────────────────────────────────────────────────────────────────
+function renderTable() {
+    const filtered = currentFilter ? allFiles.filter(f => f.media_type === currentFilter) : allFiles;
     const tbody = document.getElementById('files-tbody');
-    if (filtered.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="3" class="empty-state">${tr('no_files_found')}</td></tr>`;
+    if (!filtered.length) {
+        tbody.innerHTML = `<tr><td colspan="4" class="empty-state">${tr('no_files_found')}</td></tr>`;
         return;
     }
-    tbody.innerHTML = filtered.map((file, idx) => `
-        <tr data-idx="${idx}">
+    tbody.innerHTML = filtered.map(file => `
+        <tr data-file-path="${pathKey(file.path)}">
             <td class="file-name-cell">${esc(file.filename)}</td>
             <td class="preview-cell preview-cell-td">${renderPreview(file)}</td>
-            <td class="actions-cell actions-cell-td">${renderActions(file, idx)}</td>
+            <td class="progress-info-td">${renderProgressCell(file)}</td>
+            <td class="actions-cell actions-cell-td">${renderActions(file)}</td>
         </tr>`).join('');
+}
+
+function filterFiles(type) {
+    currentFilter = type;
+    document.querySelectorAll('.filter-btn').forEach(btn =>
+        btn.classList.toggle('active', btn.dataset.filter === type));
+    renderTable();
 }
 
 function renderPreview(file) {
@@ -188,138 +226,362 @@ function renderPreview(file) {
         </div></div>`;
 }
 
-function renderActions(file, idx) {
+function renderActions(file) {
     const p = filesPreviews[file.path];
-    if (!p || p.loading) return `<button class="btn-small search" disabled><i class="mdi mdi-loading mdi-spin"></i></button>`;
-    let html = '';
+    if (!p || p.loading) return `<div class="btn-group"><button class="btn-small search" disabled><i class="mdi mdi-loading mdi-spin"></i></button></div>`;
+    let html = '<div class="btn-group">';
     if (p.data) {
         const newName = generateFilename(file, p.data.details);
-        if (newName === file.filename) {
-            html += `<span class="btn-small" style="background:#1e3a2f;color:#5cb85c;cursor:default;"><i class="mdi mdi-check"></i>${tr('btn_ok')}</span>`;
-        } else {
-            html += `<button class="btn-small rename" onclick="doRename(${idx})"><i class="mdi mdi-pencil"></i>${tr('btn_rename')}</button>`;
-        }
+        if (newName === file.filename)
+            html += `<span class="btn-small ok-label"><i class="mdi mdi-check"></i>${tr('btn_ok')}</span>`;
+        else
+            html += `<button class="btn-small rename" onclick="doRename(decodeURIComponent('${pathKey(file.path)}'))" ><i class="mdi mdi-pencil"></i>${tr('btn_rename')}</button>`;
+        html += `<button class="btn-small move" onclick="doMove(decodeURIComponent('${pathKey(file.path)}'))" ><i class="mdi mdi-folder-move"></i>${tr('btn_move')}</button>`;
     }
-    if (renameHistory[file.path]) {
-        html += `<button class="btn-small revert" onclick="doRevert(${idx})" title="${esc(renameHistory[file.path].original_name)}"><i class="mdi mdi-undo"></i>${tr('btn_revert')}</button>`;
-    }
-    html += `<button class="btn-small search" onclick="manualSearchByIdx(${idx})"><i class="mdi mdi-magnify"></i>${tr('btn_other')}</button>`;
+    html += `<button class="btn-small search" onclick="manualSearch(decodeURIComponent('${pathKey(file.path)}'))" ><i class="mdi mdi-magnify"></i>${tr('btn_other')}</button>`;
+    html += '</div>';
     return html;
 }
 
-function updateFileRow(file) {
-    const idx = allFiles.findIndex(f => f.path === file.path);
-    if (idx === -1) return;
-    const row = document.querySelector(`tr[data-idx="${idx}"]`);
-    if (!row) return;
-    row.querySelector('.preview-cell').innerHTML = renderPreview(file);
-    row.querySelector('.actions-cell').innerHTML = renderActions(file, idx);
+function renderProgressCell(file) {
+    const p = filesPreviews[file.path];
+    if (!p || p.loading || !p.data) return '';
+    return `<div class="progress-cell"></div>`;
 }
 
-// ============= Rename / Revert =============
-function doRename(idx) {
-    const file = allFiles[idx];
+function applyPathChange(filePath, newPath, newName) {
+    const fileIdx = allFiles.findIndex(f => f.path === filePath);
+    if (fileIdx === -1) return;
+    
+    allFiles[fileIdx] = { ...allFiles[fileIdx], filename: newName, path: newPath };
+    filesPreviews[newPath] = filesPreviews[filePath];
+    delete filesPreviews[filePath];
+    
+    // Update row with new path
+    const oldRow = findFileRow(filePath);
+    if (oldRow) {
+        oldRow.setAttribute('data-file-path', pathKey(newPath));
+        oldRow.querySelector('.file-name-cell').textContent = newName;
+        oldRow.querySelector('.actions-cell').innerHTML = renderActions(allFiles[fileIdx]);
+    }
+}
+
+function updateFileRow(fileOrPath) {
+    const filePath = typeof fileOrPath === 'string' ? fileOrPath : fileOrPath.path;
+    const file = allFiles.find(f => f.path === filePath);
+    if (!file) return;
+    const row = findFileRow(filePath);
+    if (!row) return;
+    const previewCell = row.querySelector('.preview-cell-td');
+    if (previewCell) previewCell.innerHTML = renderPreview(file);
+    const actionsCell = row.querySelector('.actions-cell-td');
+    if (actionsCell) actionsCell.innerHTML = renderActions(file);
+    const progressCell = row.querySelector('.progress-info-td');
+    if (progressCell) progressCell.innerHTML = renderProgressCell(file);
+}
+
+// ── History ───────────────────────────────────────────────────────────────────
+function loadHistory() {
+    const tbody = document.getElementById('history-tbody');
+    tbody.innerHTML = `<tr><td colspan="4" style="text-align:center;padding:20px;color:#e67e22;">◌ ${tr('searching')}</td></tr>`;
+    fetch('/api/history').then(r => r.json()).then(entries => {
+        window._historyEntries = entries;
+        if (!entries.length) {
+            tbody.innerHTML = `<tr><td colspan="4" class="empty-state">${tr('hist_empty')}</td></tr>`;
+            return;
+        }
+        tbody.innerHTML = entries.map((e, i) => {
+            const opLabel = { rename: tr('hist_op_rename'), move: tr('hist_op_move'), revert: tr('hist_op_revert') }[e.op] || e.op;
+            const opClass = { rename: 'op-rename', move: 'op-move', revert: 'op-revert' }[e.op] || 'op-rename';
+            const revertBtn = e.can_revert
+                ? `<button class="btn-small revert" onclick="revertEntry(${i})"><i class="mdi mdi-undo"></i>${tr('btn_revert')}</button>` : '';
+            
+            // Check if this entry has been reverted (next entry is a revert of this one)
+            const isReverted = i > 0 && entries[i - 1]?.op === 'revert' && entries[i - 1]?.from_name === e.to_name;
+            
+            // Build status line with proper formatting
+            let statusLine = `<div class="hist-name-section">
+                <div class="hist-name-from">${esc(e.from_name)}</div>
+                <div class="hist-arrow">→</div>
+                <div class="hist-name-to">${esc(e.to_name)}</div>`;
+            
+            // Only show "Fichier introuvable" if: file can't be reverted AND it's not already reverted AND operation is not a revert
+            if (!e.can_revert && !isReverted && e.op !== 'revert') {
+                statusLine += `<div class="hist-missing-line"><i class="mdi mdi-alert-circle"></i> ${tr('hist_file_missing')}</div>`;
+            }
+            statusLine += `</div>`;
+            
+            return `<tr data-hist-idx="${i}">
+                <td class="hist-date">${esc(e.date)}</td>
+                <td><span class="hist-op ${opClass}">${opLabel}</span></td>
+                <td class="hist-combined" colspan="1">${statusLine}</td>
+                <td class="hist-actions"><div id="hist-prog-${i}">${revertBtn}</div></td>
+            </tr>`;
+        }).join('');
+    }).catch(e => { tbody.innerHTML = `<tr><td colspan="4" class="empty-state">Erreur: ${esc(e.message)}</td></tr>`; });
+}
+
+async function revertEntry(i) {
+    const entry = window._historyEntries?.[i];
+    if (!entry) return;
+    const progEl = document.getElementById(`hist-prog-${i}`);
+    if (progEl) progEl.innerHTML = `<span style="color:#e67e22">◌ ${tr('searching')}</span>`;
+    try {
+        const data = await postJSON('/api/revert', { id: entry.id });
+        if (!data.success) throw new Error(data.message);
+        if (progEl) progEl.innerHTML = `<span style="color:#27ae60">✓ ${tr('hist_reverted')}</span>`;
+        setTimeout(loadHistory, 1500);
+    } catch(e) {
+        if (progEl) progEl.innerHTML = `<span style="color:#e74c3c">✗ ${esc(e.message)}</span>`;
+    }
+}
+
+function clearHistory() {
+    document.getElementById('confirmClearModal').classList.add('active');
+}
+
+function confirmClearHistory() {
+    closeModal('confirmClearModal');
+    fetch('/api/history/clear', { method: 'POST' })
+        .then(() => loadHistory())
+        .catch(e => alert(`Erreur: ${e.message}`));
+}
+
+// ── Rename / Move ─────────────────────────────────────────────────────────────
+function doRename(filePath) {
+    const file = allFiles.find(f => f.path === filePath);
+    if (!file || !file.filename) return;
     const p = filesPreviews[file.path];
-    if (!p || !p.data) return;
+    if (!p?.data) return;
     const newName = generateFilename(file, p.data.details);
     if (newName === file.filename) return;
-    fetch('/api/rename', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: file.path, new_name: newName }) })
-    .then(r => {
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        return r.json();
-    })
-    .then(data => {
-        if (!data.success) { 
-            alert(`✗ ${tr('err_rename')}\n${data.message}`); 
-            return; 
-        }
-        const newPath = data.new_path;
-        renameHistory[newPath] = { original_path: file.path, original_name: file.filename };
-        allFiles[idx] = { ...file, filename: newName, path: newPath };
-        filesPreviews[newPath] = filesPreviews[file.path];
-        delete filesPreviews[file.path];
-        const row = document.querySelector(`tr[data-idx="${idx}"]`);
-        if (row) {
-            row.querySelector('.file-name-cell').textContent = newName;
-            row.querySelector('.actions-cell').innerHTML = renderActions(allFiles[idx], idx);
-        }
-    })
-    .catch(e => alert(`✗ ${tr('err_rename')}\n${e.message}`));
+    postJSON('/api/rename', { path: file.path, new_name: newName })
+        .then(data => {
+            if (!data.success) { alert(`✗ ${tr('err_rename')}\n${data.message}`); return; }
+            applyPathChange(file.path, data.new_path, newName);
+        })
+        .catch(e => alert(`✗ ${tr('err_rename')}\n${e.message}`));
 }
 
-function doRevert(idx) {
-    const file = allFiles[idx];
-    const hist = renameHistory[file.path];
-    if (!hist) return;
-    fetch('/api/revert', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: file.path }) })
-    .then(r => {
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        return r.json();
-    })
-    .then(data => {
-        if (!data.success) { 
-            alert(`✗ ${tr('err_revert')}\n${data.message}`); 
-            return; 
+async function doMove(filePath) {
+    const file = allFiles.find(f => f.path === filePath);
+    if (!file?.filename) return;
+    const p = filesPreviews[file.path];
+    if (!p?.data) return;
+    const newName = generateFilename(file, p.data.details);
+    try {
+        const data = await postJSON('/api/move', {
+            path: file.path,
+            new_name: newName,
+            media_type: file.media_type || 'movie'
+        });
+        if (!data.success) throw new Error(data.message);
+        const jobId = data.job_id;
+        activeTransfers[jobId] = { filePath, pollInterval: null, startTime: Date.now() };
+        markFileAsTransferring(filePath, jobId);
+        trackMoveProgress(jobId, filePath, file, newName);
+    } catch (e) {
+        alert(`✗ ${tr('err_move')}\n${e.message}`);
+    }
+}
+
+function markFileAsTransferring(filePath, jobId) {
+    const row = findFileRow(filePath);
+    if (row) {
+        row.classList.add('transferring');
+        row.setAttribute('data-job-id', jobId);
+    }
+}
+
+function unmarkFileAsTransferring(filePath) {
+    const row = findFileRow(filePath);
+    if (row) {
+        row.classList.remove('transferring');
+        row.removeAttribute('data-job-id');
+    }
+}
+
+function trackMoveProgress(jobId, filePath, file, newName) {
+    const pollInterval = setInterval(async () => {
+        try {
+            const response = await fetch(`/api/move-progress/${jobId}`);
+            const prog = await response.json();
+            updateProgressDisplay(filePath, jobId, prog);
+
+            if (prog.finished) {
+                clearInterval(pollInterval);
+                delete activeTransfers[jobId];
+                unmarkFileAsTransferring(filePath);
+
+                if (prog.error) {
+                    alert(`✗ ${tr('err_move')}\n${prog.error}`);
+                } else {
+                    waitForFileGone(filePath);
+                }
+            }
+        } catch (e) {
+            console.error('Progress poll error:', e);
         }
-        delete renameHistory[file.path];
-        allFiles[idx] = { ...file, filename: hist.original_name, path: hist.original_path };
-        filesPreviews[hist.original_path] = filesPreviews[file.path];
-        delete filesPreviews[file.path];
-        const row = document.querySelector(`tr[data-idx="${idx}"]`);
-        if (row) {
-            row.querySelector('.file-name-cell').textContent = hist.original_name;
-            row.querySelector('.actions-cell').innerHTML = renderActions(allFiles[idx], idx);
+    }, 300);
+
+    if (activeTransfers[jobId]) {
+        activeTransfers[jobId].pollInterval = pollInterval;
+    }
+}
+
+function waitForFileGone(filePath, maxAttempts = 20) {
+    let attempts = 0;
+    const check = setInterval(async () => {
+        attempts++;
+        const pct = Math.min(95, Math.round((attempts / maxAttempts) * 100));
+        const row = findFileRow(filePath);
+        const progressCell = row?.querySelector('.progress-cell');
+        if (progressCell) {
+            progressCell.innerHTML = `
+                <div class="progress-bar-container">
+                    <div class="progress-bar progress-bar--pulse" style="width:${pct}%"></div>
+                    <div class="progress-text">Vérification...</div>
+                </div>`;
         }
-    })
-    .catch(e => alert(`Erreur: ${e.message}`));
+        try {
+            const data = await fetch('/api/scan').then(r => r.json());
+            const stillPresent = data.some(f => f.path === filePath);
+            if (!stillPresent || attempts >= maxAttempts) {
+                clearInterval(check);
+                if (progressCell) {
+                    progressCell.innerHTML = `<div class="progress-done"><i class="mdi mdi-check-circle"></i> Déplacé</div>`;
+                }
+                setTimeout(() => removeFileFromList(filePath), 800);
+            }
+        } catch (e) {
+            clearInterval(check);
+            setTimeout(() => removeFileFromList(filePath), 800);
+        }
+    }, 500);
+}
+
+function removeFileFromList(filePath) {
+    // Remove from allFiles array
+    const idx = allFiles.findIndex(f => f.path === filePath);
+    if (idx >= 0) {
+        allFiles.splice(idx, 1);
+    }
+    
+    // Remove row from DOM with animation
+    const row = findFileRow(filePath);
+    if (row) {
+        row.style.opacity = '0';
+        row.style.transition = 'opacity 0.3s ease';
+        setTimeout(() => row.remove(), 300);
+    }
+}
+
+function updateProgressDisplay(filePath, jobId, prog) {
+    const row = findFileRow(filePath);
+    if (!row) return;
+    const progressCell = row.querySelector('.progress-cell');
+    if (!progressCell) return;
+
+    if (prog.finished && prog.error) {
+        progressCell.innerHTML = `<div class="progress-done progress-error-state"><i class="mdi mdi-alert-circle"></i> Erreur</div>`;
+        return;
+    }
+    if (prog.finished) {
+        progressCell.innerHTML = `<div class="progress-done"><i class="mdi mdi-check-circle"></i> Déplacé</div>`;
+        return;
+    }
+
+    const phase = prog.phase || 'copying';
+
+    // Même disque : rename instantané, pas de progression en octets disponible
+    if (phase === 'moving') {
+        progressCell.innerHTML = `
+            <div class="progress-bar-container">
+                <div class="progress-bar progress-bar--pulse" style="width:100%"></div>
+                <div class="progress-text">Déplacement...</div>
+            </div>`;
+        return;
+    }
+
+    const percent = prog.percent || 0;
+    const isCleaning = phase === 'cleaning';
+    let statsHtml = '';
+    if (!isCleaning && prog.speed > 0) {
+        statsHtml += `<span>${formatBytes(prog.speed)}/s</span>`;
+        if (prog.eta > 0) statsHtml += `<span>ETA ${formatSeconds(prog.eta)}</span>`;
+    } else if (isCleaning) {
+        statsHtml = `<span>Finalisation...</span>`;
+    }
+
+    progressCell.innerHTML = `
+        <div class="progress-bar-container">
+            <div class="progress-bar ${isCleaning ? 'progress-bar--pulse' : ''}" style="width:${percent}%"></div>
+            <div class="progress-text">${percent}%</div>
+        </div>
+        ${statsHtml ? `<div class="progress-stats">${statsHtml}</div>` : ''}`;
+}
+
+function formatBytes(bytes) {
+    if (bytes < 1024) return bytes + ' B';
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+    if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+    return (bytes / (1024 * 1024 * 1024)).toFixed(1) + ' GB';
+}
+
+function formatSeconds(seconds) {
+    if (seconds < 60) return Math.round(seconds) + 's';
+    if (seconds < 3600) return Math.round(seconds / 60) + 'm';
+    return Math.round(seconds / 3600) + 'h';
 }
 
 function renameAll() {
     const toRename = allFiles.filter(f => filesPreviews[f.path]?.data);
-    if (toRename.length === 0) { alert(tr('err_no_files')); return; }
-    toRename.forEach(file => {
-        const idx = allFiles.findIndex(f => f.path === file.path);
-        doRename(idx);
-    });
+    if (!toRename.length) { alert(tr('err_no_files')); return; }
+    toRename.forEach(file => doRename(file.path));
 }
 
-// ============= Recherche Manuelle =============
-function manualSearchByIdx(idx) {
-    const file = allFiles[idx];
+function moveAll() {
+    const toMove = allFiles.filter(f => filesPreviews[f.path]?.data);
+    if (!toMove.length) { alert(tr('err_no_files')); return; }
+    toMove.forEach(file => doMove(file.path));
+}
+
+// ── Manual Search ─────────────────────────────────────────────────────────────
+function manualSearch(filePath) {
+    const file = allFiles.find(f => f.path === filePath);
     if (!file) return;
-    const modal = document.getElementById('manualSearchModal');
-    const content = document.getElementById('manualSearchContent');
-    let title = file.filename
+    const title = file.filename
         .replace(/\.[^.]+$/, '').replace(/\s*\[[^\]]*\]/g, '')
         .replace(/\s*\([^)]{8,}\)/g, '').replace(/\s*\(\d{4}\)/g, '')
         .replace(/[._]/g, ' ').replace(/\s*[-]\s*[Ss]\d+[Ee]\d+.*/i, '')
         .replace(/\s*[Ss]\d+[Ee]\d+.*/i, '').replace(/\s*(19|20)\d{2}.*/i, '')
         .replace(/\s+/g, ' ').trim();
-    content.innerHTML = `
+    window._manualSearchFilePath = filePath;
+    document.getElementById('manualSearchContent').innerHTML = `
         <div class="form-field">
             <label>${tr('search_label')}</label>
             <input type="text" id="search-title" value="${esc(title)}" placeholder="..."
-                onkeydown="if(event.key==='Enter') executeManualSearch(${idx})">
+                onkeydown="if(event.key==='Enter') executeManualSearch()">
         </div>
-        <button class="btn btn-primary" style="width:100%" onclick="executeManualSearch(${idx})">${tr('search_btn')}</button>
+        <button class="btn btn-primary" style="width:100%" onclick="executeManualSearch()">${tr('search_btn')}</button>
         <div id="manual-results" style="margin-top:15px;"></div>`;
-    modal.classList.add('active');
+    document.getElementById('manualSearchModal').classList.add('active');
     setTimeout(() => document.getElementById('search-title')?.focus(), 100);
 }
 
-function executeManualSearch(fileIdx) {
-    const file = allFiles[fileIdx];
+function executeManualSearch() {
+    const filePath = window._manualSearchFilePath;
+    const file = allFiles.find(f => f.path === filePath);
+    if (!file) return;
     const title = document.getElementById('search-title').value.trim();
     if (!title) return;
     const resultsDiv = document.getElementById('manual-results');
     resultsDiv.innerHTML = `<div class="loading"><div class="spinner"></div>${tr('searching')}</div>`;
     const endpoint = file.media_type === 'movie' ? '/api/search/movie' : '/api/search/tv';
-    fetch(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title }) })
-    .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+    postJSON(endpoint, { title })
     .then(results => {
-        if (!results || results.length === 0) { resultsDiv.innerHTML = `<div class="message error">${tr('search_none')}</div>`; return; }
+        if (!results?.length) { resultsDiv.innerHTML = `<div class="message error">${tr('search_none')}</div>`; return; }
         window._searchResults = results;
-        window._searchFileIdx = fileIdx;
         let html = `<p style="color:#888;font-size:0.82em;margin-bottom:10px;">${results.length} ${tr('search_results')}</p><div class="search-results">`;
         results.forEach((r, i) => {
             const poster = r.poster ? `<img src="${esc(r.poster)}" alt="">` : (file.media_type === 'movie' ? '🎬' : '📺');
@@ -329,17 +591,15 @@ function executeManualSearch(fileIdx) {
                 <div class="result-year">${r.year || 'N/A'}</div>
                 <div class="result-type">TVDB #${r.id}</div></div>`;
         });
-        html += '</div>';
-        resultsDiv.innerHTML = html;
+        resultsDiv.innerHTML = html + '</div>';
     })
     .catch(e => { resultsDiv.innerHTML = `<div class="message error">${tr('err_scan')} ${esc(e.message)}</div>`; });
 }
 
 function selectResult(el) {
-    const ridx = parseInt(el.getAttribute('data-ridx'));
-    const result = window._searchResults[ridx];
-    const fileIdx = window._searchFileIdx;
-    const file = allFiles[fileIdx];
+    const result = window._searchResults[parseInt(el.getAttribute('data-ridx'))];
+    const filePath = window._manualSearchFilePath;
+    const file = allFiles.find(f => f.path === filePath);
     const resultsDiv = document.getElementById('manual-results');
     resultsDiv.innerHTML = `<div class="loading"><div class="spinner"></div></div>`;
     const url = file.media_type === 'movie'
@@ -355,18 +615,16 @@ function selectResult(el) {
         filesPreviews[file.path] = { loading: false, data: { source: result, details }, error: null };
         updateFileRow(file);
         closeModal('manualSearchModal');
-    })
-    .catch(e => { resultsDiv.innerHTML = `<div class="message error">Erreur: ${esc(e.message)}</div>`; });
+    }).catch(e => { resultsDiv.innerHTML = `<div class="message error">Erreur: ${esc(e.message)}</div>`; });
 }
 
-// ============= File Picker =============
+// ── File Picker ───────────────────────────────────────────────────────────────
 let _pickerTarget = null;
 let _pickerCurrentPath = '';
 
 function pickFolder(inputId) {
     _pickerTarget = inputId;
-    const current = document.getElementById(inputId)?.value || '';
-    browseFolder(current || null);
+    browseFolder(document.getElementById(inputId)?.value || null);
     document.getElementById('folderPickerModal').classList.add('active');
 }
 
@@ -396,88 +654,165 @@ function browseFolder(path) {
         </div>`;
         content.innerHTML = html;
         document.getElementById('picker-select-btn').onclick = () => {
-            if (_pickerTarget) document.getElementById(_pickerTarget).value = _pickerCurrentPath;
+            if (_pickerTarget) {
+                document.getElementById(_pickerTarget).value = _pickerCurrentPath;
+                scheduleSaveConfigField(_pickerTarget, _pickerCurrentPath);
+            }
             closeModal('folderPickerModal');
         };
     }).catch(e => { content.innerHTML = `<div class="message error">Erreur: ${esc(e.message)}</div>`; });
 }
 
-// ============= Modal =============
+// ── Modal ─────────────────────────────────────────────────────────────────────
 function closeModal(id) { document.getElementById(id).classList.remove('active'); }
 document.addEventListener('click', e => { if (e.target.classList.contains('modal')) e.target.classList.remove('active'); });
 
-// ============= Config =============
-function loadConfig() {
-    fetch('/api/config')
-    .then(r => { if (r.status === 401) { window.location='/login'; throw new Error('401'); } return r.json(); })
-    .then(data => {
-        setVal('tvdb_api_key', data.tvdb_api_key || '');
-        setVal('tvdb_pin', data.tvdb_pin || '');
-        setVal('movie_format', data.movie_format || '');
-        setVal('tv_format', data.tv_format || '');
-        setVal('movie_path', data.movie_path || '');
-        setVal('tv_path', data.tv_path || '');
-        setVal('password', '');
-        globalConfig.movie_format = data.movie_format || globalConfig.movie_format;
-        globalConfig.tv_format = data.tv_format || globalConfig.tv_format;
+// ── Config ────────────────────────────────────────────────────────────────────
+let configSaveTimer = null;
+let pendingConfigChanges = {};
+
+function scheduleSaveConfigField(key, value) {
+    pendingConfigChanges[key] = value;
+    if (configSaveTimer) clearTimeout(configSaveTimer);
+    configSaveTimer = setTimeout(() => {
+        const cfg = { ...pendingConfigChanges };
+        pendingConfigChanges = {};
+        saveConfig(cfg);
+    }, 500);
+}
+
+function saveConfig(cfg) {
+    postJSON('/api/config', cfg).then(data => {
+        const msg = document.getElementById('config-message');
+        if (!msg) return;
+        if (data.success) {
+            if ('movie_format' in cfg) { localStorage.setItem('cleanflick_movie_format', cfg.movie_format || ''); globalConfig.movie_format = cfg.movie_format; }
+            if ('tv_format' in cfg)    { localStorage.setItem('cleanflick_tv_format', cfg.tv_format || '');       globalConfig.tv_format = cfg.tv_format; }
+            msg.innerHTML = `<div class="message success">✓ Configuration enregistrée</div>`;
+            setTimeout(() => { if (msg) msg.innerHTML = ''; }, 2000);
+        } else {
+            msg.innerHTML = `<div class="message error">✗ ${esc(data.message)}</div>`;
+        }
+    }).catch(e => {
+        const msg = document.getElementById('config-message');
+        if (msg) msg.innerHTML = `<div class="message error">✗ Erreur: ${esc(e.message)}</div>`;
     });
 }
 
-function saveConfig() {
-    const tvdb = getVal('tvdb_api_key').trim();
-    const pwd = getVal('password');
-    const cfg = {
-        tvdb_pin: getVal('tvdb_pin'),
-        movie_format: getVal('movie_format'),
-        tv_format: getVal('tv_format'),
-        movie_path: getVal('movie_path'),
-        tv_path: getVal('tv_path'),
-    };
-    if (tvdb) cfg.tvdb_api_key = tvdb;
-    if (pwd) cfg.password = pwd;
-    fetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cfg) })
-    .then(r => r.json())
-    .then(data => {
-        const msg = document.getElementById('config-message');
-        msg.innerHTML = `<div class="message ${data.success ? 'success' : 'error'}">${data.success ? '✓' : '✗'} ${esc(data.message)}</div>`;
-        if (data.success) {
-            globalConfig.movie_format = cfg.movie_format || globalConfig.movie_format;
-            globalConfig.tv_format = cfg.tv_format || globalConfig.tv_format;
-            setTimeout(() => msg.innerHTML = '', 3000);
-        }
+function loadConfig() {
+    fetch('/api/config')
+        .then(r => { if (r.status === 401) { window.location='/login'; throw new Error('401'); } return r.json(); })
+        .then(data => {
+            ['tvdb_api_key','movie_format','tv_format','input_path','movie_output_path','tv_output_path'].forEach(k => setVal(k, data[k] || ''));
+            const mf = localStorage.getItem('cleanflick_movie_format');
+            const tf = localStorage.getItem('cleanflick_tv_format');
+            if (mf) setVal('movie_format', mf);
+            if (tf) setVal('tv_format', tf);
+            globalConfig.movie_format = getVal('movie_format') || globalConfig.movie_format;
+            globalConfig.tv_format    = getVal('tv_format')    || globalConfig.tv_format;
+        });
+}
+
+function initConfigAutoSave() {
+    [
+        { id: 'tvdb_api_key',       key: 'tvdb_api_key' },
+        { id: 'input_path',         key: 'input_path' },
+        { id: 'movie_output_path',  key: 'movie_output_path' },
+        { id: 'tv_output_path',     key: 'tv_output_path' },
+        { id: 'movie_format',       key: 'movie_format' },
+        { id: 'tv_format',          key: 'tv_format' },
+    ].forEach(({ id, key }) => {
+        document.getElementById(id)?.addEventListener('input', e => {
+            const value = e.target.value.trim();
+            if (key === 'movie_format') { localStorage.setItem('cleanflick_movie_format', value); globalConfig.movie_format = value; }
+            if (key === 'tv_format')    { localStorage.setItem('cleanflick_tv_format', value);    globalConfig.tv_format = value; }
+            scheduleSaveConfigField(key, value);
+        });
     });
 }
 
 function testKeys() {
-    const resultsDiv = document.getElementById('api-test-results');
-    resultsDiv.innerHTML = `<div class="loading"><div class="spinner"></div></div>`;
-    fetch('/api/test-keys', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tvdb_api_key: getVal('tvdb_api_key'), tvdb_pin: getVal('tvdb_pin') }) })
-    .then(r => r.json())
-    .then(data => {
-        const t = data.tvdb;
-        resultsDiv.innerHTML = `<div class="test-result ${t?.valid ? 'valid' : 'invalid'}">${esc(t?.message || 'N/A')}</div>`;
-    })
-    .catch(e => { resultsDiv.innerHTML = `<div class="test-result invalid">Erreur: ${esc(e.message)}</div>`; });
+    const btn = document.getElementById('tvdb_test_btn');
+    if (btn) { btn.classList.remove('valid', 'invalid'); btn.disabled = true; }
+    postJSON('/api/test-keys', { tvdb_api_key: getVal('tvdb_api_key') })
+        .then(data => {
+            if (btn) { btn.classList.toggle('valid', !!data.tvdb?.valid); btn.classList.toggle('invalid', !data.tvdb?.valid); btn.disabled = false; }
+        })
+        .catch(() => { if (btn) { btn.classList.add('invalid'); btn.disabled = false; } });
 }
 
-// ============= Helpers =============
-function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
-function getVal(id) { return document.getElementById(id)?.value || ''; }
-function setVal(id, v) { const el = document.getElementById(id); if (el) el.value = v; }
+// ── Init ──────────────────────────────────────────────────────────────────────
+let autoScanInterval = null;
+const AUTO_SCAN_INTERVAL = 8000;  // Scan every 8 seconds (reduced frequency)
+let lastScannedFileCount = 0;
+let lastScannedPaths = new Set();
 
-// ============= Init =============
+function startAutoScan() {
+    if (autoScanInterval) clearInterval(autoScanInterval);
+    autoScanInterval = setInterval(() => {
+        // Only auto-scan if no transfers are in progress
+        if (Object.keys(activeTransfers).length === 0) {
+            fetch('/api/scan')
+                .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+                .then(data => {
+                    // Smart comparison: only update if file count differs or paths changed
+                    const currentPaths = new Set(data.map(f => f.path));
+                    const oldPaths = new Set(allFiles.map(f => f.path));
+                    
+                    // Find new files and removed files
+                    const newFiles = data.filter(f => !oldPaths.has(f.path));
+                    const removedPaths = [...oldPaths].filter(p => !currentPaths.has(p));
+                    
+                    if (newFiles.length > 0 || removedPaths.length > 0) {
+                        // Update allFiles with new data
+                        allFiles = data;
+                        lastScannedFileCount = data.length;
+                        lastScannedPaths = currentPaths;
+                        
+                        // Only load previews for new files (don't re-scan if already previewed)
+                        if (newFiles.length > 0) {
+                            addNewFilesToTable(newFiles);
+                            loadPreviewsAsync(newFiles);
+                        }
+                        
+                        // Remove files that no longer exist from UI
+                        if (removedPaths.length > 0) {
+                            removedPaths.forEach(path => {
+                                const row = findFileRow(path);
+                                if (row) row.remove();
+                            });
+                        }
+                    }
+                })
+                .catch(e => console.log('Auto-scan error:', e));
+        }
+    }, AUTO_SCAN_INTERVAL);
+}
+
+function addNewFilesToTable(newFiles) {
+    renderTable();
+}
+
+function stopAutoScan() {
+    if (autoScanInterval) {
+        clearInterval(autoScanInterval);
+        autoScanInterval = null;
+    }
+}
+
 document.addEventListener('DOMContentLoaded', () => {
-    // Appliquer les traductions i18n si disponibles
     if (typeof applyTranslations === 'function') applyTranslations();
-
-    // Charger config + historique puis scanner
-    Promise.all([
-        fetch('/api/config').then(r => { if (r.status === 401) { window.location='/login'; throw new Error('401'); } return r.json(); }),
-        fetch('/api/rename-history').then(r => r.ok ? r.json() : {})
-    ]).then(([cfg, hist]) => {
-        if (cfg.movie_format) globalConfig.movie_format = cfg.movie_format;
-        if (cfg.tv_format) globalConfig.tv_format = cfg.tv_format;
-        renameHistory = hist || {};
-        scanFiles();
-    }).catch(e => { if (!e.message.includes('401')) scanFiles(); });
+    initConfigAutoSave();
+    fetch('/api/config')
+        .then(r => { if (r.status === 401) { window.location='/login'; throw new Error('401'); } return r.json(); })
+        .then(cfg => {
+            if (cfg.movie_format) globalConfig.movie_format = cfg.movie_format;
+            if (cfg.tv_format)    globalConfig.tv_format    = cfg.tv_format;
+            scanFiles();
+            startAutoScan();
+        })
+        .catch(e => { if (!e.message.includes('401')) {
+            scanFiles();
+            startAutoScan();
+        } });
 });
