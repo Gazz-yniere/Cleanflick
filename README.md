@@ -273,6 +273,21 @@ environment:
 
 ## Changelog
 
+### [1.0.5] - 2026-08-11
+
+**Added**
+- Backend-driven move/copy naming is now anchored on the file currently selected from the source path.
+- A confirmation modal appears when the live file name differs from the generated search suggestion, so the user can confirm or cancel the move before the operation starts.
+- The UI now flags reverted history entries via a server-provided `is_reverted` field instead of trying to infer rollback state from adjacent history rows.
+
+**Changed**
+- The frontend now limits preview loading concurrency and reduces the polling frequency used by move progress updates.
+- Move requests do not rely on a `new_name` proposal in the payload, which keeps transfer targets aligned with the actual file discovered on disk.
+
+**Fixed**
+- History rendering no longer shows a false "Fichier introuvable" marker for a successfully reverted file.
+- The move dialog/progress contract is now consistent with the real file operations and the service-side progress payload.
+
 ### [1.0.4] - 2026-06-18
 
 **Added**

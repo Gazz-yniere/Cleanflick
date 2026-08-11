@@ -6,6 +6,11 @@ let allFiles = [];
 let filesPreviews = {};
 let globalConfig = { movie_format: '{n} ({y})', tv_format: '{n} - {s00e00} - {t}' };
 let activeTransfers = {};  // job_id -> { idx, pollInterval, startTime }
+let scanEventSource = null;
+let pendingMoveNameMismatch = null;
+const PREVIEW_PARALLELISM = 4;
+let previewQueue = [];
+let activePreviewLoads = 0;
 
 // ── i18n ──────────────────────────────────────────────────────────────────────
 function tr(key) {
@@ -123,18 +128,40 @@ function scanFiles() {
         .then(data => {
             allFiles = data;
             filesPreviews = {};
-            // Render le tableau d'abord, puis charger les previews
             renderTable();
-            allFiles.forEach(file => loadPreviewForFile(file));
+            allFiles.forEach(file => enqueuePreview(file));
         })
         .catch(e => { if (!e.message.includes('401')) tbody.innerHTML = `<tr><td colspan="4" class="message error">${tr('err_scan')} ${esc(e.message)}</td></tr>`; });
 }
 
-function loadPreviewForFile(file) {
+function enqueuePreview(file) {
+    if (!file?.path) return;
+    if (filesPreviews[file.path]?.loading) return;
     filesPreviews[file.path] = { loading: true, data: null, error: null };
     updateFileRow(file.path);
-    
-    postJSON('/api/search/auto', {
+    previewQueue.push(file);
+    flushPreviewQueue();
+}
+
+function flushPreviewQueue() {
+    while (previewQueue.length && activePreviewLoads < PREVIEW_PARALLELISM) {
+        const next = previewQueue.shift();
+        if (!next?.path) continue;
+        activePreviewLoads += 1;
+        loadPreviewForFile(next)
+            .finally(() => {
+                activePreviewLoads -= 1;
+                flushPreviewQueue();
+            });
+    }
+}
+
+function loadPreviewForFile(file) {
+    if (!file?.path) return Promise.resolve();
+    filesPreviews[file.path] = { loading: true, data: null, error: null };
+    updateFileRow(file.path);
+
+    return postJSON('/api/search/auto', {
         title: file.title,
         filename: file.filename,
         season: file.season,
@@ -148,12 +175,12 @@ function loadPreviewForFile(file) {
             updateFileRow(file.path);
             return Promise.resolve();
         }
-        
+
         const top = results[0];
         const url = result.media_type === 'movie'
             ? `/api/movie/${top.id}?source=tvdb`
             : `/api/tv/${top.id}?season=${file.season || 1}&episode=${file.episode || 1}&source=tvdb`;
-        
+
         return fetch(url).then(r => {
             if (!r.ok) throw new Error(`HTTP ${r.status}`);
             return r.json();
@@ -164,7 +191,7 @@ function loadPreviewForFile(file) {
             details.tmdb = details.tmdbid;
             if (!details.translations || !Object.keys(details.translations).length)
                 details.translations = top.translations || {};
-            
+
             filesPreviews[file.path] = { loading: false, data: { source: top, details }, error: null };
             updateFileRow(file.path);
         });
@@ -296,8 +323,7 @@ function loadHistory() {
             const revertBtn = e.can_revert
                 ? `<button class="btn-small revert" onclick="revertEntry(${i})"><i class="mdi mdi-undo"></i>${tr('btn_revert')}</button>` : '';
             
-            // Check if this entry has been reverted (next entry is a revert of this one)
-            const isReverted = i > 0 && entries[i - 1]?.op === 'revert' && entries[i - 1]?.from_name === e.to_name;
+            const isReverted = Boolean(e.is_reverted || false);
             
             // Build status line with proper formatting
             let statusLine = `<div class="hist-name-section">
@@ -363,23 +389,51 @@ function doRename(filePath) {
         .catch(e => alert(`✗ ${tr('err_rename')}\n${e.message}`));
 }
 
+function openMoveNameMismatchModal(file, proposedName) {
+    const modal = document.getElementById('confirmMoveNameMismatchModal');
+    if (!modal) return false;
+    const actualName = file?.filename || '';
+    document.getElementById('moveCurrentFilename').textContent = actualName;
+    document.getElementById('moveProposedFilename').textContent = proposedName || actualName;
+    pendingMoveNameMismatch = { filePath: file.path, file, proposedName };
+    modal.classList.add('active');
+    return true;
+}
+
+function confirmMoveNameMismatch() {
+    if (!pendingMoveNameMismatch) return;
+    closeModal('confirmMoveNameMismatchModal');
+    const { filePath, file, proposedName } = pendingMoveNameMismatch;
+    pendingMoveNameMismatch = null;
+    runMove(filePath, file, proposedName);
+}
+
 async function doMove(filePath) {
     const file = allFiles.find(f => f.path === filePath);
     if (!file?.filename) return;
     const p = filesPreviews[file.path];
     if (!p?.data) return;
-    const newName = generateFilename(file, p.data.details);
+
+    const proposedName = generateFilename(file, p.data.details);
+    if (proposedName && file.filename && proposedName.trim().toLowerCase() !== file.filename.trim().toLowerCase()) {
+        openMoveNameMismatchModal(file, proposedName);
+        return;
+    }
+
+    await runMove(filePath, file, proposedName || file.filename);
+}
+
+async function runMove(filePath, file, proposedName) {
     try {
         const data = await postJSON('/api/move', {
             path: file.path,
-            new_name: newName,
             media_type: file.media_type || 'movie'
         });
         if (!data.success) throw new Error(data.message);
         const jobId = data.job_id;
         activeTransfers[jobId] = { filePath, pollInterval: null, startTime: Date.now() };
         markFileAsTransferring(filePath, jobId);
-        trackMoveProgress(jobId, filePath, file, newName);
+        trackMoveProgress(jobId, filePath, file, data.new_name || proposedName || file.filename);
     } catch (e) {
         alert(`✗ ${tr('err_move')}\n${e.message}`);
     }
@@ -414,50 +468,27 @@ function trackMoveProgress(jobId, filePath, file, newName) {
                 unmarkFileAsTransferring(filePath);
 
                 if (prog.error) {
-                    alert(`✗ ${tr('err_move')}\n${prog.error}`);
-                } else {
-                    waitForFileGone(filePath);
+                    const row = findFileRow(filePath);
+                    const progressCell = row?.querySelector('.progress-cell');
+                    if (progressCell) progressCell.innerHTML = `<div class="progress-done progress-error-state"><i class="mdi mdi-alert-circle"></i> ${esc(prog.error)}</div>`;
+                    return;
                 }
-            }
-        } catch (e) {
-            console.error('Progress poll error:', e);
-        }
-    }, 300);
 
-    if (activeTransfers[jobId]) {
-        activeTransfers[jobId].pollInterval = pollInterval;
-    }
-}
-
-function waitForFileGone(filePath, maxAttempts = 20) {
-    let attempts = 0;
-    const check = setInterval(async () => {
-        attempts++;
-        const pct = Math.min(95, Math.round((attempts / maxAttempts) * 100));
-        const row = findFileRow(filePath);
-        const progressCell = row?.querySelector('.progress-cell');
-        if (progressCell) {
-            progressCell.innerHTML = `
-                <div class="progress-bar-container">
-                    <div class="progress-bar progress-bar--pulse" style="width:${pct}%"></div>
-                    <div class="progress-text">Vérification...</div>
-                </div>`;
-        }
-        try {
-            const data = await fetch('/api/scan').then(r => r.json());
-            const stillPresent = data.some(f => f.path === filePath);
-            if (!stillPresent || attempts >= maxAttempts) {
-                clearInterval(check);
+                const row = findFileRow(filePath);
+                const progressCell = row?.querySelector('.progress-cell');
                 if (progressCell) {
                     progressCell.innerHTML = `<div class="progress-done"><i class="mdi mdi-check-circle"></i> Déplacé</div>`;
                 }
                 setTimeout(() => removeFileFromList(filePath), 800);
             }
         } catch (e) {
-            clearInterval(check);
-            setTimeout(() => removeFileFromList(filePath), 800);
+            console.error('Progress poll error:', e);
         }
     }, 500);
+
+    if (activeTransfers[jobId]) {
+        activeTransfers[jobId].pollInterval = pollInterval;
+    }
 }
 
 function removeFileFromList(filePath) {
@@ -492,30 +523,15 @@ function updateProgressDisplay(filePath, jobId, prog) {
     }
 
     const phase = prog.phase || 'copying';
+    const percent = Math.max(0, Math.min(100, Number(prog.percent) || 0));
 
-    // Même disque : rename instantané, pas de progression en octets disponible
-    if (phase === 'moving') {
-        progressCell.innerHTML = `
-            <div class="progress-bar-container">
-                <div class="progress-bar progress-bar--pulse" style="width:100%"></div>
-                <div class="progress-text">Déplacement...</div>
-            </div>`;
-        return;
-    }
-
-    const percent = prog.percent || 0;
-    const isCleaning = phase === 'cleaning';
-    let statsHtml = '';
-    if (!isCleaning && prog.speed > 0) {
-        statsHtml += `<span>${formatBytes(prog.speed)}/s</span>`;
-        if (prog.eta > 0) statsHtml += `<span>ETA ${formatSeconds(prog.eta)}</span>`;
-    } else if (isCleaning) {
-        statsHtml = `<span>Finalisation...</span>`;
-    }
+    const statsHtml = prog.speed > 0
+        ? `<span>${formatBytes(prog.speed)}/s</span>${prog.eta > 0 ? `<span>ETA ${formatSeconds(prog.eta)}</span>` : ''}`
+        : '';
 
     progressCell.innerHTML = `
         <div class="progress-bar-container">
-            <div class="progress-bar ${isCleaning ? 'progress-bar--pulse' : ''}" style="width:${percent}%"></div>
+            <div class="progress-bar ${phase === 'copying' ? '' : 'progress-bar--pulse'}" style="width:${percent}%"></div>
             <div class="progress-text">${percent}%</div>
         </div>
         ${statsHtml ? `<div class="progress-stats">${statsHtml}</div>` : ''}`;
@@ -742,51 +758,19 @@ function testKeys() {
 }
 
 // ── Init ──────────────────────────────────────────────────────────────────────
+// No periodic auto-scan is enabled. A new file discovery on disk is not observable
+// from the browser runtime itself, so the page is initialized with a one-shot scan only.
 let autoScanInterval = null;
-const AUTO_SCAN_INTERVAL = 8000;  // Scan every 8 seconds (reduced frequency)
+const AUTO_SCAN_INTERVAL = 0;
 let lastScannedFileCount = 0;
 let lastScannedPaths = new Set();
 
 function startAutoScan() {
-    if (autoScanInterval) clearInterval(autoScanInterval);
-    autoScanInterval = setInterval(() => {
-        // Only auto-scan if no transfers are in progress
-        if (Object.keys(activeTransfers).length === 0) {
-            fetch('/api/scan')
-                .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
-                .then(data => {
-                    // Smart comparison: only update if file count differs or paths changed
-                    const currentPaths = new Set(data.map(f => f.path));
-                    const oldPaths = new Set(allFiles.map(f => f.path));
-                    
-                    // Find new files and removed files
-                    const newFiles = data.filter(f => !oldPaths.has(f.path));
-                    const removedPaths = [...oldPaths].filter(p => !currentPaths.has(p));
-                    
-                    if (newFiles.length > 0 || removedPaths.length > 0) {
-                        // Update allFiles with new data
-                        allFiles = data;
-                        lastScannedFileCount = data.length;
-                        lastScannedPaths = currentPaths;
-                        
-                        // Only load previews for new files (don't re-scan if already previewed)
-                        if (newFiles.length > 0) {
-                            addNewFilesToTable(newFiles);
-                            loadPreviewsAsync(newFiles);
-                        }
-                        
-                        // Remove files that no longer exist from UI
-                        if (removedPaths.length > 0) {
-                            removedPaths.forEach(path => {
-                                const row = findFileRow(path);
-                                if (row) row.remove();
-                            });
-                        }
-                    }
-                })
-                .catch(e => console.log('Auto-scan error:', e));
-        }
-    }, AUTO_SCAN_INTERVAL);
+    // Keep it inert: only an explicit scan/reset should refresh the list.
+    if (autoScanInterval) {
+        clearInterval(autoScanInterval);
+    }
+    autoScanInterval = null;
 }
 
 function addNewFilesToTable(newFiles) {
@@ -803,16 +787,36 @@ function stopAutoScan() {
 document.addEventListener('DOMContentLoaded', () => {
     if (typeof applyTranslations === 'function') applyTranslations();
     initConfigAutoSave();
+
+    if (window.EventSource) {
+        try {
+            scanEventSource = new EventSource('/api/scan/events');
+            scanEventSource.addEventListener('message', (event) => {
+                try {
+                    const data = JSON.parse(event.data || '{}');
+                    if (data.event === 'scan-refresh') {
+                        scanFiles();
+                    }
+                } catch (e) {
+                    console.warn('Bad scan refresh payload', e);
+                }
+            });
+            scanEventSource.onerror = () => {
+                console.warn('Scan refresh stream disconnected');
+            };
+        } catch (e) {
+            console.warn('Scan refresh SSE unavailable', e);
+        }
+    }
+
     fetch('/api/config')
         .then(r => { if (r.status === 401) { window.location='/login'; throw new Error('401'); } return r.json(); })
         .then(cfg => {
             if (cfg.movie_format) globalConfig.movie_format = cfg.movie_format;
             if (cfg.tv_format)    globalConfig.tv_format    = cfg.tv_format;
             scanFiles();
-            startAutoScan();
         })
         .catch(e => { if (!e.message.includes('401')) {
             scanFiles();
-            startAutoScan();
         } });
 });

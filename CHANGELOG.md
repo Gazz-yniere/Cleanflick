@@ -1,5 +1,24 @@
 # Changelog
 
+## [1.0.5] - 2026-08-11
+
+### Added
+- Backend-driven transfer movement now accepts the current on-disk file name as the source of truth for the target name during move and copy operations.
+- A dedicated confirmation modal warns when the current file name differs from the search suggestion that generated the preview rename proposal.
+- History rendering now uses a server-side `is_reverted` signal to indicate that a move has been rolled back instead of inferring the state from the row order.
+
+### Changed
+- Move operations now always use the active filename as the file to transfer instead of trusting the front-end `new_name` proposal payload.
+- The frontend now batches preview loading to avoid saturating the browser with search/detail requests at startup.
+- The transfer-progress poll interval was relaxed to reduce unnecessary network churn.
+
+### Fixed
+- Revert history entries no longer inherit an incorrect “Fichier introuvable” visual state from a sibling row.
+- The move progress UI no longer assumes a fake `moving` phase should drive a 100% static bar for a copy/move operation.
+- The backend now exposes a live transfer `progress` contract backed by bytes copied and percentage growth.
+
+---
+
 ## [1.0.4] - 2026-06-18
 
 ### Added

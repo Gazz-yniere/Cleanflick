@@ -15,9 +15,26 @@ class MediaFile:
     year: int = None
 
 class MediaScanner:
-    def __init__(self, input_path: str = "/downloads"):
+    def __init__(self, input_path: str = "/downloads", ignored_paths: list[str] | None = None):
         self.input_path = input_path
-        
+        self.ignored_paths = []
+        for p in (ignored_paths or []):
+            if p:
+                try:
+                    self.ignored_paths.append(os.path.abspath(str(p)))
+                except Exception:
+                    pass
+
+    def _is_ignored(self, path: str) -> bool:
+        candidate = os.path.abspath(path)
+        for ignored in self.ignored_paths:
+            try:
+                if candidate == ignored or os.path.commonpath([candidate, ignored]) == ignored:
+                    return True
+            except ValueError:
+                pass
+        return False
+
     def scan(self) -> List[MediaFile]:
         """Scanne les dossiers récursivement"""
         if not os.path.exists(self.input_path):
@@ -29,6 +46,8 @@ class MediaScanner:
         files = []
         try:
             for entry in sorted(os.scandir(path), key=lambda e: e.name.lower()):
+                if self._is_ignored(entry.path):
+                    continue
                 if entry.is_dir(follow_symlinks=False):
                     files += self._scan_dir(entry.path)
                 elif entry.is_file() and self._is_video(entry.name):

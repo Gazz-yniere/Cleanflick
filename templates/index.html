@@ -253,7 +253,7 @@
 
     <footer class="app-footer">
         <span data-i18n="footer_text"></span>
-        <span class="footer-meta">· <a href="https://github.com/Gazz-yniere/Cleanflick" target="_blank">GitHub</a> · v1.0.4</span>
+        <span class="footer-meta">· <a href="https://github.com/Gazz-yniere/Cleanflick" target="_blank">GitHub</a> · v1.0.5</span>
     </footer>
 </div>
 
@@ -265,6 +265,29 @@
             <button class="close-btn" onclick="closeModal('manualSearchModal')">&times;</button>
         </div>
         <div id="manualSearchContent"></div>
+    </div>
+</div>
+
+<!-- Modal Confirm Move Name Mismatch -->
+<div id="confirmMoveNameMismatchModal" class="modal">
+    <div class="modal-content modal-content--narrow">
+        <div class="modal-header">
+            <h2><i class="mdi mdi-alert-circle-outline"></i> Déplacement du fichier</h2>
+            <button class="close-btn" onclick="closeModal('confirmMoveNameMismatchModal')">&times;</button>
+        </div>
+        <p style="color:var(--c-text2);margin-bottom:12px;">
+            Le nom du fichier détecté sur le disque est <strong id="moveCurrentFilename"></strong>.
+        </p>
+        <p style="color:var(--c-text2);margin-bottom:20px;">
+            Le nom proposé pour la recherche est <strong id="moveProposedFilename"></strong>.
+        </p>
+        <p style="color:var(--c-text2);margin-bottom:20px;">
+            Êtes-vous sûr de vouloir déplacer ce fichier avec ce nom ?
+        </p>
+        <div style="display:flex;gap:10px;justify-content:flex-end;">
+            <button class="btn btn-secondary" onclick="closeModal('confirmMoveNameMismatchModal')">Annuler</button>
+            <button class="btn btn-primary" id="confirm-move-name-btn" onclick="confirmMoveNameMismatch()">Déplacer</button>
+        </div>
     </div>
 </div>
 

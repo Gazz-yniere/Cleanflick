@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, jsonify, session, redirect
+from flask import Flask, render_template, request, jsonify, session, redirect, Response
 from functools import wraps
 import json, os, re, time, requests, logging, shutil, threading, uuid
 from pathlib import Path
@@ -12,6 +12,10 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', os.urandom(24))
 app.config['JSON_SORT_KEYS'] = False
+
+scan_clients = set()
+scan_last_snapshot = None
+scan_watch_lock = threading.Lock()
 
 CONFIG_FILE = "config.json"
 HISTORY_FILE = "rename_history.json"
@@ -86,9 +90,10 @@ def _move_path(source_path, destination_path, job_id=None):
     src, dst = os.path.abspath(source_path), os.path.abspath(destination_path)
     if src == dst:
         return dst
+
     _ensure_dir(os.path.dirname(dst))
     if os.path.exists(dst):
-        raise FileExistsError(f"La destination existe déjà: {dst}")
+        os.remove(dst)
 
     if job_id is None:
         return shutil.move(src, dst)
@@ -100,6 +105,7 @@ def _move_path(source_path, destination_path, job_id=None):
             512*1024
 
     copied, last_update, last_copied, speed_avg = 0, time.time(), 0, 0
+    start = time.time()
     try:
         with open(src, 'rb') as f_in, open(dst, 'wb') as f_out:
             while buf := f_in.read(chunk):
@@ -112,17 +118,24 @@ def _move_path(source_path, destination_path, job_id=None):
                     interval_speed = (copied - last_copied) / elapsed if elapsed > 0 else 0
                     speed_avg = interval_speed if speed_avg == 0 else speed_avg * 0.7 + interval_speed * 0.3
                     eta = (file_size - copied) / speed_avg if speed_avg > 0 else 0
+                    percent = round((copied / file_size) * 100) if file_size else 0
                     move_progress[job_id].update({
                         'copied': copied, 'file_size': file_size,
-                        'percent': round(copied / file_size * 100) if file_size else 0,
+                        'percent': percent,
                         'speed': round(speed_avg), 'eta': round(eta),
+                        'phase': 'copying', 'finished': False,
+                        'elapsed': round(now - start, 2),
                     })
                     last_update, last_copied = now, copied
         try:
             os.fsync(os.open(dst, os.O_RDONLY))
         except Exception:
             pass
+        if not os.path.exists(dst):
+            raise FileNotFoundError(f"Le fichier de destination n'a pas été créé : {dst}")
         os.remove(src)
+        if os.path.exists(src):
+            raise FileExistsError(f"Le fichier source n'a pas quitté le dossier source : {src}")
     except Exception:
         if os.path.exists(dst):
             os.remove(dst)
@@ -169,11 +182,54 @@ def save_config(cfg):
 # ── App state ─────────────────────────────────────────────────────────────────
 
 config = load_config()
-scanner = MediaScanner(config['_input_path'])
+scanner = MediaScanner(config['_input_path'], [config.get('_movie_output_path'), config.get('_tv_output_path')])
 api_handler = APIHandler(config)
 rename_engine = RenameEngine(config)
 scanned_files = []
 move_progress = {}  # job_id -> progress dict
+
+# Watch the input folder from the backend and only trigger UI refresh on a true filesystem change.
+def _scan_snapshot():
+    try:
+        files = scanner.scan()
+        return tuple(sorted(f.path for f in files))
+    except Exception as e:
+        logger.warning(f"Scan snapshot error: {e}")
+        return tuple()
+
+
+def _broadcast_scan_refresh():
+    payload = json.dumps({'event': 'scan-refresh', 'ts': time.time()})
+    dead = []
+    for client in list(scan_clients):
+        try:
+            client.put(payload)
+        except Exception:
+            dead.append(client)
+    for client in dead:
+        try:
+            scan_clients.remove(client)
+        except Exception:
+            pass
+
+
+def _scan_watcher():
+    global scan_last_snapshot
+    while True:
+        try:
+            current = _scan_snapshot()
+            with scan_watch_lock:
+                previous = scan_last_snapshot or tuple()
+                added = set(current) - set(previous)
+                if added and current:
+                    _broadcast_scan_refresh()
+                    logger.info(f"New input files detected: {len(added)}")
+                scan_last_snapshot = current
+        except Exception as e:
+            logger.warning(f"Input watcher error: {e}")
+        time.sleep(1.5)
+
+threading.Thread(target=_scan_watcher, daemon=True).start()
 
 # ── Progress helper ───────────────────────────────────────────────────────────
 
@@ -184,24 +240,45 @@ def _make_progress(file_size=0, finished=False, error=None, phase='copying', **e
 
 def _run_file_op(job_id, src_path, dst_path, history_entry):
     file_size = os.path.getsize(src_path)
-    same_drive = os.path.splitdrive(os.path.abspath(src_path))[0].lower() == \
-                 os.path.splitdrive(os.path.abspath(dst_path))[0].lower()
-    move_progress[job_id] = _make_progress(file_size, phase='moving' if same_drive else 'copying')
+    move_progress[job_id] = _make_progress(
+        file_size,
+        phase='copying',
+        percent=0,
+        copied=0,
+        speed=0,
+        eta=0,
+    )
+
     def _run():
         try:
-            if same_drive:
-                # Atomic rename on same drive — no byte-level progress available
-                shutil.move(src_path, dst_path)
+            _move_path(src_path, dst_path, job_id=job_id)
+            source_exists = os.path.exists(src_path)
+            target_exists = os.path.exists(dst_path)
+            if target_exists and not source_exists:
+                verified = True
+                move_progress[job_id] = _make_progress(
+                    file_size, finished=True, phase='done',
+                    copied=file_size, percent=100,
+                    new_path=dst_path, new_name=Path(dst_path).name,
+                    verified=True,
+                    source_exists=False,
+                    target_exists=True,
+                    destination=dst_path,
+                    source=src_path,
+                )
+                append_history(history_entry)
             else:
-                _move_path(src_path, dst_path, job_id=job_id)
-            append_history(history_entry)
-            move_progress[job_id] = _make_progress(
-                file_size, finished=True, phase='done',
-                copied=file_size, percent=100,
-                new_path=dst_path, new_name=Path(dst_path).name
-            )
+                raise FileNotFoundError(f"Vérification impossible après déplacement : {src_path} -> {dst_path}")
         except Exception as e:
-            move_progress[job_id] = _make_progress(file_size, finished=True, error=str(e), phase='error')
+            move_progress[job_id] = _make_progress(
+                file_size,
+                finished=True,
+                error=str(e),
+                phase='error',
+                verified=False,
+                source_exists=os.path.exists(src_path),
+                target_exists=os.path.exists(dst_path),
+            )
     threading.Thread(target=_run, daemon=True).start()
     return file_size
 
@@ -259,6 +336,33 @@ def api_scan():
         'media_type': f.media_type, 'title': f.title,
         'season': f.season, 'episode': f.episode, 'year': f.year
     } for f in scanned_files])
+
+@app.route('/api/scan/events')
+@login_required
+def api_scan_events():
+    import queue
+    q = queue.Queue()
+    scan_clients.add(q)
+
+    def stream():
+        try:
+            while True:
+                try:
+                    payload = q.get(timeout=1)
+                    yield f'data: {payload}\n\n'
+                except Exception:
+                    yield ': keepalive\n\n'
+        finally:
+            try:
+                scan_clients.remove(q)
+            except Exception:
+                pass
+
+    return Response(stream(), mimetype='text/event-stream', headers={
+        'Cache-Control': 'no-cache',
+        'X-Accel-Buffering': 'no',
+        'Connection': 'keep-alive'
+    })
 
 @app.route('/api/search/auto', methods=['POST'])
 @login_required
@@ -320,20 +424,36 @@ def api_rename():
 def api_move():
     d = request.json or {}
     old_path = Path(d.get('path'))
-    new_name = d.get('new_name') or old_path.name
+
+    # Le déplacement / copie utilise le fichier courant trouvé sur disque.
+    # Le nom proposé par la recherche est une suggestion de renommage UI,
+    # pas une base de vérité pour l'écriture du mouvement côté backend.
+    new_name = old_path.name
     media_type = d.get('media_type') or d.get('type') or 'movie'
     job_id = str(uuid.uuid4())
 
-    if media_type == 'tv':
-        target_dir = Path(config.get('_tv_output_path') or config.get('tv_output_path')) / _series_folder_name(new_name)
-    else:
-        target_dir = Path(config.get('_movie_output_path') or config.get('movie_output_path'))
-    new_path = target_dir / new_name
-
     if not old_path.exists():
         return jsonify({"success": False, "message": "Fichier source introuvable"}), 400
+
+    if media_type == 'tv':
+        folder_source = Path(old_path).stem
+        target_dir = Path(config.get('_tv_output_path') or config.get('tv_output_path')) / _series_folder_name(folder_source)
+    else:
+        target_dir = Path(config.get('_movie_output_path') or config.get('movie_output_path'))
+
+    new_path = target_dir / new_name
+
+    # Le doublon n'est plus un blocage métier ; on le remplace proprement à l'écriture.
     if new_path.exists():
-        return jsonify({"success": False, "message": f"La destination existe déjà: {new_path}"}), 400
+        try:
+            os.remove(new_path)
+        except Exception as e:
+            return jsonify({"success": False, "message": f"Impossible de remplacer la destination: {e}"}), 400
+
+    try:
+        _ensure_dir(str(target_dir))
+    except Exception as e:
+        return jsonify({"success": False, "message": f"Impossible de créer le dossier destination: {e}"}), 400
 
     file_size = _run_file_op(job_id, str(old_path), str(new_path), {
         'id': job_id, 'op': 'move',
@@ -349,10 +469,9 @@ def api_move_progress(job_id):
     prog = move_progress.get(job_id)
     if prog is None:
         return jsonify({'finished': True, 'percent': 100, 'copied': 0, 'file_size': 0,
-                        'speed': 0, 'eta': 0, 'elapsed': 0, 'error': None})
-    resp = {k: prog.get(k) for k in ('finished', 'percent', 'copied', 'file_size', 'speed', 'eta', 'elapsed', 'error', 'phase', 'new_path', 'new_name')}
-    if prog.get('finished'):
-        move_progress.pop(job_id, None)
+                        'speed': 0, 'eta': 0, 'elapsed': 0, 'error': None,
+                        'verified': True, 'source_exists': False, 'target_exists': True})
+    resp = {k: prog.get(k) for k in ('finished', 'percent', 'copied', 'file_size', 'speed', 'eta', 'elapsed', 'error', 'phase', 'new_path', 'new_name', 'verified', 'source_exists', 'target_exists')}
     return jsonify(resp)
 
 @app.route('/api/revert', methods=['POST'])
@@ -366,8 +485,12 @@ def api_revert():
         return jsonify({"success": False, "message": "Entrée introuvable"}), 404
     if not os.path.exists(entry['to_path']):
         return jsonify({"success": False, "message": "Fichier introuvable sur le disque"}), 400
+
     if os.path.exists(entry['from_path']):
-        return jsonify({"success": False, "message": f"La destination existe déjà: {entry['from_path']}"}), 400
+        try:
+            os.remove(entry['from_path'])
+        except Exception as e:
+            return jsonify({"success": False, "message": f"Impossible de remplacer la destination: {e}"}), 400
 
     job_id = str(uuid.uuid4())
     file_size = _run_file_op(job_id, entry['to_path'], entry['from_path'], {
@@ -385,6 +508,10 @@ def api_revert():
 def api_history():
     history = load_history()
     for e in history:
+        e['is_reverted'] = any(
+            candidate.get('op') == 'revert' and candidate.get('revert_of') == e.get('id')
+            for candidate in history
+        )
         e['can_revert'] = (e.get('op') != 'revert' and
                            os.path.exists(e.get('to_path', '')) and
                            not os.path.exists(e.get('from_path', '')))
@@ -422,7 +549,10 @@ def api_set_config():
             config[key] = val
     save_config(config)
     config = load_config()
-    scanner = MediaScanner(config['_input_path'])
+    scanner = MediaScanner(
+        config['_input_path'],
+        [config.get('_movie_output_path'), config.get('_tv_output_path')]
+    )
     api_handler = APIHandler(config)
     rename_engine = RenameEngine(config)
     return jsonify({"success": True, "message": "Configuration sauvegardée"})

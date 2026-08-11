@@ -26,6 +26,7 @@ output/
 *.swo
 *~
 .env
+RELEASE_1.0.5.md
 
 # Archive fichiers non essentiels
 _archive/
