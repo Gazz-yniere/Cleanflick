@@ -29,5 +29,8 @@ output/
 RELEASE_1.0.5.md
 cleanflick.db
 
+# Backups
+*.backup
+
 # Archive fichiers non essentiels
 _archive/

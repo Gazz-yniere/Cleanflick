@@ -9,7 +9,7 @@ services:
     volumes:
       - ./downloads:/downloads
       - ./config.json:/app/config.json
-      - ./rename_history.json:/app/rename_history.json
+      - ./cleanflick.db:/app/cleanflick.db
       # Dossier de stockage des films (hôte:conteneur)
       - ./output/movies:/movies
       # Dossier de stockage des séries (hôte:conteneur)
