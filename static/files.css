@@ -2,10 +2,10 @@
 .header-logo { height: 48px; width: auto; }
 
 /* ── Table column widths ─────────────────────────────────────────────────── */
-.col-file    { width: 18%; }
-.col-preview { width: 42%; }
+.col-file     { width: 18%; }
+.col-preview  { width: 46%; }
 .col-progress { width: 18%; }
-.col-actions { width: 22%; }
+.col-actions  { width: 18%; }
 .col-hist-date    { width: 12%; }
 .col-hist-op      { width: 10%; }
 .col-hist-change  { width: 64%; }
@@ -29,7 +29,7 @@
 .files-table { width: 100%; border-collapse: collapse; margin-top: 10px; table-layout: fixed; }
 .files-table thead { background: #222; border-bottom: 2px solid var(--c-accent); }
 .files-table th {
-    padding: 12px; text-align: left; font-weight: bold;
+    padding: 12px; text-align: center; font-weight: bold;
     color: var(--c-accent); font-size: 0.88em; text-transform: uppercase; letter-spacing: 0.5px;
 }
 .files-table tr          { height: 104px; }
@@ -45,7 +45,7 @@
     flex-shrink: 0; overflow: hidden; font-size: 1.5em; border: 1px solid var(--c-border);
 }
 .preview-poster img  { width: 100%; height: 100%; object-fit: cover; }
-.preview-info        { flex: 1; min-width: 0; }
+.preview-info        { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .preview-title       { font-weight: bold; color: var(--c-bright); margin-bottom: 4px; font-size: 0.92em; }
 .rename-preview      { color: var(--c-accent); font-size: 0.82em; margin: 4px 0; word-break: break-all; font-family: monospace; }
 .preview-meta        { font-size: 0.78em; color: var(--c-text3); display: flex; gap: 8px; flex-wrap: wrap; margin-top: 4px; }
@@ -55,17 +55,17 @@
 
 /* ── Actions cell ─────────────────────────────────────────────────────────── */
 .actions-cell {
-    text-align: right; vertical-align: middle; padding: 8px 12px;
-    min-width: 300px; position: relative; overflow: hidden;
+    text-align: center; vertical-align: middle; padding: 8px;
 }
 .actions-cell .btn-group {
-    display: flex; flex-wrap: nowrap; gap: 4px;
-    justify-content: flex-end; align-items: center;
+    display: flex; flex-wrap: wrap; gap: 6px;
+    align-items: center; justify-content: center;
 }
 .btn-small {
-    padding: 5px 10px; font-size: 0.75em; border: none; border-radius: 4px;
-    cursor: pointer; transition: all 0.2s; white-space: nowrap;
-    display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0;
+    padding: 0; font-size: 1em; border: none; border-radius: 4px;
+    cursor: pointer; transition: all 0.2s;
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 34px; height: 34px; flex-shrink: 0;
 }
 .btn-small.rename        { background: var(--c-accent);    color: white; }
 .btn-small.rename:hover  { background: var(--c-accent-hv); }
@@ -77,8 +77,8 @@
 .btn-small.search:hover  { background: var(--c-border);    color: var(--c-accent); border-color: var(--c-accent); }
 .btn-small.ok-label {
     background: var(--c-success-bg); color: var(--c-success); cursor: default;
-    font-size: 0.75em; padding: 5px 10px; border-radius: 4px;
-    display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0;
+    width: 34px; height: 34px; border-radius: 4px;
+    display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0;
 }
 .btn-small:disabled { opacity: 0.4; cursor: not-allowed; }
 
@@ -89,63 +89,35 @@
 .hist-op.op-move   { background: #1a2a3a; color: #5dade2;         border: 1px solid #2980b9; }
 .hist-op.op-revert { background: #1a3a2a; color: var(--c-success); border: 1px solid #27ae60; }
 
-.hist-combined {
-    padding: 10px 12px !important;
-    vertical-align: middle !important;
-}
+.hist-combined { padding: 10px 12px !important; vertical-align: middle !important; }
 
-.hist-name-section {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    flex-wrap: wrap;
-}
+.hist-name-section { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 
 .hist-name-from {
-    flex: 1;
-    min-width: 150px;
-    font-size: 0.82em;
-    color: var(--c-text);
-    word-break: break-word;
-    padding: 4px 8px;
-    background: rgba(0,0,0,0.2);
-    border-radius: 3px;
+    flex: 1; min-width: 150px; font-size: 0.82em; color: var(--c-text);
+    word-break: break-word; padding: 4px 8px;
+    background: rgba(0,0,0,0.2); border-radius: 3px;
 }
 
-.hist-arrow {
-    color: var(--c-accent);
-    font-weight: bold;
-    flex-shrink: 0;
-    font-size: 0.9em;
-}
+.hist-arrow { color: var(--c-accent); font-weight: bold; flex-shrink: 0; font-size: 0.9em; }
 
 .hist-name-to {
-    flex: 1;
-    min-width: 150px;
-    font-size: 0.82em;
-    color: var(--c-bright);
-    word-break: break-word;
-    padding: 4px 8px;
-    background: rgba(102, 187, 106, 0.1);
-    border-radius: 3px;
-    border-left: 2px solid var(--c-success);
+    flex: 1; min-width: 150px; font-size: 0.82em; color: var(--c-bright);
+    word-break: break-word; padding: 4px 8px;
+    background: rgba(102, 187, 106, 0.1); border-radius: 3px; border-left: 2px solid var(--c-success);
 }
 
-.hist-missing-line {
-    flex-basis: 100%;
-    font-size: 0.72em;
-    color: var(--c-error);
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    margin-top: 4px;
-    padding: 4px 8px;
-    background: rgba(231, 76, 60, 0.1);
-    border-radius: 3px;
-    border-left: 2px solid var(--c-error);
-}
+.hist-actions { text-align: center; vertical-align: middle; padding: 6px 12px; }
 
-.hist-actions { white-space: nowrap; min-width: 140px; padding: 12px; }
+/* ── History status badges ────────────────────────────────────────────────── */
+.hist-status {
+    display: inline-flex; align-items: center; gap: 4px;
+    font-size: 0.72em; font-weight: 600; padding: 3px 8px;
+    border-radius: 10px; white-space: nowrap;
+}
+.hist-status--reverted { background: #1a3a2a; color: var(--c-success); border: 1px solid #27ae60; }
+.hist-status--missing  { background: var(--c-error-bg); color: var(--c-error); border: 1px solid var(--c-error-bd); }
+.hist-status--conflict { background: #3a3a0a; color: #f0c040; border: 1px solid #a08000; }
 
 /* Lignes historique plus compactes */
 #history .files-table tr     { height: 52px; }

@@ -123,13 +123,23 @@ function switchTab(tab, e) {
 function scanFiles() {
     const tbody = document.getElementById('files-tbody');
     tbody.innerHTML = `<tr><td colspan="4" style="text-align:center;padding:20px;color:#e67e22;">◌ ${tr('scanning')}</td></tr>`;
+    allFiles = [];
     fetch('/api/scan')
         .then(r => { if (r.status === 401) { window.location='/login'; throw new Error('401'); } if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
         .then(data => {
-            allFiles = data;
-            filesPreviews = {};
+            const newPaths = new Set((data || []).map(f => f.path));
+
+            // Supprimer les aperçus pour les fichiers qui ont disparu
+            Object.keys(filesPreviews).forEach(p => { if (!newPaths.has(p)) delete filesPreviews[p]; });
+
+            // Mettre à jour la liste globale des fichiers
+            allFiles = data || [];
             renderTable();
-            allFiles.forEach(file => enqueuePreview(file));
+
+            // Enqueue only files that don't already have a preview (new files)
+            allFiles.forEach(file => {
+                if (!filesPreviews[file.path]) enqueuePreview(file);
+            });
         })
         .catch(e => { if (!e.message.includes('401')) tbody.innerHTML = `<tr><td colspan="4" class="message error">${tr('err_scan')} ${esc(e.message)}</td></tr>`; });
 }
@@ -166,7 +176,8 @@ function loadPreviewForFile(file) {
         filename: file.filename,
         season: file.season,
         episode: file.episode,
-        media_hint: file.media_type
+        media_hint: file.media_type,
+        path: file.path
     })
     .then(result => {
         const results = result?.results || [];
@@ -253,6 +264,12 @@ function renderPreview(file) {
         </div></div>`;
 }
 
+function renderProgressCell(file) {
+    const p = filesPreviews[file.path];
+    if (!p || p.loading || !p.data) return '';
+    return `<div class="progress-cell"></div>`;
+}
+
 function renderActions(file) {
     const p = filesPreviews[file.path];
     if (!p || p.loading) return `<div class="btn-group"><button class="btn-small search" disabled><i class="mdi mdi-loading mdi-spin"></i></button></div>`;
@@ -260,20 +277,14 @@ function renderActions(file) {
     if (p.data) {
         const newName = generateFilename(file, p.data.details);
         if (newName === file.filename)
-            html += `<span class="btn-small ok-label"><i class="mdi mdi-check"></i>${tr('btn_ok')}</span>`;
+            html += `<span class="btn-small ok-label" title="${tr('btn_ok')}"><i class="mdi mdi-check"></i></span>`;
         else
-            html += `<button class="btn-small rename" onclick="doRename(decodeURIComponent('${pathKey(file.path)}'))" ><i class="mdi mdi-pencil"></i>${tr('btn_rename')}</button>`;
-        html += `<button class="btn-small move" onclick="doMove(decodeURIComponent('${pathKey(file.path)}'))" ><i class="mdi mdi-folder-move"></i>${tr('btn_move')}</button>`;
+            html += `<button class="btn-small rename" title="${tr('btn_rename')}" onclick="doRename(decodeURIComponent('${pathKey(file.path)}'))"><i class="mdi mdi-pencil"></i></button>`;
+        html += `<button class="btn-small move" title="${tr('btn_move')}" onclick="doMove(decodeURIComponent('${pathKey(file.path)}'))"><i class="mdi mdi-folder-move"></i></button>`;
     }
-    html += `<button class="btn-small search" onclick="manualSearch(decodeURIComponent('${pathKey(file.path)}'))" ><i class="mdi mdi-magnify"></i>${tr('btn_other')}</button>`;
+    html += `<button class="btn-small search" title="${tr('btn_other')}" onclick="manualSearch(decodeURIComponent('${pathKey(file.path)}'))"><i class="mdi mdi-magnify"></i></button>`;
     html += '</div>';
     return html;
-}
-
-function renderProgressCell(file) {
-    const p = filesPreviews[file.path];
-    if (!p || p.loading || !p.data) return '';
-    return `<div class="progress-cell"></div>`;
 }
 
 function applyPathChange(filePath, newPath, newName) {
@@ -284,7 +295,6 @@ function applyPathChange(filePath, newPath, newName) {
     filesPreviews[newPath] = filesPreviews[filePath];
     delete filesPreviews[filePath];
     
-    // Update row with new path
     const oldRow = findFileRow(filePath);
     if (oldRow) {
         oldRow.setAttribute('data-file-path', pathKey(newPath));
@@ -320,28 +330,30 @@ function loadHistory() {
         tbody.innerHTML = entries.map((e, i) => {
             const opLabel = { rename: tr('hist_op_rename'), move: tr('hist_op_move'), revert: tr('hist_op_revert') }[e.op] || e.op;
             const opClass = { rename: 'op-rename', move: 'op-move', revert: 'op-revert' }[e.op] || 'op-rename';
-            const revertBtn = e.can_revert
-                ? `<button class="btn-small revert" onclick="revertEntry(${i})"><i class="mdi mdi-undo"></i>${tr('btn_revert')}</button>` : '';
-            
-            const isReverted = Boolean(e.is_reverted || false);
-            
-            // Build status line with proper formatting
-            let statusLine = `<div class="hist-name-section">
+
+            let actionHtml = '';
+            const rs = e.revert_status;
+            if (rs === 'available') {
+                actionHtml = `<button class="btn-small revert" title="${tr('btn_revert')}" onclick="revertEntry(${i})"><i class="mdi mdi-undo"></i></button>`;
+            } else if (rs === 'reverted') {
+                actionHtml = `<span class="hist-status hist-status--reverted"><i class="mdi mdi-undo"></i> ${tr('hist_op_revert')}</span>`;
+            } else if (rs === 'missing') {
+                actionHtml = `<span class="hist-status hist-status--missing"><i class="mdi mdi-alert-circle"></i> ${tr('hist_file_missing')}</span>`;
+            } else if (rs === 'conflict') {
+                actionHtml = `<span class="hist-status hist-status--conflict"><i class="mdi mdi-alert"></i></span>`;
+            }
+
+            const statusLine = `<div class="hist-name-section">
                 <div class="hist-name-from">${esc(e.from_name)}</div>
                 <div class="hist-arrow">→</div>
-                <div class="hist-name-to">${esc(e.to_name)}</div>`;
-            
-            // Only show "Fichier introuvable" if: file can't be reverted AND it's not already reverted AND operation is not a revert
-            if (!e.can_revert && !isReverted && e.op !== 'revert') {
-                statusLine += `<div class="hist-missing-line"><i class="mdi mdi-alert-circle"></i> ${tr('hist_file_missing')}</div>`;
-            }
-            statusLine += `</div>`;
-            
+                <div class="hist-name-to">${esc(e.to_name)}</div>
+            </div>`;
+
             return `<tr data-hist-idx="${i}">
                 <td class="hist-date">${esc(e.date)}</td>
                 <td><span class="hist-op ${opClass}">${opLabel}</span></td>
-                <td class="hist-combined" colspan="1">${statusLine}</td>
-                <td class="hist-actions"><div id="hist-prog-${i}">${revertBtn}</div></td>
+                <td class="hist-combined">${statusLine}</td>
+                <td class="hist-actions"><div id="hist-prog-${i}">${actionHtml}</div></td>
             </tr>`;
         }).join('');
     }).catch(e => { tbody.innerHTML = `<tr><td colspan="4" class="empty-state">Erreur: ${esc(e.message)}</td></tr>`; });
@@ -356,7 +368,11 @@ async function revertEntry(i) {
         const data = await postJSON('/api/revert', { id: entry.id });
         if (!data.success) throw new Error(data.message);
         if (progEl) progEl.innerHTML = `<span style="color:#27ae60">✓ ${tr('hist_reverted')}</span>`;
-        setTimeout(loadHistory, 1500);
+        // Toujours rescanner après un revert pour mettre à jour le tableau des fichiers
+        setTimeout(() => {
+            loadHistory();
+            scanFiles();
+        }, 600);
     } catch(e) {
         if (progEl) progEl.innerHTML = `<span style="color:#e74c3c">✗ ${esc(e.message)}</span>`;
     }
@@ -594,12 +610,15 @@ function executeManualSearch() {
     const resultsDiv = document.getElementById('manual-results');
     resultsDiv.innerHTML = `<div class="loading"><div class="spinner"></div>${tr('searching')}</div>`;
     const endpoint = file.media_type === 'movie' ? '/api/search/movie' : '/api/search/tv';
-    postJSON(endpoint, { title })
+    postJSON(endpoint, { title, path: filePath })
     .then(results => {
-        if (!results?.length) { resultsDiv.innerHTML = `<div class="message error">${tr('search_none')}</div>`; return; }
-        window._searchResults = results;
-        let html = `<p style="color:#888;font-size:0.82em;margin-bottom:10px;">${results.length} ${tr('search_results')}</p><div class="search-results">`;
-        results.forEach((r, i) => {
+        // Accept either the old array response or the new envelope { results: [], cache_source: '...' }
+        let list = results;
+        if (results && results.results) list = results.results;
+        if (!list?.length) { resultsDiv.innerHTML = `<div class="message error">${tr('search_none')}</div>`; return; }
+        window._searchResults = list;
+        let html = `<p style="color:#888;font-size:0.82em;margin-bottom:10px;">${list.length} ${tr('search_results')}</p><div class="search-results">`;
+        list.forEach((r, i) => {
             const poster = r.poster ? `<img src="${esc(r.poster)}" alt="">` : (file.media_type === 'movie' ? '🎬' : '📺');
             html += `<div class="result-item" data-ridx="${i}" onclick="selectResult(this)">
                 <div class="result-poster">${poster}</div>
@@ -629,6 +648,11 @@ function selectResult(el) {
         if (!details.translations || !Object.keys(details.translations).length)
             details.translations = result.translations || {};
         filesPreviews[file.path] = { loading: false, data: { source: result, details }, error: null };
+        // Persist the manual selection to server-side file cache so refresh won't overwrite it
+        try {
+            postJSON('/api/search/cache-file', { path: file.path, media_type: file.media_type || 'movie', results: [ { id: result.id, imdb_id: details.imdbid, title: details.title || result.title, year: details.year || result.year, poster: result.poster, translations: details.translations || {}, details: details } ] })
+            .catch(() => {});
+        } catch (e) { /* ignore */ }
         updateFileRow(file);
         closeModal('manualSearchModal');
     }).catch(e => { resultsDiv.innerHTML = `<div class="message error">Erreur: ${esc(e.message)}</div>`; });
@@ -814,6 +838,7 @@ document.addEventListener('DOMContentLoaded', () => {
         .then(cfg => {
             if (cfg.movie_format) globalConfig.movie_format = cfg.movie_format;
             if (cfg.tv_format)    globalConfig.tv_format    = cfg.tv_format;
+            // Initial scan: populate the table but preserve previews if present
             scanFiles();
         })
         .catch(e => { if (!e.message.includes('401')) {

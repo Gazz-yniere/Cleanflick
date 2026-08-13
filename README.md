@@ -273,6 +273,21 @@ environment:
 
 ## Changelog
 
+### [1.0.6] - 2026-08-12
+
+**Fixed**
+- `revert_of` field was never persisted in history DB — `add_history` was reading `entry.get('extra', {})` instead of saving all non-standard root fields, causing `reverted_ids` to always be empty and showing a false "Fichier introuvable" badge on renamed entries after a revert
+- Revert of a same-folder rename now runs synchronously (`_move_path` + immediate `scan_last_snapshot` update) instead of going through the async `_run_file_op` thread, preventing a race condition where the filesystem watcher would pick up the change before the snapshot was updated, leading to a 400 error on the next rename
+- File row was not reappearing in the table after a revert — `revertEntry()` now calls `scanFiles()` in addition to `loadHistory()` (600 ms delay)
+- History table showed a false "Fichier introuvable" badge on the original rename entry after a successful revert
+
+**Changed**
+- Action buttons in the file table are now icon-only (34×34 px) with `title` tooltips, displayed on a single centered row
+- Revert button in the history table is now icon-only (34×34 px) with a `title` tooltip
+- History entries expose a `revert_status` field (`available` / `reverted` / `missing` / `done`) used by the frontend to render the correct badge or button
+- `allFiles` array is reset to `[]` before each `scanFiles()` fetch to prevent duplicate rows between the previous state and the new scan result
+- Cross-folder reverts remain asynchronous; only same-folder reverts are synchronous
+
 ### [1.0.5] - 2026-08-11
 
 **Added**

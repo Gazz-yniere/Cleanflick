@@ -85,7 +85,8 @@ nav a.logout:hover { color: var(--c-accent); background: var(--c-surface3); }
 .btn {
     padding: 8px 16px; border: none; border-radius: var(--radius);
     cursor: pointer; font-size: 0.88em; transition: all 0.2s;
-    display: inline-flex; align-items: center;
+    display: inline-flex; align-items: center; justify-content: center;
+    height: 36px;
 }
 .btn-primary { background: var(--c-accent); color: white; }
 .btn-primary:hover { background: var(--c-accent-hv); }

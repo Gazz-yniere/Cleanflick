@@ -1,6 +1,8 @@
 from flask import Flask, render_template, request, jsonify, session, redirect, Response
 from functools import wraps
 import json, os, re, time, requests, logging, shutil, threading, uuid
+import hashlib
+import db
 from pathlib import Path
 from scanner import MediaScanner, MediaFile
 from api_handler import APIHandler
@@ -47,28 +49,28 @@ def login_required(f):
 # ── History ───────────────────────────────────────────────────────────────────
 
 def load_history():
-    if not os.path.exists(HISTORY_FILE):
-        return []
     try:
-        with open(HISTORY_FILE, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-            return data if isinstance(data, list) else []
+        return db.get_history()
     except Exception as e:
-        logger.error(f"Error loading history: {e}")
+        logger.error(f"Error loading history from DB: {e}")
         return []
 
 def save_history(history):
+    # Not used: history is persisted via DB
     try:
-        with open(HISTORY_FILE, 'w', encoding='utf-8') as f:
-            json.dump(history, f, indent=2, ensure_ascii=False)
+        # Replace DB contents with provided list
+        db.clear_history()
+        for entry in (history or []):
+            db.add_history(entry)
     except Exception as e:
-        logger.error(f"Error saving history: {e}")
+        logger.error(f"Error saving history to DB: {e}")
         raise
 
 def append_history(entry):
-    h = load_history()
-    h.insert(0, entry)
-    save_history(h)
+    try:
+        db.add_history(entry)
+    except Exception as e:
+        logger.error(f"Error appending history to DB: {e}")
 
 # ── Utils ─────────────────────────────────────────────────────────────────────
 
@@ -221,9 +223,15 @@ def _scan_watcher():
             with scan_watch_lock:
                 previous = scan_last_snapshot or tuple()
                 added = set(current) - set(previous)
-                if added and current:
+                removed = set(previous) - set(current)
+                if (added or removed) and current is not None:
                     _broadcast_scan_refresh()
-                    logger.info(f"New input files detected: {len(added)}")
+                    if added and removed:
+                        logger.info(f"Input files changed: +{len(added)} / -{len(removed)}")
+                    elif added:
+                        logger.info(f"New input files detected: {len(added)}")
+                    else:
+                        logger.info(f"Input files removed: {len(removed)}")
                 scan_last_snapshot = current
         except Exception as e:
             logger.warning(f"Input watcher error: {e}")
@@ -267,6 +275,26 @@ def _run_file_op(job_id, src_path, dst_path, history_entry):
                     source=src_path,
                 )
                 append_history(history_entry)
+                # After a successful async move, update the scan snapshot so the watcher
+                # does not treat the change as a new external file.
+                try:
+                    global scan_last_snapshot
+                    with scan_watch_lock:
+                        scan_last_snapshot = _scan_snapshot()
+                except Exception:
+                    pass
+                # Attempt to migrate file cache from old path fingerprint to new path
+                try:
+                    old_p = str(src_path)
+                    new_p = str(dst_path)
+                    if os.path.exists(new_p):
+                        fsize = os.path.getsize(new_p)
+                        fmtime = int(os.path.getmtime(new_p))
+                        old_fkey = hashlib.md5(f"{os.path.abspath(old_p)}|{os.path.getsize(old_p) if os.path.exists(old_p) else 0}|{int(os.path.getmtime(old_p)) if os.path.exists(old_p) else 0}".encode('utf-8')).hexdigest()
+                        new_fkey = hashlib.md5(f"{os.path.abspath(new_p)}|{fsize}|{fmtime}".encode('utf-8')).hexdigest()
+                        db.file_cache_migrate(old_fkey, new_fkey, os.path.abspath(new_p), fsize, fmtime)
+                except Exception:
+                    pass
             else:
                 raise FileNotFoundError(f"Vérification impossible après déplacement : {src_path} -> {dst_path}")
         except Exception as e:
@@ -368,37 +396,199 @@ def api_scan_events():
 @login_required
 def api_search_auto():
     d = request.json or {}
-    return jsonify(api_handler.search_auto(
-        d.get('title', ''), d.get('year'), d.get('filename', ''),
-        d.get('season'), d.get('episode'), d.get('media_hint', '')
-    ))
+    params = {
+        'title': d.get('title', ''), 'year': d.get('year'),
+        'filename': d.get('filename', ''), 'season': d.get('season'),
+        'episode': d.get('episode'), 'media_hint': d.get('media_hint', ''),
+    }
+    # If client provided a file path, try file-specific cache (fingerprint based)
+    file_path = d.get('path') or d.get('file_path')
+    if file_path:
+        try:
+            if os.path.exists(file_path):
+                fsize = os.path.getsize(file_path)
+                fmtime = int(os.path.getmtime(file_path))
+                fkey_raw = f"{os.path.abspath(file_path)}|{fsize}|{fmtime}"
+                fkey = hashlib.md5(fkey_raw.encode('utf-8')).hexdigest()
+                cached_file = db.file_cache_get(fkey)
+                if cached_file is not None:
+                    logger.info(f"Search auto: cache hit (file) for {file_path}")
+                    out = dict(cached_file)
+                    out['cache_source'] = 'file'
+                    return jsonify(out)
+        except Exception:
+            pass
+
+    key = hashlib.md5(json.dumps(params, sort_keys=True, ensure_ascii=False).encode('utf-8')).hexdigest()
+    cached = db.cache_get(key)
+    if cached is not None:
+        logger.info(f"Search auto: cache hit (params) key={key}")
+        out = dict(cached)
+        out['cache_source'] = 'params'
+        return jsonify(out)
+
+    logger.info(f"Search auto: cache miss for title={params['title']} year={params.get('year')}")
+    result = api_handler.search_auto(params['title'], params['year'], params['filename'], params['season'], params['episode'], params['media_hint'])
+    try:
+        db.cache_set(key, result.get('media_type', ''), result.get('results', []))
+    except Exception:
+        pass
+
+    # Store per-file cache if path was provided and exists
+    if file_path:
+        try:
+            if os.path.exists(file_path):
+                fsize = os.path.getsize(file_path)
+                fmtime = int(os.path.getmtime(file_path))
+                fkey_raw = f"{os.path.abspath(file_path)}|{fsize}|{fmtime}"
+                fkey = hashlib.md5(fkey_raw.encode('utf-8')).hexdigest()
+                db.file_cache_set(fkey, os.path.abspath(file_path), fsize, fmtime, result.get('media_type', ''), result.get('results', []))
+        except Exception:
+            pass
+    result_with_source = dict(result)
+    result_with_source['cache_source'] = 'tvdb'
+    logger.info(f"Search auto: returning {len(result.get('results', []))} results from TVDB for title={params['title']}")
+    return jsonify(result_with_source)
 
 @app.route('/api/search/movie', methods=['POST'])
 @login_required
 def api_search_movie():
-    d = request.json
-    return jsonify(api_handler.search_movie(d.get('title'), d.get('year')))
+    d = request.json or {}
+    params = {'title': d.get('title', ''), 'year': d.get('year')}
+    # file-specific cache support
+    file_path = d.get('path') or d.get('file_path')
+    if file_path:
+        try:
+            if os.path.exists(file_path):
+                fsize = os.path.getsize(file_path)
+                fmtime = int(os.path.getmtime(file_path))
+                fkey_raw = f"{os.path.abspath(file_path)}|{fsize}|{fmtime}"
+                fkey = hashlib.md5(fkey_raw.encode('utf-8')).hexdigest()
+                cached_file = db.file_cache_get(fkey)
+                if cached_file is not None:
+                    logger.info(f"Search movie: cache hit (file) for {file_path}")
+                    out = {'results': cached_file.get('results', []), 'cache_source': 'file'}
+                    return jsonify(out)
+        except Exception:
+            pass
+
+    key = hashlib.md5(json.dumps({'type': 'movie', **params}, sort_keys=True, ensure_ascii=False).encode('utf-8')).hexdigest()
+    cached = db.cache_get(key)
+    if cached is not None:
+        logger.info(f"Search movie: cache hit (params) key={key}")
+        out = {'results': cached.get('results', []), 'cache_source': 'params'}
+        return jsonify(out)
+    res = api_handler.search_movie(params['title'], params['year'])
+    try:
+        db.cache_set(key, 'movie', res)
+    except Exception:
+        pass
+
+    if file_path:
+        try:
+            if os.path.exists(file_path):
+                fsize = os.path.getsize(file_path)
+                fmtime = int(os.path.getmtime(file_path))
+                fkey_raw = f"{os.path.abspath(file_path)}|{fsize}|{fmtime}"
+                fkey = hashlib.md5(fkey_raw.encode('utf-8')).hexdigest()
+                db.file_cache_set(fkey, os.path.abspath(file_path), fsize, fmtime, 'movie', res)
+        except Exception:
+            pass
+    logger.info(f"Search movie: returning {len(res)} results from TVDB for title={params['title']}")
+    return jsonify({'results': res, 'cache_source': 'tvdb'})
 
 @app.route('/api/search/tv', methods=['POST'])
 @login_required
 def api_search_tv():
-    d = request.json
-    return jsonify(api_handler.search_tv(d.get('title')))
+    d = request.json or {}
+    params = {'title': d.get('title', '')}
+    file_path = d.get('path') or d.get('file_path')
+    if file_path:
+        try:
+            if os.path.exists(file_path):
+                fsize = os.path.getsize(file_path)
+                fmtime = int(os.path.getmtime(file_path))
+                fkey_raw = f"{os.path.abspath(file_path)}|{fsize}|{fmtime}"
+                fkey = hashlib.md5(fkey_raw.encode('utf-8')).hexdigest()
+                cached_file = db.file_cache_get(fkey)
+                if cached_file is not None:
+                    logger.info(f"Search tv: cache hit (file) for {file_path}")
+                    out = {'results': cached_file.get('results', []), 'cache_source': 'file'}
+                    return jsonify(out)
+        except Exception:
+            pass
+
+    key = hashlib.md5(json.dumps({'type': 'tv', **params}, sort_keys=True, ensure_ascii=False).encode('utf-8')).hexdigest()
+    cached = db.cache_get(key)
+    if cached is not None:
+        logger.info(f"Search tv: cache hit (params) key={key}")
+        out = {'results': cached.get('results', []), 'cache_source': 'params'}
+        return jsonify(out)
+    res = api_handler.search_tv(params['title'])
+    try:
+        db.cache_set(key, 'tv', res)
+    except Exception:
+        pass
+
+    if file_path:
+        try:
+            if os.path.exists(file_path):
+                fsize = os.path.getsize(file_path)
+                fmtime = int(os.path.getmtime(file_path))
+                fkey_raw = f"{os.path.abspath(file_path)}|{fsize}|{fmtime}"
+                fkey = hashlib.md5(fkey_raw.encode('utf-8')).hexdigest()
+                db.file_cache_set(fkey, os.path.abspath(file_path), fsize, fmtime, 'tv', res)
+        except Exception:
+            pass
+    logger.info(f"Search tv: returning {len(res)} results from TVDB for title={params['title']}")
+    return jsonify({'results': res, 'cache_source': 'tvdb'})
 
 @app.route('/api/movie/<int:movie_id>')
 @login_required
 def api_movie_details(movie_id):
-    return jsonify(api_handler.get_movie_details(str(movie_id), request.args.get('source', 'tvdb')))
+    source = request.args.get('source', 'tvdb')
+    # Try details cache first
+    try:
+        cached = db.details_get('movie', str(movie_id))
+        if cached is not None:
+            logger.info(f"Movie details: cache hit for {movie_id}")
+            out = dict(cached)
+            out['cache_source'] = 'details_cache'
+            return jsonify(out)
+    except Exception:
+        pass
+    details = api_handler.get_movie_details(str(movie_id), source)
+    try:
+        db.details_set('movie', str(movie_id), details)
+    except Exception:
+        pass
+    details['cache_source'] = 'tvdb'
+    return jsonify(details)
 
 @app.route('/api/tv/<int:tv_id>')
 @login_required
 def api_tv_details(tv_id):
-    return jsonify(api_handler.get_tv_details(
-        str(tv_id),
-        request.args.get('season', 1, type=int),
-        request.args.get('episode', 1, type=int),
-        request.args.get('source', 'tvdb')
-    ))
+    season = request.args.get('season', 1, type=int)
+    episode = request.args.get('episode', 1, type=int)
+    source = request.args.get('source', 'tvdb')
+    try:
+        cached = db.details_get('tv', str(tv_id))
+        if cached is not None:
+            logger.info(f"TV details: cache hit for {tv_id}")
+            out = dict(cached)
+            out['cache_source'] = 'details_cache'
+            # Ensure season/episode fields are present
+            out.update({'season': season, 'episode': episode})
+            return jsonify(out)
+    except Exception:
+        pass
+    details = api_handler.get_tv_details(str(tv_id), season, episode, source)
+    try:
+        db.details_set('tv', str(tv_id), details)
+    except Exception:
+        pass
+    details['cache_source'] = 'tvdb'
+    return jsonify(details)
 
 @app.route('/api/rename', methods=['POST'])
 @login_required
@@ -415,9 +605,55 @@ def api_rename():
             'from_path': str(old_path), 'from_name': old_path.name,
             'to_path': str(new_path), 'to_name': new_name,
         })
+        # Update the scan snapshot to avoid the background watcher triggering
+        try:
+            global scan_last_snapshot
+            with scan_watch_lock:
+                scan_last_snapshot = _scan_snapshot()
+        except Exception:
+            pass
+        # Migrate file cache entry if present
+        try:
+            old_p = str(old_path)
+            new_p = str(new_path)
+            if os.path.exists(new_p):
+                fsize = os.path.getsize(new_p)
+                fmtime = int(os.path.getmtime(new_p))
+                old_fkey = hashlib.md5(f"{os.path.abspath(old_p)}|{os.path.getsize(old_p) if os.path.exists(old_p) else 0}|{int(os.path.getmtime(old_p)) if os.path.exists(old_p) else 0}".encode('utf-8')).hexdigest()
+                new_fkey = hashlib.md5(f"{os.path.abspath(new_p)}|{fsize}|{fmtime}".encode('utf-8')).hexdigest()
+                db.file_cache_migrate(old_fkey, new_fkey, os.path.abspath(new_p), fsize, fmtime)
+        except Exception:
+            pass
         return jsonify({"success": True, "new_path": str(new_path), "new_name": new_name})
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 400
+
+
+@app.route('/api/search/cache-file', methods=['POST'])
+@login_required
+def api_search_cache_file():
+    """Permet au client de forcer le stockage en cache d'une recherche pour un fichier donné.
+    Payload: { path: <file_path>, media_type: 'movie'|'tv', results: [...] }
+    """
+    d = request.json or {}
+    file_path = d.get('path')
+    results = d.get('results')
+    media_type = d.get('media_type') or ''
+    if not file_path or results is None:
+        return jsonify({'success': False, 'message': 'Missing path or results'}), 400
+    try:
+        if os.path.exists(file_path):
+            fsize = os.path.getsize(file_path)
+            fmtime = int(os.path.getmtime(file_path))
+            fkey_raw = f"{os.path.abspath(file_path)}|{fsize}|{fmtime}"
+            fkey = hashlib.md5(fkey_raw.encode('utf-8')).hexdigest()
+            db.file_cache_set(fkey, os.path.abspath(file_path), fsize, fmtime, media_type, results)
+            return jsonify({'success': True})
+        else:
+            return jsonify({'success': False, 'message': 'File not found'}), 400
+    except Exception as e:
+        logger.error(f"Error caching file search: {e}")
+        return jsonify({'success': False, 'message': str(e)}), 500
 
 @app.route('/api/move', methods=['POST'])
 @login_required
@@ -492,29 +728,68 @@ def api_revert():
         except Exception as e:
             return jsonify({"success": False, "message": f"Impossible de remplacer la destination: {e}"}), 400
 
-    job_id = str(uuid.uuid4())
-    file_size = _run_file_op(job_id, entry['to_path'], entry['from_path'], {
+    src = entry['to_path']
+    dst = entry['from_path']
+    same_dir = os.path.dirname(os.path.abspath(src)) == os.path.dirname(os.path.abspath(dst))
+
+    revert_entry = {
         'id': str(uuid.uuid4()), 'op': 'revert',
         'date': time.strftime('%Y-%m-%d %H:%M:%S'),
-        'from_path': entry['to_path'], 'from_name': entry['to_name'],
-        'to_path': entry['from_path'], 'to_name': entry['from_name'],
+        'from_path': src, 'from_name': entry['to_name'],
+        'to_path': dst, 'to_name': entry['from_name'],
         'revert_of': entry_id,
-    })
-    return jsonify({"success": True, "job_id": job_id, "file_size": file_size,
-                    "from_path": entry['from_path'], "from_name": entry['from_name']})
+    }
+
+    if same_dir:
+        # Rename dans le même dossier : opération synchrone, snapshot mis à jour immédiatement
+        try:
+            _move_path(src, dst)
+            append_history(revert_entry)
+            global scan_last_snapshot
+            with scan_watch_lock:
+                scan_last_snapshot = _scan_snapshot()
+            return jsonify({"success": True, "job_id": revert_entry['id'],
+                            "from_path": dst, "from_name": entry['from_name']})
+        except Exception as e:
+            return jsonify({"success": False, "message": str(e)}), 400
+    else:
+        # Déplacement cross-dossier : opération asynchrone avec progress
+        job_id = str(uuid.uuid4())
+        file_size = _run_file_op(job_id, src, dst, revert_entry)
+        return jsonify({"success": True, "job_id": job_id, "file_size": file_size,
+                        "from_path": dst, "from_name": entry['from_name']})
 
 @app.route('/api/history')
 @login_required
 def api_history():
     history = load_history()
+    reverted_ids = {
+        candidate.get('revert_of')
+        for candidate in history
+        if candidate.get('op') == 'revert' and candidate.get('revert_of')
+    }
     for e in history:
-        e['is_reverted'] = any(
-            candidate.get('op') == 'revert' and candidate.get('revert_of') == e.get('id')
-            for candidate in history
-        )
-        e['can_revert'] = (e.get('op') != 'revert' and
-                           os.path.exists(e.get('to_path', '')) and
-                           not os.path.exists(e.get('from_path', '')))
+        is_reverted = e.get('id') in reverted_ids
+        e['is_reverted'] = is_reverted
+        if e.get('op') == 'revert':
+            e['can_revert'] = False
+            e['revert_status'] = 'done'
+        elif is_reverted:
+            e['can_revert'] = False
+            e['revert_status'] = 'reverted'
+        else:
+            to_exists   = os.path.exists(e.get('to_path', ''))
+            from_exists = os.path.exists(e.get('from_path', ''))
+            if not to_exists:
+                e['can_revert'] = False
+                e['revert_status'] = 'missing'
+            elif from_exists:
+                # fichier déjà revenu à sa place (revert sans revert_of enregistré, ou doublon)
+                e['can_revert'] = False
+                e['revert_status'] = 'reverted'
+            else:
+                e['can_revert'] = True
+                e['revert_status'] = 'available'
     return jsonify(history)
 
 @app.route('/api/history/clear', methods=['POST'])

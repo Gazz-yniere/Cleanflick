@@ -1,4 +1,12 @@
+# Framework web principal - permet de créer l'interface utilisateur et gérer les requêtes HTTP
 Flask==2.3.3
+
+# Bibliothèque pour faire des requêtes HTTP (API TVDB, etc.)
 requests==2.31.0
+
+# Client officiel pour l'API TVDB v4 - gère la communication avec la base de données TV
 tvdb_v4_official==1.1.0
+
+# Serveur web performant pour le mode production - améliore les performances et la gestion des connexions
 gunicorn==21.2.0
+
