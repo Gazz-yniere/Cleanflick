@@ -27,6 +27,7 @@ output/
 *~
 .env
 RELEASE_1.0.5.md
+cleanflick.db
 
 # Archive fichiers non essentiels
 _archive/
