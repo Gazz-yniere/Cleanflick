@@ -397,12 +397,24 @@ function doRename(filePath) {
     if (!p?.data) return;
     const newName = generateFilename(file, p.data.details);
     if (newName === file.filename) return;
+
+    // Désactiver les boutons pendant le rename
+    const row = findFileRow(filePath);
+    if (row) row.querySelectorAll('.btn-small').forEach(b => b.disabled = true);
+
     postJSON('/api/rename', { path: file.path, new_name: newName })
         .then(data => {
-            if (!data.success) { alert(`✗ ${tr('err_rename')}\n${data.message}`); return; }
+            if (!data.success) {
+                if (row) row.querySelectorAll('.btn-small').forEach(b => b.disabled = false);
+                alert(`✗ ${tr('err_rename')}\n${data.message}`);
+                return;
+            }
             applyPathChange(file.path, data.new_path, newName);
         })
-        .catch(e => alert(`✗ ${tr('err_rename')}\n${e.message}`));
+        .catch(e => {
+            if (row) row.querySelectorAll('.btn-small').forEach(b => b.disabled = false);
+            alert(`✗ ${tr('err_rename')}\n${e.message}`);
+        });
 }
 
 function openMoveNameMismatchModal(file, proposedName) {
@@ -425,7 +437,10 @@ function confirmMoveNameMismatch() {
 }
 
 async function doMove(filePath) {
-    const file = allFiles.find(f => f.path === filePath);
+    // Utiliser le path réel de la row DOM (peut différer d'allFiles après un rename)
+    const row = findFileRow(filePath);
+    const realPath = row ? decodeURIComponent(row.getAttribute('data-file-path')) : filePath;
+    const file = allFiles.find(f => f.path === realPath) || allFiles.find(f => f.path === filePath);
     if (!file?.filename) return;
     const p = filesPreviews[file.path];
     if (!p?.data) return;
@@ -436,7 +451,7 @@ async function doMove(filePath) {
         return;
     }
 
-    await runMove(filePath, file, proposedName || file.filename);
+    await runMove(file.path, file, proposedName || file.filename);
 }
 
 async function runMove(filePath, file, proposedName) {
@@ -771,6 +786,17 @@ function initConfigAutoSave() {
     });
 }
 
+function clearCache() {
+    fetch('/api/cache/clear', { method: 'POST' })
+        .then(r => r.json())
+        .then(() => {
+            const msg = document.getElementById('config-message');
+            if (msg) msg.innerHTML = `<div class="message success">✓ Cache TVDB vidé</div>`;
+            setTimeout(() => { if (msg) msg.innerHTML = ''; }, 2000);
+        })
+        .catch(e => alert(`Erreur: ${e.message}`));
+}
+
 function testKeys() {
     const btn = document.getElementById('tvdb_test_btn');
     if (btn) { btn.classList.remove('valid', 'invalid'); btn.disabled = true; }
@@ -818,7 +844,7 @@ document.addEventListener('DOMContentLoaded', () => {
             scanEventSource.addEventListener('message', (event) => {
                 try {
                     const data = JSON.parse(event.data || '{}');
-                    if (data.event === 'scan-refresh') {
+                    if (data.event === 'scan-refresh' && Object.keys(activeTransfers).length === 0) {
                         scanFiles();
                     }
                 } catch (e) {

@@ -18,9 +18,10 @@
 /* ── Filter bar ───────────────────────────────────────────────────────────── */
 .filter-bar { display: flex; gap: 10px; margin-bottom: 20px; align-items: center; flex-wrap: wrap; }
 .filter-btn {
-    padding: 7px 16px; border: 1px solid var(--c-border2); background: var(--c-surface2);
+    padding: 0 16px; border: 1px solid var(--c-border2); background: var(--c-surface2);
     color: var(--c-text); cursor: pointer; border-radius: var(--radius);
     transition: all 0.2s; font-size: 0.88em; display: inline-flex; align-items: center;
+    height: 36px;
 }
 .filter-btn.active          { background: var(--c-accent); color: white; border-color: var(--c-accent); }
 .filter-btn:hover:not(.active) { border-color: var(--c-accent); color: var(--c-accent); }
@@ -65,7 +66,7 @@
     padding: 0; font-size: 1em; border: none; border-radius: 4px;
     cursor: pointer; transition: all 0.2s;
     display: inline-flex; align-items: center; justify-content: center;
-    width: 34px; height: 34px; flex-shrink: 0;
+    width: 48px; height: 36px; flex-shrink: 0;
 }
 .btn-small.rename        { background: var(--c-accent);    color: white; }
 .btn-small.rename:hover  { background: var(--c-accent-hv); }
@@ -77,7 +78,7 @@
 .btn-small.search:hover  { background: var(--c-border);    color: var(--c-accent); border-color: var(--c-accent); }
 .btn-small.ok-label {
     background: var(--c-success-bg); color: var(--c-success); cursor: default;
-    width: 34px; height: 34px; border-radius: 4px;
+    width: 48px; height: 36px; border-radius: 4px;
     display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0;
 }
 .btn-small:disabled { opacity: 0.4; cursor: not-allowed; }
@@ -120,7 +121,8 @@
 .hist-status--conflict { background: #3a3a0a; color: #f0c040; border: 1px solid #a08000; }
 
 /* Lignes historique plus compactes */
-#history .files-table tr     { height: 52px; }
+#history .files-table tr          { height: 52px; }
+#history .files-table thead tr    { height: auto; }
 #history .files-table td     { padding: 6px 12px; }
 #history .hist-combined      { padding: 6px 12px !important; }
 #history .hist-date          { padding: 6px 12px; }

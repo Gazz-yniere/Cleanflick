@@ -8,18 +8,17 @@
 .form-field          { margin-bottom: 14px; }
 .form-field label    { display: block; margin-bottom: 6px; font-weight: bold; color: var(--c-text2); font-size: 0.88em; }
 .form-field input    {
-    width: 100%; padding: 10px; border: 1px solid var(--c-border); border-radius: var(--radius);
+    width: 100%; padding: 0 10px; height: 36px; border: 1px solid var(--c-border); border-radius: var(--radius);
     font-family: monospace; font-size: 0.88em; background: var(--c-surface2); color: var(--c-bright);
 }
 .form-field input:focus { outline: none; border-color: var(--c-accent); box-shadow: 0 0 4px rgba(230,126,34,0.3); }
 .hint      { display: block; font-size: 0.78em; color: var(--c-text4); margin-top: 4px; }
 .hint a    { color: var(--c-accent); text-decoration: none; }
-.input-with-btn       { display: flex; gap: 8px; }
+.input-with-btn       { display: flex; gap: 8px; align-items: center; }
 .input-with-btn input { flex: 1; }
 .api-row              { display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; }
 .api-key-field        { flex: 1; }
 .api-key-field input  { min-width: 320px; }
-.api-row .btn-test    { margin-top: 0; }
 .formats-grid   { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; }
 .format-column  { display: flex; flex-direction: column; gap: 10px; }
 

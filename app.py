@@ -368,15 +368,19 @@ def api_scan():
 @app.route('/api/scan/events')
 @login_required
 def api_scan_events():
-    import queue
-    q = queue.Queue()
+    try:
+        from gevent.queue import Queue as GQueue
+        q = GQueue()
+    except ImportError:
+        import queue
+        q = queue.Queue()
     scan_clients.add(q)
 
     def stream():
         try:
             while True:
                 try:
-                    payload = q.get(timeout=1)
+                    payload = q.get(timeout=25)
                     yield f'data: {payload}\n\n'
                 except Exception:
                     yield ': keepalive\n\n'
@@ -791,6 +795,17 @@ def api_history():
                 e['can_revert'] = True
                 e['revert_status'] = 'available'
     return jsonify(history)
+
+@app.route('/api/cache/clear', methods=['POST'])
+@login_required
+def api_cache_clear():
+    conn = db.get_conn()
+    conn.execute('DELETE FROM search_cache')
+    conn.execute('DELETE FROM file_search_cache')
+    conn.execute('DELETE FROM details_cache')
+    conn.commit()
+    conn.close()
+    return jsonify({'success': True})
 
 @app.route('/api/history/clear', methods=['POST'])
 @login_required
