@@ -75,14 +75,18 @@ def append_history(entry):
 # ── Utils ─────────────────────────────────────────────────────────────────────
 
 def _resolve(path):
-    if not path or os.path.exists(path):
+    if not path:
         return path
+    import platform
     base = os.path.dirname(os.path.abspath(__file__))
-    if path.startswith('/'):
-        local = os.path.join(base, path.lstrip('/'))
-        if os.path.exists(local):
-            return local
-    return path
+    # Sur Linux/Docker : chemin absolu réel → tel quel
+    if platform.system() != 'Windows' and os.path.isabs(path):
+        return path
+    # Sur Windows : chemin absolu Windows (C:\... D:\...) → tel quel
+    if platform.system() == 'Windows' and len(path) >= 2 and path[1] == ':':
+        return path
+    # Chemin style Unix (/downloads) ou relatif → relatif à l'app
+    return os.path.join(base, path.lstrip('/\\'))
 
 def _ensure_dir(path):
     if path:
@@ -575,20 +579,20 @@ def api_tv_details(tv_id):
     season = request.args.get('season', 1, type=int)
     episode = request.args.get('episode', 1, type=int)
     source = request.args.get('source', 'tvdb')
+    cache_key = f"{tv_id}:s{season}e{episode}"
     try:
-        cached = db.details_get('tv', str(tv_id))
+        cached = db.details_get('tv', cache_key)
         if cached is not None:
-            logger.info(f"TV details: cache hit for {tv_id}")
+            logger.info(f"TV details: cache hit for {tv_id} S{season}E{episode}")
             out = dict(cached)
             out['cache_source'] = 'details_cache'
-            # Ensure season/episode fields are present
             out.update({'season': season, 'episode': episode})
             return jsonify(out)
     except Exception:
         pass
     details = api_handler.get_tv_details(str(tv_id), season, episode, source)
     try:
-        db.details_set('tv', str(tv_id), details)
+        db.details_set('tv', cache_key, details)
     except Exception:
         pass
     details['cache_source'] = 'tvdb'
@@ -795,6 +799,165 @@ def api_history():
                 e['can_revert'] = True
                 e['revert_status'] = 'available'
     return jsonify(history)
+
+@app.route('/api/library')
+@login_required
+def api_library():
+    path = request.args.get('path', '').strip()
+    library_type = request.args.get('type', '')  # 'movie' or 'tv'
+
+    # Root call — return both movie and tv roots
+    if not path:
+        roots = []
+        for lib_type, cfg_key in [('movie', '_movie_output_path'), ('tv', '_tv_output_path')]:
+            lib_path = config.get(cfg_key) or config.get(cfg_key.lstrip('_'))
+            if lib_path and os.path.isdir(lib_path):
+                roots.append({'name': os.path.basename(lib_path) or lib_path, 'path': lib_path, 'type': lib_type, 'is_dir': True})
+        return jsonify({'path': '', 'type': 'root', 'entries': roots})
+
+    if not os.path.isdir(path):
+        return jsonify({'error': 'Dossier introuvable'}), 404
+
+    movie_root = os.path.abspath(config.get('_movie_output_path') or config.get('movie_output_path') or '')
+    tv_root    = os.path.abspath(config.get('_tv_output_path')    or config.get('tv_output_path')    or '')
+    abs_path   = os.path.abspath(path)
+    if abs_path.startswith(movie_root):
+        lib_type = 'movie'
+    elif abs_path.startswith(tv_root):
+        lib_type = 'tv'
+    else:
+        lib_type = library_type or 'movie'
+
+    movie_fmt = config.get('movie_format', '{n} ({y})')
+    tv_fmt    = config.get('tv_format',    '{n} - {s00e00} - {t}')
+
+    VIDEO_EXT = {'.mkv', '.mp4', '.avi', '.mov', '.wmv', '.m4v', '.ts', '.flv', '.webm'}
+
+    def is_valid_name(filename, ftype, is_dir=False):
+        stem = Path(filename).stem if not is_dir else filename
+        fmt = movie_fmt if ftype == 'movie' else tv_fmt
+        tokens = set(re.findall(r'\{([a-zA-Z_][\w:]*?)\}', fmt))
+        # Normaliser les alias
+        if 'imdbid' in tokens: tokens.add('imdb')
+        if 'imdb' in tokens: tokens.add('imdbid')
+        if 'tmdbid' in tokens: tokens.add('tmdb')
+        if 'tmdb' in tokens: tokens.add('tmdbid')
+        if 'year' in tokens: tokens.add('y')
+        if 'y' in tokens: tokens.add('year')
+
+        checks = {
+            # token          : (regex_dans_stem,          applicable_is_dir)
+            'y':              (r'\(\d{4}\)',               True),
+            'imdb':           (r'imdb(?:id)?-tt\d+',       False),
+            'tvdbid':         (r'tvdbid-\d+',              True),
+            'tmdb':           (r'tmdb(?:id)?-\d+',         False),
+            's00e00':         (r'[Ss]\d{2}[Ee]\d{2}',     False),
+            'sxe':            (r'\d+x\d{2}',               False),
+        }
+        for token, (pattern, dir_ok) in checks.items():
+            if token not in tokens:
+                continue
+            if is_dir and not dir_ok:
+                continue
+            if not re.search(pattern, stem):
+                return False
+        return True
+
+    entries = []
+    try:
+        for entry in sorted(os.scandir(path), key=lambda e: (not e.is_dir(), e.name.lower())):
+            if entry.is_dir(follow_symlinks=False):
+                try:
+                    child_count = sum(1 for _ in os.scandir(entry.path))
+                except Exception:
+                    child_count = 0
+                valid_dir = is_valid_name(entry.name, lib_type, is_dir=True)
+                entries.append({'name': entry.name, 'path': entry.path, 'type': lib_type, 'is_dir': True, 'child_count': child_count, 'valid': valid_dir})
+            elif entry.is_file() and Path(entry.name).suffix.lower() in VIDEO_EXT:
+                valid = is_valid_name(entry.name, lib_type)
+                entries.append({'name': entry.name, 'path': entry.path, 'type': lib_type, 'is_dir': False, 'valid': valid})
+    except PermissionError:
+        return jsonify({'error': 'Permission refusée'}), 403
+
+    return jsonify({'path': path, 'type': lib_type, 'entries': entries})
+
+
+@app.route('/api/library/send-back-folder', methods=['POST'])
+@login_required
+def api_library_send_back_folder():
+    d = request.json or {}
+    folder = d.get('path')
+    if not folder or not os.path.isdir(folder):
+        return jsonify({'success': False, 'message': 'Dossier introuvable'}), 400
+    movie_root = os.path.abspath(config.get('_movie_output_path') or config.get('movie_output_path') or '')
+    tv_root    = os.path.abspath(config.get('_tv_output_path')    or config.get('tv_output_path')    or '')
+    abs_folder = os.path.abspath(folder)
+    if not (abs_folder.startswith(movie_root) or abs_folder.startswith(tv_root)):
+        return jsonify({'success': False, 'message': 'Opération non autorisée hors des dossiers médias'}), 403
+    input_path = config.get('_input_path') or config.get('input_path')
+    VIDEO_EXT = {'.mkv', '.mp4', '.avi', '.mov', '.wmv', '.m4v', '.ts', '.flv', '.webm'}
+    moved, errors = [], []
+    for entry in os.scandir(folder):
+        if entry.is_file() and Path(entry.name).suffix.lower() in VIDEO_EXT:
+            dst = os.path.join(input_path, entry.name)
+            try:
+                _move_path(entry.path, dst)
+                append_history({'id': str(uuid.uuid4()), 'op': 'move', 'date': time.strftime('%Y-%m-%d %H:%M:%S'),
+                                'from_path': entry.path, 'from_name': entry.name,
+                                'to_path': dst, 'to_name': entry.name})
+                moved.append(entry.name)
+            except Exception as e:
+                errors.append(f"{entry.name}: {e}")
+    global scan_last_snapshot
+    with scan_watch_lock:
+        scan_last_snapshot = _scan_snapshot()
+    if errors:
+        return jsonify({'success': False, 'message': '\n'.join(errors), 'moved': moved}), 400
+    return jsonify({'success': True, 'moved': moved})
+
+
+@app.route('/api/library/send-back', methods=['POST'])
+@login_required
+def api_library_send_back():
+    d = request.json or {}
+    src = d.get('path')
+    if not src or not os.path.isfile(src):
+        return jsonify({'success': False, 'message': 'Fichier introuvable'}), 400
+    dst = os.path.join(config.get('_input_path') or config.get('input_path'), os.path.basename(src))
+    try:
+        _move_path(src, dst)
+        append_history({'id': str(uuid.uuid4()), 'op': 'move', 'date': time.strftime('%Y-%m-%d %H:%M:%S'),
+                        'from_path': src, 'from_name': os.path.basename(src),
+                        'to_path': dst, 'to_name': os.path.basename(dst)})
+        global scan_last_snapshot
+        with scan_watch_lock:
+            scan_last_snapshot = _scan_snapshot()
+        return jsonify({'success': True})
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 400
+
+
+@app.route('/api/library/delete-folder', methods=['POST'])
+@login_required
+def api_library_delete_folder():
+    d = request.json or {}
+    path = d.get('path')
+    if not path or not os.path.isdir(path):
+        return jsonify({'success': False, 'message': 'Dossier introuvable'}), 400
+    # Safety: only allow deletion inside movie/tv output paths
+    movie_root = os.path.abspath(config.get('_movie_output_path') or config.get('movie_output_path') or '')
+    tv_root    = os.path.abspath(config.get('_tv_output_path')    or config.get('tv_output_path')    or '')
+    abs_path   = os.path.abspath(path)
+    if not (abs_path.startswith(movie_root) or abs_path.startswith(tv_root)):
+        return jsonify({'success': False, 'message': 'Suppression non autorisée hors des dossiers médias'}), 403
+    if any(True for _ in os.scandir(path)):
+        return jsonify({'success': False, 'message': 'Le dossier n\'est pas vide'}), 400
+    try:
+        os.rmdir(path)
+        return jsonify({'success': True})
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 400
+
 
 @app.route('/api/cache/clear', methods=['POST'])
 @login_required

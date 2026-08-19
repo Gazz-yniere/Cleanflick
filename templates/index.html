@@ -28,6 +28,7 @@
 
     <nav>
         <a href="#" onclick="switchTab('files', event)" class="nav-link active" data-i18n="nav_files"><i class="mdi mdi-folder-play"></i></a>
+        <a href="#" onclick="switchTab('library', event)" class="nav-link" data-i18n="nav_library"><i class="mdi mdi-bookshelf"></i></a>
         <a href="#" onclick="switchTab('history', event)" class="nav-link" data-i18n="nav_history"><i class="mdi mdi-history"></i></a>
         <a href="#" onclick="switchTab('config', event)" class="nav-link" data-i18n="nav_config"><i class="mdi mdi-cog"></i></a>
     </nav>
@@ -58,6 +59,19 @@
                     <tr><td colspan="4" class="empty-state" data-i18n="no_files"></td></tr>
                 </tbody>
             </table>
+        </div>
+
+        <!-- ===== LIBRAIRIE ===== -->
+        <div id="library" class="section">
+            <div class="filter-bar">
+                <button class="btn btn-primary" onclick="loadLibrary()" data-i18n="btn_refresh_library"><i class="mdi mdi-refresh"></i></button>
+                <span class="lib-legend">
+                    <span class="lib-badge lib-badge--ok"><i class="mdi mdi-check-circle"></i></span> <span data-i18n="lib_valid"></span>
+                    &nbsp;
+                    <span class="lib-badge lib-badge--warn"><i class="mdi mdi-alert"></i></span> <span data-i18n="lib_invalid"></span>
+                </span>
+            </div>
+            <div id="library-tree"></div>
         </div>
 
         <!-- ===== HISTORIQUE ===== -->
@@ -315,6 +329,21 @@
             <button class="close-btn" onclick="closeModal('folderPickerModal')">&times;</button>
         </div>
         <div id="folderPickerContent"></div>
+    </div>
+</div>
+
+<!-- Modal Confirm Delete Folder -->
+<div id="confirmDeleteFolderModal" class="modal">
+    <div class="modal-content modal-content--narrow">
+        <div class="modal-header">
+            <h2><i class="mdi mdi-folder-remove"></i> <span data-i18n="lib_delete_folder_title"></span></h2>
+            <button class="close-btn" onclick="closeModal('confirmDeleteFolderModal')">&times;</button>
+        </div>
+        <p style="color:var(--c-text2);margin-bottom:20px;" id="delete-folder-msg"></p>
+        <div style="display:flex;gap:10px;justify-content:flex-end;">
+            <button class="btn btn-secondary" onclick="closeModal('confirmDeleteFolderModal')" data-i18n="picker_cancel"></button>
+            <button class="btn btn-primary" id="confirm-delete-folder-btn"><i class="mdi mdi-delete"></i> <span data-i18n="lib_delete_confirm"></span></button>
+        </div>
     </div>
 </div>
 

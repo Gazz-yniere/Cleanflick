@@ -117,6 +117,7 @@ function switchTab(tab, e) {
     if (e?.target) e.target.closest('.nav-link').classList.add('active');
     if (tab === 'config') loadConfig();
     if (tab === 'history') loadHistory();
+    if (tab === 'library') loadLibrary();
 }
 
 // ── Scan ──────────────────────────────────────────────────────────────────────
@@ -315,6 +316,220 @@ function updateFileRow(fileOrPath) {
     if (actionsCell) actionsCell.innerHTML = renderActions(file);
     const progressCell = row.querySelector('.progress-info-td');
     if (progressCell) progressCell.innerHTML = renderProgressCell(file);
+}
+
+// ── Library ───────────────────────────────────────────────────────────────────
+function loadLibrary() {
+    const container = document.getElementById('library-tree');
+    container.innerHTML = `<div class="loading"><div class="spinner"></div></div>`;
+    fetch('/api/library')
+        .then(r => r.json())
+        .then(data => {
+            if (!data.entries?.length) {
+                container.innerHTML = `<div class="empty-state">${tr('lib_empty')}</div>`;
+                return;
+            }
+            container.innerHTML = '';
+            data.entries.forEach(root => {
+                container.appendChild(buildLibNode(root, 0, true));
+            });
+        })
+        .catch(e => { container.innerHTML = `<div class="message error">${esc(e.message)}</div>`; });
+}
+
+function buildLibNode(entry, depth, autoExpand) {
+    const wrap = document.createElement('div');
+    wrap.className = 'lib-node';
+    wrap.style.paddingLeft = depth > 0 ? '20px' : '0';
+
+    if (entry.is_dir) {
+        const row = document.createElement('div');
+        row.className = 'lib-row lib-row--dir';
+        row.dataset.path = entry.path;
+        const badgeDir = entry.valid === false ? `<span class="lib-badge lib-badge--warn"><i class="mdi mdi-alert"></i></span>` : '';
+        const dirActions = document.createElement('div');
+        dirActions.className = 'lib-actions';
+
+        // Dossier vide : non-expandable, bouton supprimer uniquement
+        if (entry.child_count === 0) {
+            row.innerHTML = `
+                <span class="lib-toggle" style="visibility:hidden"><i class="mdi mdi-chevron-right"></i></span>
+                <i class="mdi mdi-folder-outline lib-icon-dir" style="opacity:0.5"></i>
+                <span class="lib-name">${esc(entry.name)}</span>
+                ${badgeDir}`;
+            const delBtn = document.createElement('button');
+            delBtn.className = 'btn-small revert';
+            delBtn.title = tr('lib_delete_folder');
+            delBtn.innerHTML = '<i class="mdi mdi-folder-remove"></i>';
+            delBtn.addEventListener('click', (e) => { e.stopPropagation(); confirmDeleteFolder(entry.path); });
+            dirActions.appendChild(delBtn);
+            row.appendChild(dirActions);
+            wrap.appendChild(row);
+            return wrap;
+        }
+
+        row.innerHTML = `
+            <span class="lib-toggle"><i class="mdi mdi-chevron-right"></i></span>
+            <i class="mdi mdi-folder lib-icon-dir"></i>
+            <span class="lib-name">${esc(entry.name)}</span>
+            ${badgeDir}
+            ${entry.child_count !== undefined ? `<span class="lib-count">${entry.child_count}</span>` : ''}`;
+        if (depth > 0) {
+            const sendFolderBtn = document.createElement('button');
+            sendFolderBtn.className = 'btn-small revert';
+            sendFolderBtn.title = tr('lib_send_back_folder');
+            sendFolderBtn.innerHTML = '<i class="mdi mdi-folder-upload"></i>';
+            sendFolderBtn.addEventListener('click', (e) => { e.stopPropagation(); libSendBackFolder(entry.path, wrap); });
+            dirActions.appendChild(sendFolderBtn);
+        }
+        row.appendChild(dirActions);
+        const children = document.createElement('div');
+        children.className = 'lib-children';
+        children.style.display = 'none';
+        let loaded = false;
+
+        const toggle = (e) => {
+            if (e && e.target.closest('.lib-actions, button')) return;
+            const isOpen = children.style.display !== 'none';
+            if (isOpen) {
+                children.style.display = 'none';
+                row.querySelector('.lib-toggle i').className = 'mdi mdi-chevron-right';
+            } else {
+                children.style.display = 'block';
+                row.querySelector('.lib-toggle i').className = 'mdi mdi-chevron-down';
+                if (!loaded) {
+                    loaded = true;
+                    children.innerHTML = `<div class="lib-loading">◌</div>`;
+                    fetch(`/api/library?path=${encodeURIComponent(entry.path)}&type=${entry.type}`)
+                        .then(r => r.json())
+                        .then(data => {
+                            children.innerHTML = '';
+                            if (!data.entries?.length) {
+                                const emptyRow = document.createElement('div');
+                                emptyRow.className = 'lib-row lib-row--empty';
+                                emptyRow.dataset.path = entry.path;
+                                emptyRow.innerHTML = `<span class="lib-empty-label">${tr('lib_folder_empty')}</span>`;
+                                const sendEmptyBtn = document.createElement('button');
+                                sendEmptyBtn.className = 'btn-small revert';
+                                sendEmptyBtn.title = tr('lib_send_back_folder');
+                                sendEmptyBtn.innerHTML = '<i class="mdi mdi-folder-upload"></i>';
+                                sendEmptyBtn.addEventListener('click', () => libSendBackFolder(entry.path, wrap));
+                                emptyRow.appendChild(sendEmptyBtn);
+                                const delBtn = document.createElement('button');
+                                delBtn.className = 'btn-small revert';
+                                delBtn.title = tr('lib_delete_folder');
+                                delBtn.innerHTML = '<i class="mdi mdi-folder-remove"></i>';
+                                delBtn.addEventListener('click', () => confirmDeleteFolder(entry.path));
+                                emptyRow.appendChild(delBtn);
+                                children.appendChild(emptyRow);
+                            } else {
+                                data.entries.forEach(child => children.appendChild(buildLibNode(child, 1, false)));
+                            }
+                        })
+                        .catch(() => { children.innerHTML = `<div class="lib-loading">✗</div>`; });
+                }
+            }
+        };
+        row.addEventListener('click', toggle);
+        wrap.appendChild(row);
+        wrap.appendChild(children);
+        if (autoExpand) toggle();
+    } else {
+        const badgeClass = entry.valid ? 'lib-badge--ok' : 'lib-badge--warn';
+        const badgeIcon = entry.valid ? 'mdi-check-circle' : 'mdi-alert';
+        const row = document.createElement('div');
+        row.className = 'lib-row lib-row--file';
+        row.dataset.filePath = entry.path;
+        row.innerHTML = `
+            <i class="mdi mdi-file-video lib-icon-file"></i>
+            <span class="lib-name lib-name--file">${esc(entry.name)}</span>
+            <span class="lib-badge ${badgeClass}"><i class="mdi ${badgeIcon}"></i></span>`;
+        const actions = document.createElement('div');
+        actions.className = 'lib-actions';
+        if (!entry.valid) {
+            const searchBtn = document.createElement('button');
+            searchBtn.className = 'btn-small search';
+            searchBtn.title = tr('lib_search_tvdb');
+            searchBtn.innerHTML = '<i class="mdi mdi-magnify"></i>';
+            searchBtn.addEventListener('click', () => libManualSearch(entry.path));
+            actions.appendChild(searchBtn);
+        }
+        const sendBtn = document.createElement('button');
+        sendBtn.className = 'btn-small revert';
+        sendBtn.title = tr('lib_send_back');
+        sendBtn.innerHTML = '<i class="mdi mdi-undo"></i>';
+        sendBtn.addEventListener('click', () => libSendBack(entry.path));
+        actions.appendChild(sendBtn);
+        row.appendChild(actions);
+        wrap.appendChild(row);
+    }
+    return wrap;
+}
+
+function libSendBack(filePath) {
+    postJSON('/api/library/send-back', { path: filePath })
+        .then(data => {
+            if (!data.success) { alert(`✗ ${data.message}`); return; }
+            document.querySelectorAll('.lib-row--file').forEach(row => {
+                if (row.dataset.filePath === filePath) row.closest('.lib-node')?.remove();
+            });
+        })
+        .catch(e => alert(`✗ ${e.message}`));
+}
+
+function libSendBackFolder(folderPath, wrapEl) {
+    postJSON('/api/library/send-back-folder', { path: folderPath })
+        .then(data => {
+            if (!data.success) { alert(`✗ ${data.message}`); return; }
+            wrapEl?.remove();
+        })
+        .catch(e => alert(`✗ ${e.message}`));
+}
+
+function confirmDeleteFolder(folderPath) {
+    const name = folderPath.split('/').pop() || folderPath.split('\\').pop();
+    document.getElementById('delete-folder-msg').textContent = `"${name}"`;
+    document.getElementById('confirm-delete-folder-btn').onclick = () => {
+        closeModal('confirmDeleteFolderModal');
+        postJSON('/api/library/delete-folder', { path: folderPath })
+            .then(data => {
+                if (!data.success) { alert(`✗ ${data.message}`); return; }
+                loadLibrary();
+            })
+            .catch(e => alert(`✗ ${e.message}`));
+    };
+    document.getElementById('confirmDeleteFolderModal').classList.add('active');
+}
+
+function libManualSearch(filePath) {
+    const filename = filePath.split('/').pop() || filePath.split('\\').pop();
+    const tvRoot = globalConfig.tv_output_path || '';
+    const isTv = (tvRoot && filePath.startsWith(tvRoot)) || /[Ss]\d{2}[Ee]\d{2}/.test(filename);
+    // Extraire le titre proprement : supprimer extension, année, IDs, titre traduit entre parenthèses
+    const cleanedTitle = filename
+        .replace(/\.[^.]+$/, '')
+        .replace(/\s*\[(?:imdb(?:id)?|tvdbid|tmdb(?:id)?)-[^\]]+\]/gi, '')
+        .replace(/\s*-\s*\([^)]+\)\s*$/, '')
+        .replace(/\s*\(\d{4}\)/, '')
+        .replace(/\s*[Ss]\d{2}[Ee]\d{2}.*/i, '')
+        .replace(/\s*\d+x\d{2}.*/i, '')
+        .replace(/[\s\-]+$/, '')
+        .replace(/\s+/g, ' ').trim();
+    const fakeFile = { path: filePath, filename, media_type: isTv ? 'tv' : 'movie',
+                       title: cleanedTitle, season: 1, episode: 1 };
+    if (!allFiles.find(f => f.path === filePath)) allFiles.push(fakeFile);
+    // Ouvrir la modale avec le titre déjà nettoyé
+    window._manualSearchFilePath = filePath;
+    document.getElementById('manualSearchContent').innerHTML = `
+        <div class="form-field">
+            <label>${tr('search_label')}</label>
+            <input type="text" id="search-title" value="${esc(cleanedTitle)}" placeholder="..."
+                onkeydown="if(event.key==='Enter') executeManualSearch()">
+        </div>
+        <button class="btn btn-primary" style="width:100%" onclick="executeManualSearch()">${tr('search_btn')}</button>
+        <div id="manual-results" style="margin-top:15px;"></div>`;
+    document.getElementById('manualSearchModal').classList.add('active');
+    setTimeout(() => document.getElementById('search-title')?.focus(), 100);
 }
 
 // ── History ───────────────────────────────────────────────────────────────────
@@ -864,6 +1079,7 @@ document.addEventListener('DOMContentLoaded', () => {
         .then(cfg => {
             if (cfg.movie_format) globalConfig.movie_format = cfg.movie_format;
             if (cfg.tv_format)    globalConfig.tv_format    = cfg.tv_format;
+            if (cfg.tv_output_path) globalConfig.tv_output_path = cfg.tv_output_path;
             // Initial scan: populate the table but preserve previews if present
             scanFiles();
         })
