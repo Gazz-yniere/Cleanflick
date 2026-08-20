@@ -7,6 +7,8 @@ from pathlib import Path
 import mediaduration
 
 _MEDIA_DUR_CACHE = {}
+_OMDB_NEG_CACHE = {}       # imdb_id -> timestamp d'expiration des échecs/réponses négatives OMDb
+_OMDB_NEG_TTL = 300        # 5 min : évite de marteler OMDb (timeout ~6s) quand il est indisponible
 from scanner import MediaScanner, MediaFile
 from api_handler import APIHandler
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -441,6 +443,11 @@ def _fetch_omdb_single(imdb_id, title=None, year=None, is_series=False):
     imdb = imdb_id.strip().lower()
     if db.omdb_get(imdb) is not None:
         return db.omdb_get(imdb)
+    now = time.time()
+    if imdb in _OMDB_NEG_CACHE:
+        if now < _OMDB_NEG_CACHE[imdb]:
+            return None
+        del _OMDB_NEG_CACHE[imdb]
     try:
         if is_series and title:
             params = {'t': title, 'y': year, 'type': 'series', 'apikey': key}
@@ -450,14 +457,17 @@ def _fetch_omdb_single(imdb_id, title=None, year=None, is_series=False):
         resp = requests.get('https://www.omdbapi.com/', params=params, timeout=6)
         data = resp.json()
         if data.get('Response') != 'True':
+            _OMDB_NEG_CACHE[imdb] = now + _OMDB_NEG_TTL
             return None
         oimdb = (data.get('imdbID') or '').lower()
         db.omdb_set(oimdb or imdb, data)
         if oimdb and oimdb != imdb:
             db.omdb_set(imdb, data)
+        _OMDB_NEG_CACHE.pop(imdb, None)
         return data
     except Exception as e:
         logger.warning(f"OMDb single fetch error for {imdb}: {e}")
+        _OMDB_NEG_CACHE[imdb] = now + _OMDB_NEG_TTL
         return None
 
 
@@ -1150,7 +1160,9 @@ def api_library():
             od = _fetch_omdb_single(imdb, title, year, is_series)
             if od:
                 omdb_map[imdb] = od
-        if od and od.get('imdbRating'):
+        if not od:
+            return meta
+        if od.get('imdbRating'):
             meta['rating'] = od['imdbRating']
         if od.get('Released'):
             meta['date'] = _omdb_date(od['Released'])
