@@ -1049,7 +1049,8 @@ def api_library_missing():
     series_id = m.group(1)
     episodes = _series_episodes_cached(series_id)
     present = _present_episodes(path)
-    missing = [e for e in episodes if (e['s'], e['e']) not in present]
+    # Ignore les épisodes spéciaux (saison 0 / S00) : seules les saisons S01..S0X sont prises en compte.
+    missing = [e for e in episodes if e['s'] > 0 and (e['s'], e['e']) not in present]
     missing.sort(key=lambda x: (x['s'], x['e']))
     return jsonify({
         'series_id': series_id,

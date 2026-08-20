@@ -877,51 +877,42 @@ const LIB_PAGE_SIZE = 200;
 
 function loadLibChildren(entry, children, row, offset, limit) {
     const wrap = row.parentElement;
-    children.innerHTML = `<div class="lib-loading">◌</div>`;
+    if (offset === 0) children.innerHTML = `<div class="lib-loading">◌</div>`;
     fetch(`/api/library?path=${encodeURIComponent(entry.path)}&type=${entry.type}&offset=${offset}&limit=${limit}`)
         .then(r => r.json())
         .then(data => {
-            children.innerHTML = '';
-            if (!data.entries?.length) {
-                if (offset === 0) {
-                    const emptyRow = document.createElement('div');
-                    emptyRow.className = 'lib-row lib-row--empty';
-                    emptyRow.dataset.path = entry.path;
-                    emptyRow.innerHTML = `<span class="lib-empty-label">${tr('lib_folder_empty')}</span>`;
-                    const delBtn = document.createElement('button');
-                    delBtn.className = 'btn-small revert';
-                    delBtn.title = tr('lib_delete_folder');
-                    delBtn.innerHTML = '<i class="mdi mdi-folder-remove"></i>';
-                    delBtn.addEventListener('click', () => confirmDeleteFolder(entry.path));
-                    emptyRow.appendChild(delBtn);
-                    children.appendChild(emptyRow);
-                }
-                wrap._loaded = true;
-                wrap._nextOffset = 0;
-                return;
+            if (offset === 0) children.innerHTML = '';
+            if (data.entries?.length) {
+                sortEntries(data.entries).forEach(child => children.appendChild(buildLibNode(child, 1, false)));
             }
-            sortEntries(data.entries).forEach(child => children.appendChild(buildLibNode(child, 1, false)));
-            const loaded = offset + data.entries.length;
-            const remaining = (data.total ?? loaded) - loaded;
+            const loaded = offset + (data.entries?.length || 0);
+            const total = data.total ?? loaded;
             wrap._loaded = true;
             wrap._nextOffset = loaded;
-            if (remaining > 0) {
-                const more = document.createElement('div');
-                more.className = 'lib-row lib-row--more';
-                more._valid = true;
-                more.innerHTML = `<span class="lib-more-label">${tr('lib_load_more')} · ${remaining}</span>`;
-                more.addEventListener('click', () => { more.remove(); loadLibChildren(entry, children, row, loaded, limit); });
-                children.appendChild(more);
-            } else {
-                if (/\[tvdbid-/.test(entry.name)) {
-                    loadLibMissing(entry.path, wrap._missingBadge, children);
-                } else {
-                    refreshSeriesBadges(children);
-                }
+            if (loaded < total && data.entries?.length > 0) {
+                // Chargement séquentiel automatique : la page suivante se charge d'elle-même
+                // et les entrées s'affichent au fur et à mesure, sans bouton de pagination.
+                loadLibChildren(entry, children, row, loaded, limit);
+                return;
             }
+            if (loaded === 0) {
+                const emptyRow = document.createElement('div');
+                emptyRow.className = 'lib-row lib-row--empty';
+                emptyRow.dataset.path = entry.path;
+                emptyRow.innerHTML = `<span class="lib-empty-label">${tr('lib_folder_empty')}</span>`;
+                const delBtn = document.createElement('button');
+                delBtn.className = 'btn-small revert';
+                delBtn.title = tr('lib_delete_folder');
+                delBtn.innerHTML = '<i class="mdi mdi-folder-remove"></i>';
+                delBtn.addEventListener('click', () => confirmDeleteFolder(entry.path));
+                emptyRow.appendChild(delBtn);
+                children.appendChild(emptyRow);
+            }
+            if (/\[tvdbid-/.test(entry.name)) loadLibMissing(entry.path, wrap._missingBadge, children);
+            else refreshSeriesBadges(children);
             applyLibFilter();
         })
-        .catch(() => { children.innerHTML = `<div class="lib-loading">✗</div>`; });
+        .catch(() => { if (offset === 0) children.innerHTML = `<div class="lib-loading">✗</div>`; });
 }
 
 // ── Reconciliation incrémentale de la bibliothèque ───────────────────────────
@@ -1005,25 +996,8 @@ function syncLibFolder(entry, childrenEl, depth, node) {
 function finalizeSync(entry, childrenEl, depth, node, acc, total) {
     node._nextOffset = Math.min(acc.length, total);
     reconcileContainer(childrenEl, acc, depth);
-    const moreRow = childrenEl.querySelector(':scope > .lib-row--more');
-    const remaining = Math.max(0, (total ?? node._nextOffset) - node._nextOffset);
-    if (remaining > 0) {
-        if (moreRow) {
-            moreRow.querySelector('.lib-more-label').textContent = `${tr('lib_load_more')} · ${remaining}`;
-        } else {
-            const more = document.createElement('div');
-            more.className = 'lib-row lib-row--more';
-            more._valid = true;
-            more.innerHTML = `<span class="lib-more-label">${tr('lib_load_more')} · ${remaining}</span>`;
-            const row = childrenEl.closest('.lib-node')?.querySelector('.lib-row--dir');
-            more.addEventListener('click', () => { more.remove(); loadLibChildren(entry, childrenEl, row, node._nextOffset, LIB_PAGE_SIZE); });
-            childrenEl.appendChild(more);
-        }
-    } else if (moreRow) {
-        moreRow.remove();
-        if (/\[tvdbid-/.test(entry.name)) loadLibMissing(entry.path, node._missingBadge, childrenEl);
-        else refreshSeriesBadges(childrenEl);
-    }
+    if (/\[tvdbid-/.test(entry.name)) loadLibMissing(entry.path, node._missingBadge, childrenEl);
+    else refreshSeriesBadges(childrenEl);
     applyLibFilter();
 }
 
