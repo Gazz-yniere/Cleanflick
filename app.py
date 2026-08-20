@@ -9,6 +9,37 @@ import mediaduration
 _MEDIA_DUR_CACHE = {}
 _OMDB_NEG_CACHE = {}       # imdb_id -> timestamp d'expiration des échecs/réponses négatives OMDb
 _OMDB_NEG_TTL = 300        # 5 min : évite de marteler OMDb (timeout ~6s) quand il est indisponible
+_OMDB_QUOTA_LOCKOUT_SECS = 86400  # 24 h : suspension OMDb une fois le quota journalier atteint
+_OMDB_QUOTA_KEY = 'omdb_quota_paused_until'  # clé persistée en base (survit aux redémarrages)
+
+
+def _omdb_quota_paused_until():
+    """Timestamp d'expiration du verrou quota OMDb (0 si aucun verrou)."""
+    try:
+        return float(db.meta_get(_OMDB_QUOTA_KEY, 0) or 0)
+    except Exception:
+        return 0
+
+
+def _omdb_quota_locked():
+    """Vrai tant que le quota OMDb est atteint : aucune requête réseau autorisée."""
+    return time.time() < _omdb_quota_paused_until()
+
+
+def _omdb_quota_state():
+    """État courant du quota pour l'API : {'locked': bool, 'resumes_in_secs': int}."""
+    until = _omdb_quota_paused_until()
+    now = time.time()
+    if until > now:
+        return {'locked': True, 'resumes_in_secs': int(until - now)}
+    return {'locked': False, 'resumes_in_secs': 0}
+
+
+def _omdb_mark_quota_reached():
+    """Persiste le verrou quota 24 h et log une alerte claire."""
+    until = time.time() + _OMDB_QUOTA_LOCKOUT_SECS
+    db.meta_set(_OMDB_QUOTA_KEY, str(int(until)))
+    logger.warning("OMDb: quota journalier atteint — requêtes suspendues pendant 24 h")
 from scanner import MediaScanner, MediaFile
 from api_handler import APIHandler
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -440,6 +471,8 @@ def _fetch_omdb_single(imdb_id, title=None, year=None, is_series=False):
     key = (config.get('omdb_api_key') or '').strip()
     if not key or not imdb_id:
         return None
+    if _omdb_quota_locked():
+        return None
     imdb = imdb_id.strip().lower()
     if db.omdb_get(imdb) is not None:
         return db.omdb_get(imdb)
@@ -453,11 +486,15 @@ def _fetch_omdb_single(imdb_id, title=None, year=None, is_series=False):
             params = {'t': title, 'y': year, 'type': 'series', 'apikey': key}
         else:
             params = {'i': imdb, 'apikey': key}
-        db.usage_bump('omdb')
         resp = requests.get('https://www.omdbapi.com/', params=params, timeout=6)
         data = resp.json()
+        db.usage_bump('omdb')
         if data.get('Response') != 'True':
-            _OMDB_NEG_CACHE[imdb] = now + _OMDB_NEG_TTL
+            err = str(data.get('Error', '')).lower()
+            if 'limit' in err or 'quota' in err or 'request rate' in err:
+                _omdb_mark_quota_reached()
+            else:
+                _OMDB_NEG_CACHE[imdb] = now + _OMDB_NEG_TTL
             return None
         oimdb = (data.get('imdbID') or '').lower()
         db.omdb_set(oimdb or imdb, data)
@@ -522,6 +559,8 @@ def _fetch_omdb_episode(series_imdb, title, year, season, episode):
     key = (config.get('omdb_api_key') or '').strip()
     if not key or not title or not season or not episode:
         return
+    if _omdb_quota_locked():
+        return
     cache_key = f"{series_imdb}:y{year}:s{int(season):02d}e{int(episode):02d}"
     if db.omdb_episode_get(cache_key) is not None:
         return
@@ -531,11 +570,15 @@ def _fetch_omdb_episode(series_imdb, title, year, season, episode):
         }
         if year:
             params['y'] = year
-        db.usage_bump('omdb')
         resp = requests.get('https://www.omdbapi.com/', params=params, timeout=6)
         data = resp.json()
+        db.usage_bump('omdb')
         if data.get('Response') == 'True':
             db.omdb_episode_set(cache_key, data)
+        else:
+            err = str(data.get('Error', '')).lower()
+            if 'limit' in err or 'quota' in err or 'request rate' in err:
+                _omdb_mark_quota_reached()
     except Exception as e:
         logger.warning(f"OMDb episode fetch error for {title} S{season}E{episode}: {e}")
 
@@ -984,8 +1027,17 @@ def _tvdb_series_episodes(series_id):
         return cached['episodes']
     try:
         res = api_handler.get_series_episodes(series_id)
-        episodes = [{'s': e.get('s'), 'e': e.get('e'), 'title': e.get('title', '')}
-                    for e in res.get('episodes', []) if e.get('s') is not None and e.get('e') is not None]
+        raw = [{'s': e.get('s'), 'e': e.get('e'), 'title': e.get('title', '')}
+               for e in res.get('episodes', []) if e.get('s') is not None and e.get('e') is not None]
+        # Déduplication par (saison, episode) : la réponse TVDB peut contenir des doublons.
+        episodes = []
+        seen = set()
+        for e in raw:
+            key = (e['s'], e['e'])
+            if key in seen:
+                continue
+            seen.add(key)
+            episodes.append(e)
         if episodes:
             db.series_episodes_set(series_id, {'episodes': episodes})
             return episodes
@@ -995,16 +1047,19 @@ def _tvdb_series_episodes(series_id):
 
 
 def _present_episodes(path):
-    """Ensemble des (saison, episode) présents dans un dossier série."""
+    """Ensemble des (saison, episode) présents dans un dossier série (scan récursif,
+    car les épisodes peuvent être répartis dans des sous-dossiers par saison)."""
     VIDEO_EXT = {'.mkv', '.mp4', '.avi', '.mov', '.wmv', '.m4v', '.ts', '.flv', '.webm'}
     present = set()
     sxe = re.compile(r'[Ss](\d{1,2})[Ee](\d{1,3})')
     try:
-        for entry in os.scandir(path):
-            if entry.is_file(follow_symlinks=False) and Path(entry.name).suffix.lower() in VIDEO_EXT:
-                m = sxe.search(entry.name)
-                if m:
-                    present.add((int(m.group(1)), int(m.group(2))))
+        for root, dirs, files in os.walk(path):
+            dirs[:] = [d for d in dirs if not d.startswith('.')]
+            for f in files:
+                if Path(f).suffix.lower() in VIDEO_EXT:
+                    m = sxe.search(f)
+                    if m:
+                        present.add((int(m.group(1)), int(m.group(2))))
     except Exception:
         pass
     return present
@@ -1050,7 +1105,17 @@ def api_library_missing():
     episodes = _series_episodes_cached(series_id)
     present = _present_episodes(path)
     # Ignore les épisodes spéciaux (saison 0 / S00) : seules les saisons S01..S0X sont prises en compte.
-    missing = [e for e in episodes if e['s'] > 0 and (e['s'], e['e']) not in present]
+    # Déduplication par (saison, episode) : le cache TVDB peut contenir des doublons.
+    missing = []
+    seen = set()
+    for e in episodes:
+        if e['s'] <= 0:
+            continue
+        key = (e['s'], e['e'])
+        if key in present or key in seen:
+            continue
+        seen.add(key)
+        missing.append(e)
     missing.sort(key=lambda x: (x['s'], x['e']))
     return jsonify({
         'series_id': series_id,
@@ -1063,7 +1128,7 @@ def api_library_missing():
 @app.route('/api/usage')
 @login_required
 def api_usage():
-    return jsonify({'usage': db.usage_get()})
+    return jsonify({'usage': db.usage_get(), 'omdb_quota': _omdb_quota_state()})
 
 
 @app.route('/api/library')

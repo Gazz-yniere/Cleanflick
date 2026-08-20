@@ -14,4 +14,11 @@ RUN mkdir -p /downloads/movie /downloads/tv_shows && \
 
 EXPOSE 5000
 
-CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--worker-class", "gevent", "--workers", "2", "--timeout", "120", "app:app"]
+# Worker gthread (threads OS réels) avec worker unique :
+# - worker unique => l'état métier (progression des déplacements, flux SSE, caches
+#   mémoire) reste dans un seul processus (round-robin multi-worker = état éclaté,
+#   progression invisible).
+# - threads réels => les copies/network bloquantes (shutil, TVDB, OMDb) dans un thread
+#   ne gèlent pas les autres requêtes. Avec gevent, shutil.copyfile bloque le loop
+#   => WORKER TIMEOUT => SIGKILL => progression perdue.
+CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--worker-class", "gthread", "--workers", "1", "--threads", "8", "--timeout", "300", "app:app"]

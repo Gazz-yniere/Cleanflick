@@ -879,7 +879,7 @@ const LIB_PAGE_SIZE = 200;
 
 function loadLibChildren(entry, children, row, offset, limit) {
     const wrap = row.parentElement;
-    if (offset === 0) children.innerHTML = `<div class="lib-loading">◌</div>`;
+    if (offset === 0) children.innerHTML = `<div class="lib-loading"><span class="lib-spinner"></span></div>`;
     fetch(`/api/library?path=${encodeURIComponent(entry.path)}&type=${entry.type}&offset=${offset}&limit=${limit}`)
         .then(r => r.json())
         .then(data => {
@@ -915,7 +915,7 @@ function loadLibChildren(entry, children, row, offset, limit) {
             else refreshSeriesBadges(children);
             applyLibFilter();
         })
-        .catch(() => { if (offset === 0) children.innerHTML = `<div class="lib-loading">✗</div>`; });
+        .catch(() => { if (offset === 0) children.innerHTML = `<div class="lib-loading lib-loading--error">✗</div>`; });
 }
 
 // ── Reconciliation incrémentale de la bibliothèque ───────────────────────────

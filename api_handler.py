@@ -73,8 +73,9 @@ class TVDBAPIHandler:
         try:
             results = []
             filtered = []
+            data = self.client.search(title, type="series") or []
             db.usage_bump('tvdb')
-            for r in (self.client.search(title, type="series") or [])[:10]:
+            for r in data[:10]:
                 try:
                     item = self._parse_search_result(r, 'series')
                     results.append(item)
@@ -94,8 +95,9 @@ class TVDBAPIHandler:
         try:
             results = []
             filtered = []
+            data = self.client.search(title, type="movie") or []
             db.usage_bump('tvdb')
-            for r in (self.client.search(title, type="movie") or [])[:10]:
+            for r in data[:10]:
                 try:
                     item = self._parse_search_result(r, 'movie')
                     item['director'] = r.get('director', '')
@@ -167,8 +169,8 @@ class TVDBAPIHandler:
 
     def get_series_details(self, series_id: int, search_data: Dict = None) -> Dict:
         try:
-            db.usage_bump('tvdb')
             s = self.client.get_series_extended(series_id)
+            db.usage_bump('tvdb')
             imdb, tmdb = self._remote_ids(s)
             sd = search_data or {}
             imdb = imdb or sd.get('imdb_id', '')
@@ -230,8 +232,8 @@ class TVDBAPIHandler:
 
     def get_movie_details(self, movie_id: int, search_data: Dict = None) -> Dict:
         try:
-            db.usage_bump('tvdb')
             m = self.client.get_movie_extended(movie_id)
+            db.usage_bump('tvdb')
             imdb, tmdb = self._remote_ids(m)
             wikidata = next((r['id'] for r in (m.get('remoteIds') or []) if r.get('sourceName') == 'Wikidata'), '')
             sd = search_data or {}
@@ -291,8 +293,8 @@ class TVDBAPIHandler:
             current_page = page
             total_pages = 1
             while current_page <= 20:
-                db.usage_bump('tvdb')
                 result = self.client.get_series_episodes(series_id, page=current_page)
+                db.usage_bump('tvdb')
                 found_season = False
                 for ep in result.get('episodes', []):
                     ep_season = ep.get('seasonNumber')

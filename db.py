@@ -96,6 +96,11 @@ def init_db():
         minutes INTEGER,
         loaded_at INTEGER
     )''')
+    cur.execute('''
+    CREATE TABLE IF NOT EXISTS app_meta (
+        key TEXT PRIMARY KEY,
+        value TEXT
+    )''')
     conn.commit()
     conn.close()
 
@@ -422,6 +427,31 @@ def usage_get():
         for r in cur.fetchall():
             out[r['service']] = {'total': r['total'], 'day': r['day'], 'day_count': r['day_count']}
         return out
+    finally:
+        conn.close()
+
+
+def meta_get(key: str, default=None):
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute('SELECT value FROM app_meta WHERE key = ?', (key,))
+        r = cur.fetchone()
+        return r['value'] if r else default
+    except Exception:
+        return default
+    finally:
+        conn.close()
+
+
+def meta_set(key: str, value):
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute('INSERT OR REPLACE INTO app_meta (key, value) VALUES (?, ?)', (key, str(value)))
+        conn.commit()
+    except Exception:
+        pass
     finally:
         conn.close()
 
