@@ -1558,12 +1558,15 @@ def api_library_send_back():
     if not src or not os.path.isfile(src):
         return jsonify({'success': False, 'message': 'Fichier introuvable'}), 400
     dst = os.path.join(config.get('_input_path') or config.get('input_path'), os.path.basename(src))
+    job_id = str(uuid.uuid4())
     try:
-        _move_path(src, dst)
-        append_history({'id': str(uuid.uuid4()), 'op': 'move', 'date': time.strftime('%Y-%m-%d %H:%M:%S'),
-                        'from_path': src, 'from_name': os.path.basename(src),
-                        'to_path': dst, 'to_name': os.path.basename(dst)})
-        return jsonify({'success': True})
+        _run_file_op(job_id, src, dst, {
+            'id': job_id, 'op': 'move',
+            'date': time.strftime('%Y-%m-%d %H:%M:%S'),
+            'from_path': src, 'from_name': os.path.basename(src),
+            'to_path': dst, 'to_name': os.path.basename(dst),
+        })
+        return jsonify({'success': True, 'job_id': job_id})
     except Exception as e:
         logger.error(f"Send-back error for {src} -> {dst}: {e}")
         return jsonify({'success': False, 'message': str(e)}), 400

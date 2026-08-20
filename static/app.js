@@ -1069,11 +1069,92 @@ function libSendBack(filePath) {
     postJSON('/api/library/send-back', { path: filePath })
         .then(data => {
             if (!data.success) { alert(`✗ ${data.message}`); return; }
-            document.querySelectorAll('.lib-row--file').forEach(row => {
-                if (row.dataset.filePath === filePath) row.closest('.lib-node')?.remove();
-            });
+            const jobId = data.job_id;
+            if (!jobId) { removeLibFileRow(filePath); return; }
+            activeTransfers[jobId] = { filePath, jobId, pollInterval: null, startTime: Date.now(), progress: null };
+            markLibRowTransferring(filePath, jobId);
+            trackLibMoveProgress(jobId, filePath);
         })
         .catch(e => alert(`✗ ${e.message}`));
+}
+
+function findLibRow(filePath) {
+    let found = null;
+    document.querySelectorAll('.lib-row--file').forEach(row => {
+        if (row.dataset.filePath === filePath) found = row;
+    });
+    return found;
+}
+
+function removeLibFileRow(filePath) {
+    const row = findLibRow(filePath);
+    if (row) row.closest('.lib-node')?.remove();
+}
+
+function markLibRowTransferring(filePath, jobId) {
+    const row = findLibRow(filePath);
+    if (!row) return;
+    row.classList.add('transferring');
+    row.querySelectorAll('button').forEach(b => b.setAttribute('disabled', ''));
+    let cell = row.querySelector('.transfer-cell');
+    if (!cell) {
+        cell = document.createElement('div');
+        cell.className = 'transfer-cell';
+        row.appendChild(cell);
+    }
+    const file = { path: filePath, filename: basename(filePath) };
+    cell.innerHTML = renderTransferOverlay(file, activeTransfers[jobId]);
+}
+
+function updateLibTransferRow(filePath, jobId) {
+    const row = findLibRow(filePath);
+    const cell = row && row.querySelector('.transfer-cell');
+    if (!cell) return;
+    const transfer = activeTransfers[jobId];
+    if (!transfer) return;
+    const file = { path: filePath, filename: basename(filePath) };
+    cell.innerHTML = renderTransferOverlay(file, transfer);
+}
+
+function unmarkLibRowTransferring(filePath) {
+    const row = findLibRow(filePath);
+    if (!row) return;
+    row.classList.remove('transferring');
+    row.querySelectorAll('button').forEach(b => b.removeAttribute('disabled'));
+    row.querySelector('.transfer-cell')?.remove();
+}
+
+function trackLibMoveProgress(jobId, filePath) {
+    const pollInterval = setInterval(async () => {
+        try {
+            const response = await fetch(`/api/move-progress/${jobId}`);
+            const prog = await response.json();
+            const transfer = activeTransfers[jobId];
+            if (!transfer) { clearInterval(pollInterval); return; }
+
+            if (prog.finished) {
+                clearInterval(pollInterval);
+                delete activeTransfers[jobId];
+                if (prog.error) {
+                    const row = findLibRow(filePath);
+                    const cell = row && row.querySelector('.transfer-cell');
+                    if (cell) cell.innerHTML = `<div class="transfer-overlay transfer-overlay--done transfer-overlay--error">
+                        <div class="transfer-overlay-title"><i class="mdi mdi-alert-circle"></i> ${esc(prog.error || tr('transfer_done'))}</div>
+                    </div>`;
+                    setTimeout(() => unmarkLibRowTransferring(filePath), 2500);
+                    return;
+                }
+                removeLibFileRow(filePath);
+                return;
+            }
+
+            transfer.progress = prog;
+            updateLibTransferRow(filePath, jobId);
+        } catch (e) {
+            console.error('Lib progress poll error:', e);
+        }
+    }, 400);
+    if (activeTransfers[jobId]) activeTransfers[jobId].pollInterval = pollInterval;
 }
 
 function confirmDeleteFolder(folderPath) {
@@ -1424,6 +1505,7 @@ function trackMoveProgress(jobId, filePath, file, newName) {
                 }
                 showTransferResult(filePath, false);
                 setTimeout(() => removeFileFromList(filePath), 900);
+                refreshLibrary();
                 return;
             }
 
