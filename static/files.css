@@ -192,6 +192,9 @@
 .lib-row--file { color: var(--c-text2); padding-left: 36px; }
 .lib-row--file:hover { background: var(--c-surface2); }
 .lib-row--empty { padding-left: 36px; color: var(--c-text4); font-style: italic; gap: 10px; }
+.lib-row--more { padding-left: 36px; cursor: pointer; color: var(--c-accent); font-weight: 500; border-bottom: 1px solid var(--c-surface3); }
+.lib-row--more:hover { background: var(--c-surface2); }
+.lib-more-label { font-size: 1em; }
 .lib-toggle { width: 30px; margin-right: 6px; flex-shrink: 0; color: var(--c-text3); }
 .lib-icon-dir  { color: var(--c-accent); font-size: 30px; flex-shrink: 0; }
 .lib-icon-file { color: var(--c-text4); font-size: 30px; flex-shrink: 0; }

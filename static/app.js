@@ -118,7 +118,11 @@ function switchTab(tab, e) {
     if (tab === 'files') scanFiles();
     if (tab === 'config') loadConfig();
     if (tab === 'history') loadHistory();
-    if (tab === 'library') refreshLibrary();
+    if (tab === 'library') {
+        const c = document.getElementById('library-tree');
+        if (!c || !c.children.length || c.querySelector('.loading, .empty-state')) loadLibrary();
+        // sinon : on garde l'état déjà affiché (chargement lazy conservé), pas de rechargement.
+    }
 }
 
 // ── Scan ──────────────────────────────────────────────────────────────────────
@@ -560,12 +564,25 @@ function loadLibrary() {
 
 function refreshLibrary() {
     const container = document.getElementById('library-tree');
+    if (!container) return;
     const domExpanded = getExpandedPaths(container);
     if (domExpanded.length) {
         expandedPaths = new Set(domExpanded);
         saveExpandedPaths(expandedPaths);
     }
-    loadLibrary();
+    if (!container.children.length || container.querySelector('.loading, .empty-state')) {
+        loadLibrary();
+        return;
+    }
+    // Rafraîchissement incrémental : ne met à jour que les différences, sans tout reconstruire.
+    fetch('/api/library')
+        .then(r => r.json())
+        .then(data => {
+            if (!data.entries?.length) return;
+            reconcileContainer(container, data.entries, 0);
+            applyLibFilter();
+        })
+        .catch(() => {});
 }
 
 function getExpandedPaths(container) {
@@ -734,6 +751,11 @@ function buildLibNode(entry, depth, autoExpand) {
     wrap.style.paddingLeft = depth > 0 ? '20px' : '0';
     wrap._sort = { is_dir: !!entry.is_dir, name: entry.name, size: entry.size ?? 0, is_ep: !!(entry.meta && entry.meta.episode), rating: sortRating(entry) };
     wrap._valid = entry.valid;
+    wrap._key = entry.path;
+    wrap._path = entry.path;
+    wrap._loaded = false;
+    wrap._nextOffset = 0;
+    wrap._missingBadge = null;
 
     if (entry.is_dir) {
         const row = document.createElement('div');
@@ -786,6 +808,7 @@ function buildLibNode(entry, depth, autoExpand) {
             mBadge._path = entry.path;
             row.insertBefore(mBadge, dirActions);
             row._missingBadge = mBadge;
+            wrap._missingBadge = mBadge;
         }
         const children = document.createElement('div');
         children.className = 'lib-children';
@@ -803,34 +826,8 @@ function buildLibNode(entry, depth, autoExpand) {
                 row.querySelector('.lib-toggle i').className = 'mdi mdi-chevron-down';
                 if (!loaded) {
                     loaded = true;
-                    children.innerHTML = `<div class="lib-loading">◌</div>`;
-                    fetch(`/api/library?path=${encodeURIComponent(entry.path)}&type=${entry.type}`)
-                        .then(r => r.json())
-                        .then(data => {
-                            children.innerHTML = '';
-                            if (!data.entries?.length) {
-                                const emptyRow = document.createElement('div');
-                                emptyRow.className = 'lib-row lib-row--empty';
-                                emptyRow.dataset.path = entry.path;
-                                emptyRow.innerHTML = `<span class="lib-empty-label">${tr('lib_folder_empty')}</span>`;
-                                const delBtn = document.createElement('button');
-                                delBtn.className = 'btn-small revert';
-                                delBtn.title = tr('lib_delete_folder');
-                                delBtn.innerHTML = '<i class="mdi mdi-folder-remove"></i>';
-                                delBtn.addEventListener('click', () => confirmDeleteFolder(entry.path));
-                                emptyRow.appendChild(delBtn);
-                                children.appendChild(emptyRow);
-                            } else {
-                                sortEntries(data.entries).forEach(child => children.appendChild(buildLibNode(child, 1, false)));
-                                applyLibFilter();
-                                if (/\[tvdbid-/.test(entry.name)) {
-                                    loadLibMissing(entry.path, row._missingBadge, children);
-                                } else {
-                                    refreshSeriesBadges(children);
-                                }
-                            }
-                        })
-                        .catch(() => { children.innerHTML = `<div class="lib-loading">✗</div>`; });
+                    wrap._loaded = true;
+                    loadLibChildren(entry, children, row, 0, LIB_PAGE_SIZE);
                 }
             }
             expandedPaths[isOpen ? 'delete' : 'add'](entry.path);
@@ -874,6 +871,160 @@ function buildLibNode(entry, depth, autoExpand) {
         wrap.appendChild(row);
     }
     return wrap;
+}
+
+const LIB_PAGE_SIZE = 200;
+
+function loadLibChildren(entry, children, row, offset, limit) {
+    const wrap = row.parentElement;
+    children.innerHTML = `<div class="lib-loading">◌</div>`;
+    fetch(`/api/library?path=${encodeURIComponent(entry.path)}&type=${entry.type}&offset=${offset}&limit=${limit}`)
+        .then(r => r.json())
+        .then(data => {
+            children.innerHTML = '';
+            if (!data.entries?.length) {
+                if (offset === 0) {
+                    const emptyRow = document.createElement('div');
+                    emptyRow.className = 'lib-row lib-row--empty';
+                    emptyRow.dataset.path = entry.path;
+                    emptyRow.innerHTML = `<span class="lib-empty-label">${tr('lib_folder_empty')}</span>`;
+                    const delBtn = document.createElement('button');
+                    delBtn.className = 'btn-small revert';
+                    delBtn.title = tr('lib_delete_folder');
+                    delBtn.innerHTML = '<i class="mdi mdi-folder-remove"></i>';
+                    delBtn.addEventListener('click', () => confirmDeleteFolder(entry.path));
+                    emptyRow.appendChild(delBtn);
+                    children.appendChild(emptyRow);
+                }
+                wrap._loaded = true;
+                wrap._nextOffset = 0;
+                return;
+            }
+            sortEntries(data.entries).forEach(child => children.appendChild(buildLibNode(child, 1, false)));
+            const loaded = offset + data.entries.length;
+            const remaining = (data.total ?? loaded) - loaded;
+            wrap._loaded = true;
+            wrap._nextOffset = loaded;
+            if (remaining > 0) {
+                const more = document.createElement('div');
+                more.className = 'lib-row lib-row--more';
+                more._valid = true;
+                more.innerHTML = `<span class="lib-more-label">${tr('lib_load_more')} · ${remaining}</span>`;
+                more.addEventListener('click', () => { more.remove(); loadLibChildren(entry, children, row, loaded, limit); });
+                children.appendChild(more);
+            } else {
+                if (/\[tvdbid-/.test(entry.name)) {
+                    loadLibMissing(entry.path, wrap._missingBadge, children);
+                } else {
+                    refreshSeriesBadges(children);
+                }
+            }
+            applyLibFilter();
+        })
+        .catch(() => { children.innerHTML = `<div class="lib-loading">✗</div>`; });
+}
+
+// ── Reconciliation incrémentale de la bibliothèque ───────────────────────────
+function reconcileContainer(container, entries, depth) {
+    const existing = new Map();
+    Array.from(container.children).forEach(n => { if (n._key) existing.set(n._key, n); });
+    const serverPaths = new Set(entries.map(e => e.path));
+    for (const [key, node] of existing) {
+        if (!serverPaths.has(key)) node.remove();
+    }
+    for (const entry of entries) {
+        const node = existing.get(entry.path);
+        if (node) {
+            updateLibNode(node, entry);
+            if (entry.is_dir && node._loaded) {
+                const childrenEl = node.querySelector(':scope > .lib-children');
+                if (childrenEl && childrenEl.style.display === 'block') {
+                    syncLibFolder(entry, childrenEl, depth + 1, node);
+                }
+            }
+        } else {
+            insertLibNodeSorted(container, buildLibNode(entry, depth, false));
+        }
+    }
+}
+
+function updateLibNode(node, entry) {
+    const sizeEl = node.querySelector('.lib-size');
+    if (sizeEl && entry.size !== undefined) sizeEl.textContent = formatBytes(entry.size);
+    const countEl = node.querySelector('.lib-count');
+    if (countEl && entry.child_count !== undefined) countEl.textContent = entry.child_count;
+    node._valid = entry.valid;
+    const nameEl = node.querySelector('.lib-name');
+    const newMeta = metaText(entry.meta) ? metaHtml(entry.meta) : '';
+    if (nameEl) {
+        const oldMeta = nameEl.querySelector('.lib-meta');
+        if (oldMeta && newMeta && oldMeta.outerHTML !== newMeta) oldMeta.outerHTML = newMeta;
+        else if (!oldMeta && newMeta) nameEl.insertAdjacentHTML('beforeend', newMeta);
+        else if (oldMeta && !newMeta) oldMeta.remove();
+    }
+    if (node._sort) {
+        node._sort.name = entry.name;
+        node._sort.size = entry.size ?? 0;
+        node._sort.is_dir = !!entry.is_dir;
+        node._sort.is_ep = !!(entry.meta && entry.meta.episode);
+        node._sort.rating = sortRating(entry);
+    }
+}
+
+function insertLibNodeSorted(container, node) {
+    const sibs = Array.from(container.children);
+    let before = null;
+    for (const s of sibs) {
+        if (s === node || !s._sort) continue;
+        if (node._sort.is_dir && !s._sort.is_dir) { before = s; break; }
+        if (node._sort.is_dir === s._sort.is_dir && libSortCmp(node._sort, s._sort) < 0) { before = s; break; }
+    }
+    container.insertBefore(node, before);
+}
+
+function syncLibFolder(entry, childrenEl, depth, node) {
+    const limit = LIB_PAGE_SIZE;
+    const upto = Math.max(0, node._nextOffset || 0);
+    const acc = [];
+    let fetched = 0;
+    const load = (offset) => {
+        fetch(`/api/library?path=${encodeURIComponent(entry.path)}&type=${entry.type}&offset=${offset}&limit=${limit}`)
+            .then(r => r.json())
+            .then(data => {
+                if (data.entries?.length) acc.push(...data.entries);
+                fetched = offset + (data.entries?.length || 0);
+                const total = data.total ?? fetched;
+                if (fetched < upto && total > fetched) load(fetched);
+                else finalizeSync(entry, childrenEl, depth, node, acc, total);
+            })
+            .catch(() => {});
+    };
+    load(0);
+}
+
+function finalizeSync(entry, childrenEl, depth, node, acc, total) {
+    node._nextOffset = Math.min(acc.length, total);
+    reconcileContainer(childrenEl, acc, depth);
+    const moreRow = childrenEl.querySelector(':scope > .lib-row--more');
+    const remaining = Math.max(0, (total ?? node._nextOffset) - node._nextOffset);
+    if (remaining > 0) {
+        if (moreRow) {
+            moreRow.querySelector('.lib-more-label').textContent = `${tr('lib_load_more')} · ${remaining}`;
+        } else {
+            const more = document.createElement('div');
+            more.className = 'lib-row lib-row--more';
+            more._valid = true;
+            more.innerHTML = `<span class="lib-more-label">${tr('lib_load_more')} · ${remaining}</span>`;
+            const row = childrenEl.closest('.lib-node')?.querySelector('.lib-row--dir');
+            more.addEventListener('click', () => { more.remove(); loadLibChildren(entry, childrenEl, row, node._nextOffset, LIB_PAGE_SIZE); });
+            childrenEl.appendChild(more);
+        }
+    } else if (moreRow) {
+        moreRow.remove();
+        if (/\[tvdbid-/.test(entry.name)) loadLibMissing(entry.path, node._missingBadge, childrenEl);
+        else refreshSeriesBadges(childrenEl);
+    }
+    applyLibFilter();
 }
 
 function libSendBack(filePath) {

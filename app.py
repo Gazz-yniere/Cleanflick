@@ -1131,16 +1131,31 @@ def api_library():
     OMDB_MONTHS = {'Jan': 1, 'Feb': 2, 'Mar': 3, 'Apr': 4, 'May': 5, 'Jun': 6, 'Jul': 7, 'Aug': 8, 'Sep': 9, 'Oct': 10, 'Nov': 11, 'Dec': 12}
 
     def _media_duration(path):
-        """Durée réelle (min) du fichier vidéo, lue en Python pur (Docker-safe)."""
+        """Durée réelle (min) du fichier vidéo, lue en Python pur (Docker-safe),
+        mise en cache en mémoire + en base (invalidée si taille/mtime change)."""
         try:
-            mt = int(os.path.getmtime(path))
+            st = os.stat(path)
+            mt = int(st.st_mtime)
+            sz = st.st_size
         except Exception:
             return None
         key = (path, mt)
         if key in _MEDIA_DUR_CACHE:
             return _MEDIA_DUR_CACHE[key]
+        try:
+            cached = db.media_dur_get(path)
+            if cached and cached.get('size') == sz and cached.get('mtime') == mt:
+                minutes = cached.get('minutes')
+                _MEDIA_DUR_CACHE[key] = minutes
+                return minutes
+        except Exception:
+            pass
         minutes = mediaduration.get_duration_minutes(path)
         _MEDIA_DUR_CACHE[key] = minutes
+        try:
+            db.media_dur_set(path, minutes, sz, mt)
+        except Exception:
+            pass
         return minutes
 
     def _omdb_date(s):
@@ -1353,29 +1368,57 @@ def api_library():
             meta['runtime'] = f"{duration} min"
         return meta
 
-    entries = []
+    all_entries = []
     try:
-        for entry in sorted(os.scandir(path), key=lambda e: (not e.is_dir(), e.name.lower())):
-            if entry.is_dir(follow_symlinks=False):
-                try:
-                    child_count = sum(1 for _ in os.scandir(entry.path))
-                except Exception:
-                    child_count = 0
-                valid_dir = is_valid_name(entry.name, lib_type, is_dir=True)
-                entries.append({'name': entry.name, 'path': entry.path, 'type': lib_type, 'is_dir': True, 'child_count': child_count, 'size': _folder_size(entry.path), 'valid': valid_dir, 'meta': folder_meta(entry.name)})
-            elif entry.is_file() and Path(entry.name).suffix.lower() in VIDEO_EXT:
-                valid = is_valid_name(entry.name, lib_type)
-                size = 0
-                try:
-                    size = entry.stat(follow_symlinks=False).st_size
-                except OSError:
-                    pass
-                dur = _media_duration(entry.path)
-                entries.append({'name': entry.name, 'path': entry.path, 'type': lib_type, 'is_dir': False, 'size': size, 'valid': valid, 'meta': file_meta(entry.name, dur)})
+        all_entries = list(os.scandir(path))
     except PermissionError:
         return jsonify({'error': 'Permission refusée'}), 403
+    except OSError:
+        return jsonify({'error': 'Lecture impossible', 'entries': [], 'total': 0, 'offset': 0, 'limit': 0}), 200
 
-    return jsonify({'path': path, 'type': lib_type, 'entries': entries})
+    def _sort_key(e):
+        try:
+            return (not e.is_dir(follow_symlinks=False), e.name.lower())
+        except OSError:
+            return (True, e.name.lower())
+
+    all_entries.sort(key=_sort_key)
+
+    total = len(all_entries)
+    try:
+        offset = max(0, int(request.args.get('offset', 0)))
+        limit = int(request.args.get('limit', 0))
+    except Exception:
+        offset, limit = 0, 0
+    if limit and limit > 0:
+        page = all_entries[offset:offset + limit]
+    else:
+        page = all_entries[offset:]
+
+    entries = []
+    for entry in page:
+        try:
+            is_dir = entry.is_dir(follow_symlinks=False)
+        except OSError:
+            continue
+        if is_dir:
+            try:
+                child_count = sum(1 for _ in os.scandir(entry.path))
+            except Exception:
+                child_count = 0
+            valid_dir = is_valid_name(entry.name, lib_type, is_dir=True)
+            entries.append({'name': entry.name, 'path': entry.path, 'type': lib_type, 'is_dir': True, 'child_count': child_count, 'size': _folder_size(entry.path), 'valid': valid_dir, 'meta': folder_meta(entry.name)})
+        elif entry.is_file() and Path(entry.name).suffix.lower() in VIDEO_EXT:
+            valid = is_valid_name(entry.name, lib_type)
+            size = 0
+            try:
+                size = entry.stat(follow_symlinks=False).st_size
+            except OSError:
+                pass
+            dur = _media_duration(entry.path)
+            entries.append({'name': entry.name, 'path': entry.path, 'type': lib_type, 'is_dir': False, 'size': size, 'valid': valid, 'meta': file_meta(entry.name, dur)})
+
+    return jsonify({'path': path, 'type': lib_type, 'entries': entries, 'total': total, 'offset': offset, 'limit': limit})
 
 
 @app.route('/api/library/send-back-folder', methods=['POST'])

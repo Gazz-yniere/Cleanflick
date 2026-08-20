@@ -88,6 +88,14 @@ def init_db():
         day TEXT,
         day_count INTEGER
     )''')
+    cur.execute('''
+    CREATE TABLE IF NOT EXISTS media_duration_cache (
+        path TEXT PRIMARY KEY,
+        size INTEGER,
+        mtime INTEGER,
+        minutes INTEGER,
+        loaded_at INTEGER
+    )''')
     conn.commit()
     conn.close()
 
@@ -298,7 +306,32 @@ def omdb_episode_get(key: str):
         try:
             return json.loads(r['data_json'] or '{}')
         except Exception:
+            return {}
+    finally:
+        conn.close()
+
+
+def media_dur_get(path: str):
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute('SELECT size, mtime, minutes FROM media_duration_cache WHERE path = ?', (path,))
+        r = cur.fetchone()
+        if not r:
             return None
+        return {'size': r['size'], 'mtime': r['mtime'], 'minutes': r['minutes']}
+    finally:
+        conn.close()
+
+
+def media_dur_set(path: str, minutes, size, mtime):
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute('INSERT OR REPLACE INTO media_duration_cache (path, size, mtime, minutes, loaded_at) VALUES (?, ?, ?, ?, ?)', (
+            path, size, mtime, minutes, int(time.time())
+        ))
+        conn.commit()
     finally:
         conn.close()
 
