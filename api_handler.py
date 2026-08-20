@@ -1,6 +1,7 @@
 import tvdb_v4_official
 import re
 import logging
+import db
 from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -60,6 +61,8 @@ class TVDBAPIHandler:
             'id': tvdb_id, 'id_tvdb': str(tvdb_id),
             'imdb_id': imdb, 'tmdb_id': tmdb,
             'title': result.get('name', ''), 'year': year,
+            'date': air_time,
+            'score': result.get('score'),
             'source': 'tvdb', 'type': result.get('type', media_type),
             'overview': result.get('overview', ''),
             'poster': result.get('image_url', ''),
@@ -70,6 +73,7 @@ class TVDBAPIHandler:
         try:
             results = []
             filtered = []
+            db.usage_bump('tvdb')
             for r in (self.client.search(title, type="series") or [])[:10]:
                 try:
                     item = self._parse_search_result(r, 'series')
@@ -90,6 +94,7 @@ class TVDBAPIHandler:
         try:
             results = []
             filtered = []
+            db.usage_bump('tvdb')
             for r in (self.client.search(title, type="movie") or [])[:10]:
                 try:
                     item = self._parse_search_result(r, 'movie')
@@ -162,6 +167,7 @@ class TVDBAPIHandler:
 
     def get_series_details(self, series_id: int, search_data: Dict = None) -> Dict:
         try:
+            db.usage_bump('tvdb')
             s = self.client.get_series_extended(series_id)
             imdb, tmdb = self._remote_ids(s)
             sd = search_data or {}
@@ -224,6 +230,7 @@ class TVDBAPIHandler:
 
     def get_movie_details(self, movie_id: int, search_data: Dict = None) -> Dict:
         try:
+            db.usage_bump('tvdb')
             m = self.client.get_movie_extended(movie_id)
             imdb, tmdb = self._remote_ids(m)
             wikidata = next((r['id'] for r in (m.get('remoteIds') or []) if r.get('sourceName') == 'Wikidata'), '')
@@ -284,6 +291,7 @@ class TVDBAPIHandler:
             current_page = page
             total_pages = 1
             while current_page <= 20:
+                db.usage_bump('tvdb')
                 result = self.client.get_series_episodes(series_id, page=current_page)
                 found_season = False
                 for ep in result.get('episodes', []):
@@ -397,3 +405,12 @@ class APIHandler:
             return details
         except ValueError:
             return {'id': tv_id, 'source': source}
+
+    def get_series_episodes(self, series_id: str, season: Optional[int] = None, page: int = 0) -> Dict:
+        tvdb = self._require_tvdb()
+        if not tvdb:
+            return {'series_id': series_id, 'episodes': [], 'source': 'tvdb'}
+        try:
+            return tvdb.get_series_episodes(int(series_id), season, page)
+        except ValueError:
+            return {'series_id': series_id, 'episodes': [], 'source': 'tvdb'}

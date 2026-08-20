@@ -1,5 +1,40 @@
 # Changelog
 
+## [1.0.8] - 2026-08-20
+
+### Added
+- **SQLite persistence** — l'historique (avec revert) et l'ensemble des caches (recherches, résultats par fichier, détails, OMDb) sont désormais stockés dans une base unique `cleanflick.db` au lieu de fichiers JSON.
+- **Cache avec expiration de 7 jours** — résultats de recherche, résultats par fichier et détails expirent automatiquement après 7 jours et sont re-récupérés depuis TVDB/OMDb au prochain accès.
+- **Recherche manuelle forcée via l'API** (`force_refresh`) — on peut toujours trouver un titre alternatif, même quand une proposition est déjà en cache.
+- **Sélections manuelles confirmées persistées** dans le cache par fichier, pour que l'auto-proposition renvoie le titre choisi.
+- **Phase `verifying` du transfert** — après la copie, le backend vérifie la destination (100 %) avant de supprimer la source.
+- **Bibliothèque** — parcours de l'arborescence de sortie, badges d'épisodes manquants, tri/filtre, renvoi vers la source, renommage/suppression de dossiers.
+
+### Changed
+- **Table Fichiers convertie de `<table>` en grille CSS** (`1fr 2fr 185px`) — répartition garantie 1/3–2/3 avec colonne Actions fixe ; colonne « Progression » supprimée.
+- **Overlay de transfert repensé sur 2 lignes** — titre (icône + libellé + nom du fichier) puis barre de progression avec vitesse/ETA à côté.
+- **Scan / scan auto : cache d'abord, sinon API** — l'onglet Fichiers se rafraîchit désormais de façon fiable pendant et après les transferts.
+- **Boutons de filtre de la bibliothèque harmonisés** avec ceux de l'onglet Fichiers (même style).
+- **Bouton Renommer en orange** (accent), comme les boutons de configuration.
+- **Config API** — les clés TVDB et OMDb sont côte à côte sur deux colonnes, avec le bouton « tester la clé » juste après l'input.
+- **Boutons Historique** — « Actualiser » en orange (primaire), « Tout effacer » en gris (secondaire).
+
+### Fixed
+- **Clé de cache OMDb des épisodes incohérente** — les métadonnées d'épisode sont cherchées avec la clé qualifiée par l'année (avec repli sur l'ancienne clé) ; l'auto-search utilise un rattachement OMDb d'épisode cohérent (top 3) qui ignore les résultats hors séries (économie de quota OMDb).
+- **Fichiers réapparaissant après un « renvoi » non détectés** — suppression des réinitialisations de `scan_last_snapshot` dans les endpoints de renvoi pour que le watcher les détecte.
+- **Table Fichiers non rafraîchie pendant les transferts** — suppression de la suppression SSE de `scanFiles()` durant les transferts.
+
+### Removed
+- **Bouton « Vider le cache TVDB » et route `/api/cache/clear`** — inutiles car les caches expirent seuls après 7 jours et la recherche manuelle rafraîchit instantanément.
+- **Code mort** : `rename_engine.py` (module inutilisé), `db.find_history`, `db.file_cache_delete`, fonctions JS inutilisées (`pathFromKey`, `loadPreviewsAsync`, `omdbChips`, bloc d'auto-scan inerte, doublon `formatBytes`), règles CSS inutilisées et 20 clés i18n inutilisées.
+
+### Refactored
+- **`app.py`** — extraction de helpers de cache (`_file_fingerprint`, `_file_cache_lookup`, `_file_cache_store`, `_params_cache_key`) réutilisés par les 4 endpoints de recherche/cache (clés inchangées).
+- **`app.js`** — extraction de `mergeDetails` et `openManualSearchModal` pour supprimer la duplication.
+- **`files.css`** — fusion des styles d'en-tête partagés entre la table et la grille.
+
+---
+
 ## [1.0.5] - 2026-08-11
 
 ### Added

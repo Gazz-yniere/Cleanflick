@@ -1,6 +1,6 @@
 {
     "tvdb_api_key":"xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
-    "tvdb_pin":"",
+    "omdb_api_key": "xxxxxxxx",
     "input_path":"/downloads",
     "movie_output_path":"/movies",
     "tv_output_path":"/tv_shows",

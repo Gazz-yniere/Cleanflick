@@ -17,6 +17,7 @@
 ## Table of Contents
 
 - [Features](#features)
+- [How It Works](#how-it-works)
 - [Getting Started](#getting-started)
   - [Docker](#docker)
   - [Local Installation](#local-installation)
@@ -37,20 +38,53 @@
 
 ## Features
 
-- **TVDB v4 API** integration for accurate movie and TV show metadata
+- **TVDB v4 + OMDb API** integration for accurate movie, TV show and episode metadata
 - **Filebot-style naming** with customizable format strings (`{n}`, `{y}`, `{s00e00}`, `{t}`, `{imdb}`...)
 - **Multi-language titles** (`{n:fr}`, `{n:de}`, `{n:ja}`...)
 - **External IDs** in filenames (IMDb, TVDB, TMDB)
-- **Recursive folder scanning** with auto-refresh every 8 seconds
+- **Recursive folder scanning** with live refresh, reacting to changes in real time
+- **Smart caching** with 7-day expiry — auto-scan uses the cache first (fast), manual search always queries the API fresh to find alternatives
+- **SQLite persistence** — history and all caches survive restarts in a single `cleanflick.db`
 - **Rename history** with revert support (persistent across restarts)
-- **Manual search** with full TVDB results selection
+- **Manual search** with full TVDB results selection (confirmed choices are remembered)
 - **Rename All / Move All** batch processing
-- **Real-time move progress** with speed, ETA, and file-gone verification
+- **Real-time move progress** with speed, ETA, a `verifying` phase, and file-gone verification
+- **Library tab** — browse the output tree, missing-episode badges, send-back to source, folder rename/delete
 - **Folder picker** for media paths
 - **Password protection** (optional)
 - **6 languages** interface (FR, EN, ES, DE, IT, PT) with language switch
 - **Dark theme** (orange & dark grey)
 - **Docker support** for easy deployment
+
+---
+
+## How It Works
+
+CleanFlick turns messy download folders into a clean, organized media library. The interface is split into **4 tabs**:
+
+### 1. Files
+
+- CleanFlick **recursively scans** your `input_path` and lists every movie / TV episode file.
+- For each file it queries **TVDB** (and **OMDb** for episode ratings) and proposes a cleaned filename using your `movie_format` / `tv_format`.
+- Results are **cached for 7 days** so repeated scans are instant. The **scan/auto-scan** path uses the cache first and only queries the API when needed; the **manual search** (`🔍`) always forces a fresh API call so you can pick an alternative title even when a proposal is already cached. Once you confirm a manual selection, it is remembered per-file.
+- Each row offers **Rename** and **Move** (plus a transfer overlay with a live progress bar, speed, ETA and a final *verifying* phase that confirms the file really moved before removing the row).
+
+### 2. Library
+
+- Browses the **output** folders (`movie_output_path`, `tv_output_path`) as a tree.
+- Highlights **missing episodes** (badges on season folders).
+- Lets you **rename a folder**, **delete a folder**, or **send a file/folder back** to the source folder.
+
+### 3. History
+
+- Every Rename / Move / Revert is stored in SQLite and shown here.
+- Entries expose a **revert status** (`available` / `reverted` / `missing` / `done`) so you can roll back a rename with one click. History survives restarts.
+
+### 4. Config
+
+- Enter your **TVDB** and **OMDb** API keys (side by side) with a **test** button each, adjust paths and naming formats, and switch the interface language.
+
+> **Caching summary:** searches, per-file results and details are cached in SQLite with a **7-day expiry** and re-fetched automatically, so there is no cache to manage manually.
 
 ---
 
@@ -111,7 +145,7 @@ Copy `config.example.json` to `config.json` and fill in your settings:
 ```json
 {
   "tvdb_api_key": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
-  "tvdb_pin": "",
+  "omdb_api_key": "xxxxxxxx",
   "input_path": "/downloads",
   "movie_output_path": "/movies",
   "tv_output_path": "/tv_shows",
@@ -123,12 +157,14 @@ Copy `config.example.json` to `config.json` and fill in your settings:
 | Field | Description | Default |
 |-------|-------------|---------|
 | `tvdb_api_key` | Your TVDB v4 API key | *(required)* |
-| `tvdb_pin` | TVDB PIN (optional) | `""` |
+| `omdb_api_key` | OMDb API key (episode ratings, optional) | `""` |
 | `input_path` | Source folder for media files | `/downloads` |
 | `movie_output_path` | Destination for renamed movies | `/movies` |
 | `tv_output_path` | Destination for renamed TV shows | `/tv_shows` |
 | `movie_format` | Naming format for movies | `{n} ({y})` |
 | `tv_format` | Naming format for TV shows | `{n} - {s00e00} - {t}` |
+
+> **Note:** Both keys can also be entered directly in the **Settings → Config** tab of the UI. The "test" button next to each input checks connectivity before saving.
 
 ---
 
@@ -196,9 +232,9 @@ Copy `config.example.json` to `config.json` and fill in your settings:
 CleanFlick/
 ├── app.py                    # Flask application & routes
 ├── scanner.py                # Media file scanner
-├── api_handler.py            # TVDB API handler
-├── rename_engine.py          # Rename logic
-├── repair_history.py         # History repair utility (run manually if history is corrupted)
+├── api_handler.py            # TVDB/OMDb API handlers
+├── db.py                     # SQLite persistence (history + caches)
+├── mediaduration.py          # Media duration probing
 ├── config.example.json       # Configuration template
 ├── requirements.txt          # Python dependencies
 ├── Dockerfile                # Docker build
@@ -225,7 +261,6 @@ CleanFlick/
 volumes:
   - ./downloads:/downloads
   - ./config.json:/app/config.json
-  - ./rename_history.json:/app/rename_history.json
   - ./output/movies:/movies
   - ./output/tv_shows:/tv_shows
 ```
@@ -272,6 +307,37 @@ environment:
 ---
 
 ## Changelog
+
+### [1.0.8] - 2026-08-20
+
+**Added**
+- SQLite persistence — history and all caches (search, per-file results, details, OMDb) now live in a single `cleanflick.db` instead of JSON files
+- Caches auto-expire after 7 days and re-fetch from TVDB/OMDb — no manual cache management
+- Manual search now forces a fresh API query (`force_refresh`); confirmed manual selections are remembered per-file
+- Transfer `verifying` phase — destination is verified (100%) before the source is deleted
+- Library tab — output tree browsing, missing-episode badges, sort/filter, send-back to source, folder rename/delete
+
+**Changed**
+- Files table converted from `<table>` to a CSS grid (`1fr 2fr 185px`) — guaranteed 1/3–2/3 column split with a fixed Actions column; the progress column was removed
+- Transfer overlay redesigned to 2 lines — title (icon + label + filename) and a progress bar with speed/ETA beside it
+- Scan/auto-scan uses cache-first-then-API; the Files tab refreshes reliably during and after transfers
+- Library filter buttons harmonized with the Files tab; Rename button now orange (accent)
+- Config API section — TVDB and OMDb keys side by side, with a "test key" button right after each input
+- History buttons — refresh is orange (primary), clear-all is gray (secondary)
+
+**Fixed**
+- OMDb episode cache key mismatch — episode metadata now uses the year-qualified key (with legacy fallback); auto-search uses consistent top-3 episode OMDb that skips non-series results (saves OMDb quota)
+- Files reappearing after a "send back" were not detected — removed the `scan_last_snapshot` resets in the send-back endpoints
+- Files table was not refreshing during transfers — removed the SSE suppression of `scanFiles()` while transfers are active
+
+**Removed**
+- "Vider le cache TVDB" button and `/api/cache/clear` route (caches expire automatically)
+- Dead code: `rename_engine.py`, `db.find_history`, `db.file_cache_delete`, unused JS functions, unused CSS rules, and 20 unused i18n keys
+
+**Refactored**
+- `app.py`: extracted cache helpers (`_file_fingerprint`, `_file_cache_lookup`, `_file_cache_store`, `_params_cache_key`) reused across the 4 search/cache endpoints (keys unchanged)
+- `app.js`: extracted `mergeDetails` and `openManualSearchModal` to remove duplication
+- `files.css`: merged the shared header styles of the files table and grid
 
 ### [1.0.6] - 2026-08-12
 

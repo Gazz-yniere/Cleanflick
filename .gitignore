@@ -11,7 +11,6 @@ dist/
 
 # Données sensibles — ne pas committer
 config.json
-rename_history.json
 
 # Médias — trop lourds pour git
 downloads/
@@ -26,7 +25,6 @@ output/
 *.swo
 *~
 .env
-RELEASE_1.0.5.md
 cleanflick.db
 
 # Backups

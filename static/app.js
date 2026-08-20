@@ -92,8 +92,7 @@ function generateFilename(file, details) {
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 function pathKey(path) { return encodeURIComponent(path); }
-function pathFromKey(key) { return decodeURIComponent(key); }
-function findFileRow(filePath) { return document.querySelector(`tr[data-file-path="${pathKey(filePath)}"]`); }
+function findFileRow(filePath) { return document.querySelector(`.file-row[data-file-path="${pathKey(filePath)}"]`); }
 function getVal(id) { return document.getElementById(id)?.value || ''; }
 function setVal(id, v) { const el = document.getElementById(id); if (el) el.value = v; }
 
@@ -115,23 +114,26 @@ function switchTab(tab, e) {
     document.querySelectorAll('.nav-link').forEach(el => el.classList.remove('active'));
     document.getElementById(tab)?.classList.add('active');
     if (e?.target) e.target.closest('.nav-link').classList.add('active');
+    try { localStorage.setItem(LIB_TAB_KEY, tab); } catch (err) {}
+    if (tab === 'files') scanFiles();
     if (tab === 'config') loadConfig();
     if (tab === 'history') loadHistory();
-    if (tab === 'library') loadLibrary();
+    if (tab === 'library') refreshLibrary();
 }
 
 // ── Scan ──────────────────────────────────────────────────────────────────────
 function scanFiles() {
     const tbody = document.getElementById('files-tbody');
-    tbody.innerHTML = `<tr><td colspan="4" style="text-align:center;padding:20px;color:#e67e22;">◌ ${tr('scanning')}</td></tr>`;
+    tbody.innerHTML = `<div class="loading-row"><span class="spinner"></span> ${tr('scanning')}</div>`;
     allFiles = [];
     fetch('/api/scan')
         .then(r => { if (r.status === 401) { window.location='/login'; throw new Error('401'); } if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
         .then(data => {
             const newPaths = new Set((data || []).map(f => f.path));
 
-            // Supprimer les aperçus pour les fichiers qui ont disparu
-            Object.keys(filesPreviews).forEach(p => { if (!newPaths.has(p)) delete filesPreviews[p]; });
+            // Supprimer les aperçus pour les fichiers qui ont disparu,
+            // sauf ceux en cours de déplacement (toujours affichés jusqu'à la fin).
+            Object.keys(filesPreviews).forEach(p => { if (!newPaths.has(p) && !isTransferring(p)) delete filesPreviews[p]; });
 
             // Mettre à jour la liste globale des fichiers
             allFiles = data || [];
@@ -167,6 +169,16 @@ function flushPreviewQueue() {
     }
 }
 
+function mergeDetails(details, result) {
+    details.imdbid = details.imdbid || result.imdb_id || '';
+    details.imdb = details.imdbid;
+    details.tmdbid = details.tmdbid || result.tmdb_id || '';
+    details.tmdb = details.tmdbid;
+    if (!details.translations || !Object.keys(details.translations).length)
+        details.translations = result.translations || {};
+    return details;
+}
+
 function loadPreviewForFile(file) {
     if (!file?.path) return Promise.resolve();
     filesPreviews[file.path] = { loading: true, data: null, error: null };
@@ -197,12 +209,7 @@ function loadPreviewForFile(file) {
             if (!r.ok) throw new Error(`HTTP ${r.status}`);
             return r.json();
         }).then(details => {
-            details.imdbid = details.imdbid || top.imdb_id || '';
-            details.imdb = details.imdbid;
-            details.tmdbid = details.tmdbid || top.tmdb_id || '';
-            details.tmdb = details.tmdbid;
-            if (!details.translations || !Object.keys(details.translations).length)
-                details.translations = top.translations || {};
+            mergeDetails(details, top);
 
             filesPreviews[file.path] = { loading: false, data: { source: top, details }, error: null };
             updateFileRow(file.path);
@@ -215,32 +222,79 @@ function loadPreviewForFile(file) {
     });
 }
 
-// Deprecated: use loadPreviewForFile instead
-function loadPreviewsAsync(files) {
-    if (!files) return;
-    files.forEach(file => loadPreviewForFile(file));
-}
-
 // ── Render ────────────────────────────────────────────────────────────────────
 function renderTable() {
     const filtered = currentFilter ? allFiles.filter(f => f.media_type === currentFilter) : allFiles;
     const tbody = document.getElementById('files-tbody');
-    if (!filtered.length) {
-        tbody.innerHTML = `<tr><td colspan="4" class="empty-state">${tr('no_files_found')}</td></tr>`;
+    let rows = filtered.map(file => buildFileRow(file));
+    Object.values(activeTransfers).forEach(t => {
+        if (!filtered.some(f => f.path === t.filePath)) {
+            rows.push(buildFileRow({ path: t.filePath, filename: basename(t.filePath), media_type: currentFilter || 'movie' }));
+        }
+    });
+    if (!rows.length) {
+        tbody.innerHTML = `<div class="empty-state">${tr('no_files_found')}</div>`;
         return;
     }
-    tbody.innerHTML = filtered.map(file => `
-        <tr data-file-path="${pathKey(file.path)}">
-            <td class="file-name-cell">${esc(file.filename)}</td>
-            <td class="preview-cell preview-cell-td">${renderPreview(file)}</td>
-            <td class="progress-info-td">${renderProgressCell(file)}</td>
-            <td class="actions-cell actions-cell-td">${renderActions(file)}</td>
-        </tr>`).join('');
+    tbody.innerHTML = rows.join('');
+}
+
+function buildFileRow(file) {
+    const transfer = getActiveTransfer(file.path);
+    const dataPath = `data-file-path="${pathKey(file.path)}"`;
+    if (transfer) {
+        return `<div ${dataPath} class="file-row transferring" data-job-id="${transfer.jobId}">
+            <div class="transfer-cell">${renderTransferOverlay(file, transfer)}</div>
+        </div>`;
+    }
+    return `<div ${dataPath} class="file-row">
+        <div class="file-name-cell">${esc(file.filename)}</div>
+        <div class="preview-cell preview-cell-td">${renderPreview(file)}</div>
+        <div class="actions-cell actions-cell-td">${renderActions(file)}</div>
+    </div>`;
+}
+
+function isTransferring(filePath) {
+    return Object.values(activeTransfers).some(t => t.filePath === filePath);
+}
+
+function getActiveTransfer(filePath) {
+    return Object.values(activeTransfers).find(t => t.filePath === filePath);
+}
+
+function basename(p) {
+    const parts = String(p || '').split(/[\\/]/);
+    return parts[parts.length - 1] || '';
+}
+
+function renderTransferOverlay(file, transfer) {
+    const p = transfer.progress || {};
+    const percent = Math.max(0, Math.min(100, Number(p.percent) || 0));
+    const phase = p.phase || 'copying';
+    const label = phase === 'verifying' ? tr('transfer_verify') : (phase === 'done' ? tr('transfer_done') : tr('transfer_move'));
+    const fileLabel = file.filename || basename(file.path);
+    const stats = p.speed > 0
+        ? `<span>${formatBytes(p.speed)}/s</span>${p.eta > 0 ? `<span>ETA ${formatSeconds(p.eta)}</span>` : ''}`
+        : '';
+    return `<div class="transfer-overlay">
+        <div class="transfer-overlay-title">
+            <i class="mdi mdi-file-move-outline ${phase === 'verifying' ? 'mdi-spin' : ''}"></i>
+            <span class="transfer-overlay-label">${label}</span>
+            <span class="transfer-overlay-file" title="${esc(fileLabel)}">${esc(fileLabel)}</span>
+        </div>
+        <div class="transfer-progress-line">
+            <div class="progress-bar-container">
+                <div class="progress-bar ${phase === 'copying' ? '' : 'progress-bar--pulse'}" style="width:${percent}%"></div>
+                <div class="progress-text">${percent}%</div>
+            </div>
+            ${stats ? `<div class="progress-stats">${stats}</div>` : ''}
+        </div>
+    </div>`;
 }
 
 function filterFiles(type) {
     currentFilter = type;
-    document.querySelectorAll('.filter-btn').forEach(btn =>
+    document.querySelectorAll('#files .filter-btn').forEach(btn =>
         btn.classList.toggle('active', btn.dataset.filter === type));
     renderTable();
 }
@@ -253,22 +307,38 @@ function renderPreview(file) {
     const { source, details } = p.data;
     const newName = generateFilename(file, details);
     const poster = source.poster ? `<img src="${esc(source.poster)}" alt="">` : (file.media_type === 'movie' ? '🎬' : '📺');
-    let meta = '';
-    if (details.year) meta += `<span>📅 ${esc(String(details.year))}</span>`;
-    if (file.media_type === 'tv' && details.episode_title) meta += `<span>🎞️ ${esc(details.episode_title)}</span>`;
+    const isTv = file.media_type !== 'movie';
+    const chips = previewChips(source, details, isTv, file.duration);
     return `<div class="preview-wrap">
         <div class="preview-poster">${poster}</div>
         <div class="preview-info">
-            <div class="preview-title">${esc(details.title || '')}${details.year ? ` (${details.year})` : ''}</div>
+            <div class="preview-line1">
+                <span class="preview-title">${esc(details.title || '')}</span>${details.year ? ` <span class="preview-year">${esc(String(details.year))}</span>` : ''}
+                ${chips ? `<span class="preview-chips">${chips}</span>` : ''}
+            </div>
             <div class="rename-preview">➜ ${esc(newName)}</div>
-            <div class="preview-meta">${meta}</div>
         </div></div>`;
 }
 
-function renderProgressCell(file) {
-    const p = filesPreviews[file.path];
-    if (!p || p.loading || !p.data) return '';
-    return `<div class="progress-cell"></div>`;
+function previewChips(source, details, isTv, realDur) {
+    const od = source.omdb || {};
+    const eo = details.episode_omdb || {};
+    const chips = [];
+    if (od.imdbRating) chips.push(`<span class="chip chip-rating">★ ${esc(od.imdbRating)}</span>`);
+    if (od.Rated && od.Rated !== 'N/A') chips.push(`<span class="chip chip-cert">${esc(od.Rated)}</span>`);
+    if (isTv) {
+        if (od.Genre && od.Genre !== 'N/A') chips.push(`<span class="chip chip-genre">${esc(od.Genre)}</span>`);
+        if (eo.imdbRating && eo.imdbRating !== 'N/A') chips.push(`<span class="chip chip-eprating">ép. ★ ${esc(eo.imdbRating)}</span>`);
+        const dur = realDur ? `${realDur} min` : (eo.Runtime && eo.Runtime !== 'N/A' ? eo.Runtime : '');
+        if (dur) chips.push(`<span class="chip chip-epruntime">ép. ${esc(dur)}</span>`);
+        if (eo.Released && eo.Released !== 'N/A') chips.push(`<span class="chip chip-epdate">ép. ${esc(eo.Released)}</span>`);
+    } else {
+        const dur = realDur ? `${realDur} min` : (od.Runtime && od.Runtime !== 'N/A' ? od.Runtime : '');
+        if (dur) chips.push(`<span class="chip chip-runtime">${esc(dur)}</span>`);
+        if (od.Genre && od.Genre !== 'N/A') chips.push(`<span class="chip chip-genre">${esc(od.Genre)}</span>`);
+        if (od.Released && od.Released !== 'N/A') chips.push(`<span class="chip chip-date">${esc(od.Released)}</span>`);
+    }
+    return chips.join('');
 }
 
 function renderActions(file) {
@@ -314,15 +384,164 @@ function updateFileRow(fileOrPath) {
     if (previewCell) previewCell.innerHTML = renderPreview(file);
     const actionsCell = row.querySelector('.actions-cell-td');
     if (actionsCell) actionsCell.innerHTML = renderActions(file);
-    const progressCell = row.querySelector('.progress-info-td');
-    if (progressCell) progressCell.innerHTML = renderProgressCell(file);
 }
 
 // ── Library ───────────────────────────────────────────────────────────────────
+let libSortKey = 'name';
+let libSortDir = 'asc';
+let libFilter = 'all';
+const LIB_EXPANDED_KEY = 'cleanflick_lib_expanded';
+const LIB_TAB_KEY = 'cleanflick_active_tab';
+function loadExpandedPaths() {
+    try { return new Set(JSON.parse(localStorage.getItem(LIB_EXPANDED_KEY) || '[]')); } catch (e) { return new Set(); }
+}
+function saveExpandedPaths(set) {
+    try { localStorage.setItem(LIB_EXPANDED_KEY, JSON.stringify([...set])); } catch (e) {}
+}
+let expandedPaths = loadExpandedPaths();
+
+function metaText(meta) {
+    if (!meta) return '';
+    const parts = [];
+    if (meta.title) parts.push(meta.title);
+    if (meta.episode) parts.push(meta.episode + (meta.episode_name ? ' · ' + meta.episode_name : ''));
+    const date = meta.date || '';
+    if (date.length > 4) parts.push(date.slice(0, 10));
+    else if (meta.year) parts.push(String(meta.year));
+    if (meta.genres) parts.push(meta.genres);
+    if (meta.rating != null && meta.rating !== '') parts.push('★ ' + meta.rating);
+    if (meta.certification) parts.push(meta.certification);
+    if (meta.runtime) parts.push(meta.runtime);
+    return parts.join(' · ');
+}
+
+function metaChips(meta) {
+    if (!meta) return '';
+    const isEp = !!meta.episode;
+    const chips = [];
+    if (isEp) chips.push(`<span class="chip chip-ep">${esc(meta.episode)}${meta.episode_name ? ' ' + esc(meta.episode_name) : ''}</span>`);
+    if (!isEp && meta.rating != null && meta.rating !== '') chips.push(`<span class="chip chip-rating">★ ${esc(meta.rating)}</span>`);
+    if (meta.episode_rating != null && meta.episode_rating !== '') chips.push(`<span class="chip chip-rating">★ ${esc(meta.episode_rating)}</span>`);
+    if (isEp) {
+        if (meta.episode_date) chips.push(`<span class="chip chip-epdate">ép. ${esc(meta.episode_date.slice(0, 10))}</span>`);
+        if (meta.episode_runtime) chips.push(`<span class="chip chip-runtime">${esc(meta.episode_runtime)}</span>`);
+    } else {
+        const date = meta.date || '';
+        if (date.length > 4) chips.push(`<span class="chip chip-date">${esc(date.slice(0, 10))}</span>`);
+        else if (meta.year) chips.push(`<span class="chip chip-date">${esc(String(meta.year))}</span>`);
+        if (meta.runtime) chips.push(`<span class="chip chip-runtime">${esc(meta.runtime)}</span>`);
+    }
+    if (meta.certification) chips.push(`<span class="chip chip-cert">${esc(meta.certification)}</span>`);
+    if (meta.genres) chips.push(`<span class="chip chip-genre">${esc(meta.genres)}</span>`);
+    return chips.join('');
+}
+
+function metaHtml(meta) {
+    if (!meta) return '';
+    const chips = metaChips(meta);
+    return chips ? `<span class="lib-meta">${chips}</span>` : '';
+}
+
+function libLead(entry, iconClass) {
+    if (entry.meta && entry.meta.poster) {
+        return `<img class="lib-poster lib-lead" src="${esc(entry.meta.poster)}" alt="" loading="lazy" onerror="this.style.display='none'">`;
+    }
+    return `<i class="mdi ${iconClass} lib-lead"></i>`;
+}
+
+function sortRating(entry) {
+    const m = entry.meta || {};
+    const v = m.episode ? m.episode_rating : m.rating;
+    const n = parseFloat(v);
+    return isNaN(n) ? -1 : n;
+}
+
+function libSortInfo(entry) {
+    return {
+        is_dir: !!entry.is_dir,
+        name: entry.name,
+        size: entry.size ?? 0,
+        is_ep: !!(entry.meta && entry.meta.episode),
+        rating: sortRating(entry),
+    };
+}
+
+function libSortCmp(a, b) {
+    let c;
+    if (libSortKey === 'size') {
+        c = (a.size ?? 0) - (b.size ?? 0);
+    } else if (libSortKey === 'rating') {
+        if (a.is_ep || b.is_ep) {
+            c = a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' });
+        } else {
+            c = (a.rating ?? -1) - (b.rating ?? -1);
+        }
+    } else {
+        c = a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' });
+    }
+    return libSortDir === 'desc' ? -c : c;
+}
+
+function sortEntries(entries) {
+    const dirs = entries.filter(e => e.is_dir).map(e => ({ e, i: libSortInfo(e) })).sort((x, y) => libSortCmp(x.i, y.i)).map(x => x.e);
+    const files = entries.filter(e => !e.is_dir).map(e => ({ e, i: libSortInfo(e) })).sort((x, y) => libSortCmp(x.i, y.i)).map(x => x.e);
+    return dirs.concat(files);
+}
+
+function setLibSort(key) {
+    if (libSortKey === key) {
+        libSortDir = libSortDir === 'asc' ? 'desc' : 'asc';
+    } else {
+        libSortKey = key;
+        libSortDir = 'asc';
+    }
+    updateLibSortButtons();
+    reSortLib();
+}
+
+function updateLibSortButtons() {
+    const keys = ['name', 'size', 'rating'];
+    keys.forEach(k => {
+        const btn = document.getElementById(`lib-sort-${k}`);
+        if (!btn) return;
+        btn.classList.toggle('active', libSortKey === k);
+        const icon = btn.querySelector('i');
+        if (!icon) return;
+        if (libSortKey === k) {
+            icon.className = libSortDir === 'asc' ? 'mdi mdi-sort-ascending' : 'mdi mdi-sort-descending';
+        } else {
+            icon.className = 'mdi mdi-sort';
+        }
+    });
+}
+
+function reSortLib() {
+    const container = document.getElementById('library-tree');
+    if (container) sortNodeChildren(container);
+}
+
+function sortNodeChildren(container) {
+    const nodes = [...container.children];
+    const dirs = [];
+    const files = [];
+    nodes.forEach(n => {
+        if (n._sort && n._sort.is_dir) dirs.push(n);
+        else if (n._sort && !n._sort.is_dir) files.push(n);
+    });
+    dirs.sort((a, b) => libSortCmp(a._sort, b._sort));
+    files.sort((a, b) => libSortCmp(a._sort, b._sort));
+    dirs.forEach(d => container.appendChild(d));
+    files.forEach(f => container.appendChild(f));
+    nodes.forEach(n => {
+        const children = n.querySelector(':scope > .lib-children');
+        if (children) sortNodeChildren(children);
+    });
+}
+
 function loadLibrary() {
     const container = document.getElementById('library-tree');
     container.innerHTML = `<div class="loading"><div class="spinner"></div></div>`;
-    fetch('/api/library')
+    return fetch('/api/library')
         .then(r => r.json())
         .then(data => {
             if (!data.entries?.length) {
@@ -330,17 +549,191 @@ function loadLibrary() {
                 return;
             }
             container.innerHTML = '';
-            data.entries.forEach(root => {
-                container.appendChild(buildLibNode(root, 0, true));
+            sortEntries(data.entries).forEach(root => {
+                container.appendChild(buildLibNode(root, 0, false));
             });
+            applyLibFilter();
+            expandStoredPathsDeep(container);
         })
         .catch(e => { container.innerHTML = `<div class="message error">${esc(e.message)}</div>`; });
+}
+
+function refreshLibrary() {
+    const container = document.getElementById('library-tree');
+    const domExpanded = getExpandedPaths(container);
+    if (domExpanded.length) {
+        expandedPaths = new Set(domExpanded);
+        saveExpandedPaths(expandedPaths);
+    }
+    loadLibrary();
+}
+
+function getExpandedPaths(container) {
+    const paths = [];
+    container.querySelectorAll('.lib-row--dir').forEach(row => {
+        const children = row.parentElement.querySelector(':scope > .lib-children');
+        if (children && children.style.display !== 'none') paths.push(row.dataset.path);
+    });
+    return paths;
+}
+
+function findDirRow(container, path) {
+    const rows = container.querySelectorAll('.lib-row--dir');
+    for (const row of rows) {
+        if (row.dataset.path === path) return row;
+    }
+    return null;
+}
+
+// Expande les dossiers persistés en profondeur : chaque niveau est ouvert
+// séquentiellement en attendant que ses enfants (chargés en async) soient prêts.
+async function expandStoredPathsDeep(container) {
+    if (!expandedPaths.size) return;
+    const sorted = [...expandedPaths].sort((a, b) => a.length - b.length);
+    for (const path of sorted) {
+        const row = findDirRow(container, path);
+        if (!row) continue;
+        const children = row.parentElement.querySelector(':scope > .lib-children');
+        if (children.style.display === 'block') continue;
+        row.click();
+        await new Promise(resolve => {
+            const poll = setInterval(() => {
+                if (!children.querySelector('.lib-loading')) {
+                    clearInterval(poll);
+                    resolve();
+                }
+            }, 40);
+            setTimeout(() => { clearInterval(poll); resolve(); }, 8000);
+        });
+    }
+}
+
+function setLibFilter(f) {
+    libFilter = f;
+    updateLibFilterButton();
+    applyLibFilter();
+}
+
+function cycleLibFilter() {
+    const order = ['all', 'valid', 'invalid'];
+    const idx = order.indexOf(libFilter);
+    libFilter = order[(idx + 1) % order.length];
+    setLibFilter(libFilter);
+}
+
+function updateLibFilterButton() {
+    const btn = document.getElementById('lib-filter');
+    if (!btn) return;
+    const labels = { all: tr('filter_all'), valid: tr('lib_valid'), invalid: tr('lib_invalid') };
+    const icons = { all: 'mdi mdi-filter-variant', valid: 'mdi mdi-check-circle', invalid: 'mdi mdi-alert' };
+    btn.innerHTML = `<i class="${icons[libFilter]}"></i><span>${esc(labels[libFilter])}</span>`;
+}
+
+function loadLibMissing(path, badgeEl, childrenEl) {
+    fetch(`/api/library/missing?path=${encodeURIComponent(path)}`)
+        .then(r => r.json())
+        .then(d => {
+            if (badgeEl) {
+                if (d.count > 0) {
+                    badgeEl.textContent = d.count;
+                    badgeEl.title = `${d.count} ${tr('lib_missing_episodes')}`;
+                } else {
+                    badgeEl.textContent = '';
+                }
+            }
+            if (childrenEl && d.missing && d.missing.length) {
+                const existing = [...childrenEl.querySelectorAll(':scope > .lib-node')];
+                d.missing.forEach(m => {
+                    const node = document.createElement('div');
+                    node.className = 'lib-node';
+                    const row = document.createElement('div');
+                    row.className = 'lib-row lib-row--missing';
+                    row.innerHTML = `
+                        <span class="lib-toggle" style="visibility:hidden"><i class="mdi mdi-chevron-right"></i></span>
+                        <i class="mdi mdi-file-video lib-icon-file"></i>
+                        <span class="lib-name lib-name--file">
+                            <span class="lib-name-main">${esc(m.label)}</span>
+                            ${m.title ? `<span class="lib-missing-item">${esc(m.title)}</span>` : ''}
+                        </span>
+                        <span class="lib-badge lib-badge--warn"><i class="mdi mdi-alert"></i></span>`;
+                    node.appendChild(row);
+                    const se = (parseInt(m.s, 10) || 0) * 1000 + (parseInt(m.e, 10) || 0);
+                    let inserted = false;
+                    for (const n of existing) {
+                        const main = n.querySelector(':scope > .lib-row .lib-name-main');
+                        if (!main) continue;
+                        const mm = main.textContent.match(/[Ss](\d{1,2})[Ee](\d{1,3})/);
+                        if (!mm) continue;
+                        const nse = parseInt(mm[1], 10) * 1000 + parseInt(mm[2], 10);
+                        if (nse > se) { childrenEl.insertBefore(node, n); inserted = true; break; }
+                    }
+                    if (!inserted) childrenEl.appendChild(node);
+                });
+            }
+        })
+        .catch(() => { if (badgeEl) badgeEl.textContent = ''; });
+}
+
+function refreshSeriesBadges(container) {
+    if (!container) return;
+    [...container.querySelectorAll(':scope > .lib-node > .lib-row > .lib-missing-badge')].forEach(badge => {
+        if (badge._loaded) return;
+        badge._loaded = true;
+        loadLibMissing(badge._path, badge, null);
+    });
+}
+
+function loadApiUsage() {
+    const el = document.getElementById('api-usage');
+    if (!el) return;
+    fetch('/api/usage')
+        .then(r => r.json())
+        .then(d => {
+            const u = d.usage || {};
+            const t = u.tvdb || {}, o = u.omdb || {};
+            el.innerHTML = `
+                <div class="usage-item">
+                    <span class="usage-name">TVDB</span>
+                    <span class="usage-bar"><span class="usage-fill usage-tvdb" style="width:${Math.min(100, ((t.total ?? 0) / 50000) * 100)}%"></span></span>
+                    <span class="usage-val">${t.day_count ?? 0} <em>auj.</em> · ${t.total ?? 0}/50000 <em>an</em></span>
+                </div>
+                <div class="usage-item">
+                    <span class="usage-name">OMDb</span>
+                    <span class="usage-bar"><span class="usage-fill usage-omdb" style="width:${Math.min(100, ((o.day_count ?? 0) / 1000) * 100)}%"></span></span>
+                    <span class="usage-val">${o.day_count ?? 0}/1000 <em>auj.</em> · ${o.total ?? 0} <em>total</em></span>
+                </div>`;
+        })
+        .catch(() => { el.innerHTML = ''; });
+}
+
+function applyLibFilter() {
+    const container = document.getElementById('library-tree');
+    if (!container) return;
+    function process(containerEl, isRootLevel) {
+        const nodes = [...containerEl.children];
+        let anyVisible = false;
+        nodes.forEach(n => {
+            const childrenEl = n.querySelector(':scope > .lib-children');
+            let childVisible = false;
+            if (childrenEl) childVisible = process(childrenEl, false);
+            let selfMatches = libFilter === 'all' ? true :
+                libFilter === 'valid' ? n._valid === true :
+                n._valid === false;
+            const visible = isRootLevel || selfMatches || childVisible;
+            n.style.display = visible ? '' : 'none';
+            if (visible) anyVisible = true;
+        });
+        return anyVisible;
+    }
+    process(container, true);
 }
 
 function buildLibNode(entry, depth, autoExpand) {
     const wrap = document.createElement('div');
     wrap.className = 'lib-node';
     wrap.style.paddingLeft = depth > 0 ? '20px' : '0';
+    wrap._sort = { is_dir: !!entry.is_dir, name: entry.name, size: entry.size ?? 0, is_ep: !!(entry.meta && entry.meta.episode), rating: sortRating(entry) };
+    wrap._valid = entry.valid;
 
     if (entry.is_dir) {
         const row = document.createElement('div');
@@ -370,19 +763,30 @@ function buildLibNode(entry, depth, autoExpand) {
 
         row.innerHTML = `
             <span class="lib-toggle"><i class="mdi mdi-chevron-right"></i></span>
-            <i class="mdi mdi-folder lib-icon-dir"></i>
-            <span class="lib-name">${esc(entry.name)}</span>
+            ${libLead(entry, 'mdi-folder lib-icon-dir')}
+            <span class="lib-name">
+                <span class="lib-name-main">${esc(entry.name)}</span>
+                ${metaText(entry.meta) ? metaHtml(entry.meta) : ''}
+            </span>
             ${badgeDir}
+            <span class="lib-size">${formatBytes(entry.size)}</span>
             ${entry.child_count !== undefined ? `<span class="lib-count">${entry.child_count}</span>` : ''}`;
-        if (depth > 0) {
-            const sendFolderBtn = document.createElement('button');
-            sendFolderBtn.className = 'btn-small revert';
-            sendFolderBtn.title = tr('lib_send_back_folder');
-            sendFolderBtn.innerHTML = '<i class="mdi mdi-folder-upload"></i>';
-            sendFolderBtn.addEventListener('click', (e) => { e.stopPropagation(); libSendBackFolder(entry.path, wrap); });
-            dirActions.appendChild(sendFolderBtn);
+        if (depth > 0 && entry.type === 'tv') {
+            const searchBtn = document.createElement('button');
+            searchBtn.className = 'btn-small search';
+            searchBtn.title = tr('lib_search_tvdb');
+            searchBtn.innerHTML = '<i class="mdi mdi-magnify"></i>';
+            searchBtn.addEventListener('click', (e) => { e.stopPropagation(); libManualSearchFolder(entry.path, entry.name); });
+            dirActions.appendChild(searchBtn);
         }
         row.appendChild(dirActions);
+        if (/\[tvdbid-/.test(entry.name)) {
+            const mBadge = document.createElement('span');
+            mBadge.className = 'lib-missing-badge';
+            mBadge._path = entry.path;
+            row.insertBefore(mBadge, dirActions);
+            row._missingBadge = mBadge;
+        }
         const children = document.createElement('div');
         children.className = 'lib-children';
         children.style.display = 'none';
@@ -409,12 +813,6 @@ function buildLibNode(entry, depth, autoExpand) {
                                 emptyRow.className = 'lib-row lib-row--empty';
                                 emptyRow.dataset.path = entry.path;
                                 emptyRow.innerHTML = `<span class="lib-empty-label">${tr('lib_folder_empty')}</span>`;
-                                const sendEmptyBtn = document.createElement('button');
-                                sendEmptyBtn.className = 'btn-small revert';
-                                sendEmptyBtn.title = tr('lib_send_back_folder');
-                                sendEmptyBtn.innerHTML = '<i class="mdi mdi-folder-upload"></i>';
-                                sendEmptyBtn.addEventListener('click', () => libSendBackFolder(entry.path, wrap));
-                                emptyRow.appendChild(sendEmptyBtn);
                                 const delBtn = document.createElement('button');
                                 delBtn.className = 'btn-small revert';
                                 delBtn.title = tr('lib_delete_folder');
@@ -423,12 +821,20 @@ function buildLibNode(entry, depth, autoExpand) {
                                 emptyRow.appendChild(delBtn);
                                 children.appendChild(emptyRow);
                             } else {
-                                data.entries.forEach(child => children.appendChild(buildLibNode(child, 1, false)));
+                                sortEntries(data.entries).forEach(child => children.appendChild(buildLibNode(child, 1, false)));
+                                applyLibFilter();
+                                if (/\[tvdbid-/.test(entry.name)) {
+                                    loadLibMissing(entry.path, row._missingBadge, children);
+                                } else {
+                                    refreshSeriesBadges(children);
+                                }
                             }
                         })
                         .catch(() => { children.innerHTML = `<div class="lib-loading">✗</div>`; });
                 }
             }
+            expandedPaths[isOpen ? 'delete' : 'add'](entry.path);
+            saveExpandedPaths(expandedPaths);
         };
         row.addEventListener('click', toggle);
         wrap.appendChild(row);
@@ -441,8 +847,12 @@ function buildLibNode(entry, depth, autoExpand) {
         row.className = 'lib-row lib-row--file';
         row.dataset.filePath = entry.path;
         row.innerHTML = `
-            <i class="mdi mdi-file-video lib-icon-file"></i>
-            <span class="lib-name lib-name--file">${esc(entry.name)}</span>
+            ${libLead(entry, 'mdi-file-video lib-icon-file')}
+            <span class="lib-name lib-name--file">
+                <span class="lib-name-main">${esc(entry.name)}</span>
+                ${metaText(entry.meta) ? metaHtml(entry.meta) : ''}
+            </span>
+            <span class="lib-size">${formatBytes(entry.size)}</span>
             <span class="lib-badge ${badgeClass}"><i class="mdi ${badgeIcon}"></i></span>`;
         const actions = document.createElement('div');
         actions.className = 'lib-actions';
@@ -477,15 +887,6 @@ function libSendBack(filePath) {
         .catch(e => alert(`✗ ${e.message}`));
 }
 
-function libSendBackFolder(folderPath, wrapEl) {
-    postJSON('/api/library/send-back-folder', { path: folderPath })
-        .then(data => {
-            if (!data.success) { alert(`✗ ${data.message}`); return; }
-            wrapEl?.remove();
-        })
-        .catch(e => alert(`✗ ${e.message}`));
-}
-
 function confirmDeleteFolder(folderPath) {
     const name = folderPath.split('/').pop() || folderPath.split('\\').pop();
     document.getElementById('delete-folder-msg').textContent = `"${name}"`;
@@ -501,10 +902,120 @@ function confirmDeleteFolder(folderPath) {
     document.getElementById('confirmDeleteFolderModal').classList.add('active');
 }
 
+function libManualSearchFolder(folderPath, folderName) {
+    const title = String(folderName || '')
+        .replace(/\.[^.]+$/, '')
+        .replace(/\s*\[(?:imdb(?:id)?|tvdbid|tmdb(?:id)?)-[^\]]+\]/gi, '')
+        .replace(/\s*\(\d{4}\)/, '')
+        .replace(/[._]+/g, ' ')
+        .replace(/\s+/g, ' ').trim();
+    openManualSearchModal(title, { folderPath, fromLibrary: true });
+}
+
+function seriesFolderName(fileName) {
+    const stem = String(fileName || '').replace(/\.[^.]+$/, '');
+    const m = stem.match(/^(.*?)\s+-\s+(?:S\d{2}E\d{2}|\d+x\d{2})\b.*$/i);
+    return (m && m[1] && m[1].trim()) ? m[1].trim() : stem;
+}
+
+function libRenameFolder(folderPath, result) {
+    const folderBase = folderPath.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || '';
+    return fetch(`/api/library?path=${encodeURIComponent(folderPath)}&type=tv`)
+        .then(r => r.json())
+        .then(async data => {
+            const files = (data.entries || []).filter(e => !e.is_dir && e.meta && e.meta.episode);
+            const seriesTitle = cleanTitle(result.title || '');
+            const year = result.year || '';
+            const tvdbid = String(result.id || '');
+            const epTitles = {};
+            const renames = [];
+            let skipped = 0;
+            for (const entry of files) {
+                const m = entry.meta.episode.match(/[Ss](\d{1,2})[Ee](\d{1,3})/);
+                if (!m) { skipped++; continue; }
+                const s = parseInt(m[1], 10), e = parseInt(m[2], 10);
+                const ekey = `${s}x${e}`;
+                if (!(ekey in epTitles)) {
+                    epTitles[ekey] = entry.meta.episode_name || '';
+                    try {
+                        const det = await fetch(`/api/tv/${tvdbid}?season=${s}&episode=${e}&source=tvdb`).then(r => r.json());
+                        const t = (det && (det.episode_title || det.t)) || '';
+                        if (t) epTitles[ekey] = t;
+                    } catch (err) { /* garde le nom du cache */ }
+                }
+                const details = {
+                    title: seriesTitle, year,
+                    tvdbid, tvdb: tvdbid,
+                    imdbid: result.imdb_id || '', imdb: result.imdb_id || '',
+                    tmdbid: result.tmdb_id || '', tmdb: result.tmdb_id || '',
+                    episode_title: epTitles[ekey],
+                    translations: result.translations || {},
+                };
+                const file = { path: entry.path, filename: entry.name, media_type: 'tv', season: s, episode: e };
+                const newName = generateFilename(file, details);
+                if (!newName || newName === entry.name) { skipped++; continue; }
+                const r = await postJSON('/api/rename', { path: entry.path, new_name: newName }).catch(() => null);
+                if (r && r.success) renames.push({ from: entry.name, to: newName });
+                else skipped++;
+            }
+
+            // Vérifier / renommer le dossier de série (même si aucun fichier à renommer)
+            const sampleFile = { path: folderPath, filename: 'sample.mkv', media_type: 'tv', season: 1, episode: 1 };
+            const sampleDetails = {
+                title: seriesTitle, year,
+                tvdbid, tvdb: tvdbid,
+                imdbid: result.imdb_id || '', imdb: result.imdb_id || '',
+                tmdbid: result.tmdb_id || '', tmdb: result.tmdb_id || '',
+                episode_title: '', translations: result.translations || {},
+            };
+            const desiredFolder = seriesFolderName(generateFilename(sampleFile, sampleDetails));
+            let folderNote = null;
+            if (desiredFolder && desiredFolder !== folderBase) {
+                const fr = await postJSON('/api/library/rename-folder', { path: folderPath, new_name: desiredFolder }).catch(() => null);
+                folderNote = (fr && fr.success)
+                    ? { from: folderBase, to: desiredFolder }
+                    : { from: folderBase, to: desiredFolder, error: true };
+            }
+
+            refreshLibrary();
+            showLibRenameResult(folderBase, renames, skipped, folderNote);
+        })
+        .catch(e => alert(`✗ ${e.message}`));
+}
+
+function showLibRenameResult(folderBase, renames, skipped, folderNote) {
+    const title = document.getElementById('libRenameResultTitle');
+    const body = document.getElementById('libRenameResultBody');
+    title.innerHTML = esc(folderBase);
+    const total = renames.length;
+    let html = `<div class="lib-rename-summary">${total} fichier(s) renommé(s)${skipped ? ` · ${skipped} ignoré(s)` : ''}</div>`;
+    if (folderNote) {
+        html += folderNote.error
+            ? `<div class="lib-rename-folder lib-rename-folder--error">Dossier : <s>${esc(folderNote.from)}</s> → <strong>${esc(folderNote.to)}</strong> (échec, à renommer manuellement)</div>`
+            : `<div class="lib-rename-folder">Dossier renommé : <s>${esc(folderNote.from)}</s> → <strong>${esc(folderNote.to)}</strong></div>`;
+    }
+    if (renames.length) {
+        html += `<div class="lib-rename-list">${renames.map(r =>
+            `<div class="lib-rename-item">
+                <div class="lib-rename-from">${esc(r.from)}</div>
+                <div class="lib-rename-sep"><i class="mdi mdi-arrow-down"></i></div>
+                <div class="lib-rename-to">${esc(r.to)}</div>
+            </div>`).join('')}</div>`;
+    }
+    if (!renames.length && !folderNote) {
+        html = `<div class="lib-rename-summary">Aucun fichier renommé.</div>`;
+    }
+    body.innerHTML = html;
+    document.getElementById('libRenameResultModal').classList.add('active');
+}
+
 function libManualSearch(filePath) {
-    const filename = filePath.split('/').pop() || filePath.split('\\').pop();
+    const filename = filePath.replace(/\\/g, '/').split('/').pop() || '';
     const tvRoot = globalConfig.tv_output_path || '';
     const isTv = (tvRoot && filePath.startsWith(tvRoot)) || /[Ss]\d{2}[Ee]\d{2}/.test(filename);
+    const m = filename.match(/[Ss](\d{1,2})[Ee](\d{1,3})/);
+    const season = m ? parseInt(m[1], 10) : 1;
+    const episode = m ? parseInt(m[2], 10) : 1;
     // Extraire le titre proprement : supprimer extension, année, IDs, titre traduit entre parenthèses
     const cleanedTitle = filename
         .replace(/\.[^.]+$/, '')
@@ -516,20 +1027,9 @@ function libManualSearch(filePath) {
         .replace(/[\s\-]+$/, '')
         .replace(/\s+/g, ' ').trim();
     const fakeFile = { path: filePath, filename, media_type: isTv ? 'tv' : 'movie',
-                       title: cleanedTitle, season: 1, episode: 1 };
+                       title: cleanedTitle, season, episode };
     if (!allFiles.find(f => f.path === filePath)) allFiles.push(fakeFile);
-    // Ouvrir la modale avec le titre déjà nettoyé
-    window._manualSearchFilePath = filePath;
-    document.getElementById('manualSearchContent').innerHTML = `
-        <div class="form-field">
-            <label>${tr('search_label')}</label>
-            <input type="text" id="search-title" value="${esc(cleanedTitle)}" placeholder="..."
-                onkeydown="if(event.key==='Enter') executeManualSearch()">
-        </div>
-        <button class="btn btn-primary" style="width:100%" onclick="executeManualSearch()">${tr('search_btn')}</button>
-        <div id="manual-results" style="margin-top:15px;"></div>`;
-    document.getElementById('manualSearchModal').classList.add('active');
-    setTimeout(() => document.getElementById('search-title')?.focus(), 100);
+    openManualSearchModal(cleanedTitle, { filePath, fromLibrary: true });
 }
 
 // ── History ───────────────────────────────────────────────────────────────────
@@ -677,19 +1177,11 @@ async function runMove(filePath, file, proposedName) {
         });
         if (!data.success) throw new Error(data.message);
         const jobId = data.job_id;
-        activeTransfers[jobId] = { filePath, pollInterval: null, startTime: Date.now() };
-        markFileAsTransferring(filePath, jobId);
+        activeTransfers[jobId] = { filePath, jobId, pollInterval: null, startTime: Date.now(), progress: null };
+        renderTable();
         trackMoveProgress(jobId, filePath, file, data.new_name || proposedName || file.filename);
     } catch (e) {
         alert(`✗ ${tr('err_move')}\n${e.message}`);
-    }
-}
-
-function markFileAsTransferring(filePath, jobId) {
-    const row = findFileRow(filePath);
-    if (row) {
-        row.classList.add('transferring');
-        row.setAttribute('data-job-id', jobId);
     }
 }
 
@@ -701,36 +1193,57 @@ function unmarkFileAsTransferring(filePath) {
     }
 }
 
+function updateTransferRow(filePath, jobId) {
+    const row = findFileRow(filePath);
+    if (!row) return;
+    const transfer = activeTransfers[jobId];
+    if (!transfer) return;
+    const file = allFiles.find(f => f.path === filePath) || { path: filePath, filename: basename(filePath) };
+    const cell = row.querySelector('.transfer-cell');
+    if (cell) cell.innerHTML = renderTransferOverlay(file, transfer);
+}
+
+function showTransferResult(filePath, isError, msg) {
+    const row = findFileRow(filePath);
+    if (!row) return;
+    const cell = row.querySelector('.transfer-cell');
+    if (cell) {
+        cell.innerHTML = `<div class="transfer-overlay transfer-overlay--done ${isError ? 'transfer-overlay--error' : ''}">
+            <div class="transfer-overlay-title"><i class="mdi mdi-${isError ? 'alert-circle' : 'check-circle'}"></i> ${isError ? esc(msg || tr('transfer_done')) : tr('transfer_done')}</div>
+        </div>`;
+    }
+    if (isError) {
+        unmarkFileAsTransferring(filePath);
+    }
+}
+
 function trackMoveProgress(jobId, filePath, file, newName) {
     const pollInterval = setInterval(async () => {
         try {
             const response = await fetch(`/api/move-progress/${jobId}`);
             const prog = await response.json();
-            updateProgressDisplay(filePath, jobId, prog);
+            const transfer = activeTransfers[jobId];
+            if (!transfer) { clearInterval(pollInterval); return; }
 
             if (prog.finished) {
                 clearInterval(pollInterval);
                 delete activeTransfers[jobId];
-                unmarkFileAsTransferring(filePath);
-
                 if (prog.error) {
-                    const row = findFileRow(filePath);
-                    const progressCell = row?.querySelector('.progress-cell');
-                    if (progressCell) progressCell.innerHTML = `<div class="progress-done progress-error-state"><i class="mdi mdi-alert-circle"></i> ${esc(prog.error)}</div>`;
+                    showTransferResult(filePath, true, prog.error);
+                    setTimeout(() => { unmarkFileAsTransferring(filePath); renderTable(); }, 2500);
                     return;
                 }
-
-                const row = findFileRow(filePath);
-                const progressCell = row?.querySelector('.progress-cell');
-                if (progressCell) {
-                    progressCell.innerHTML = `<div class="progress-done"><i class="mdi mdi-check-circle"></i> Déplacé</div>`;
-                }
-                setTimeout(() => removeFileFromList(filePath), 800);
+                showTransferResult(filePath, false);
+                setTimeout(() => removeFileFromList(filePath), 900);
+                return;
             }
+
+            transfer.progress = prog;
+            updateTransferRow(filePath, jobId);
         } catch (e) {
             console.error('Progress poll error:', e);
         }
-    }, 500);
+    }, 400);
 
     if (activeTransfers[jobId]) {
         activeTransfers[jobId].pollInterval = pollInterval;
@@ -751,36 +1264,6 @@ function removeFileFromList(filePath) {
         row.style.transition = 'opacity 0.3s ease';
         setTimeout(() => row.remove(), 300);
     }
-}
-
-function updateProgressDisplay(filePath, jobId, prog) {
-    const row = findFileRow(filePath);
-    if (!row) return;
-    const progressCell = row.querySelector('.progress-cell');
-    if (!progressCell) return;
-
-    if (prog.finished && prog.error) {
-        progressCell.innerHTML = `<div class="progress-done progress-error-state"><i class="mdi mdi-alert-circle"></i> Erreur</div>`;
-        return;
-    }
-    if (prog.finished) {
-        progressCell.innerHTML = `<div class="progress-done"><i class="mdi mdi-check-circle"></i> Déplacé</div>`;
-        return;
-    }
-
-    const phase = prog.phase || 'copying';
-    const percent = Math.max(0, Math.min(100, Number(prog.percent) || 0));
-
-    const statsHtml = prog.speed > 0
-        ? `<span>${formatBytes(prog.speed)}/s</span>${prog.eta > 0 ? `<span>ETA ${formatSeconds(prog.eta)}</span>` : ''}`
-        : '';
-
-    progressCell.innerHTML = `
-        <div class="progress-bar-container">
-            <div class="progress-bar ${phase === 'copying' ? '' : 'progress-bar--pulse'}" style="width:${percent}%"></div>
-            <div class="progress-text">${percent}%</div>
-        </div>
-        ${statsHtml ? `<div class="progress-stats">${statsHtml}</div>` : ''}`;
 }
 
 function formatBytes(bytes) {
@@ -809,16 +1292,10 @@ function moveAll() {
 }
 
 // ── Manual Search ─────────────────────────────────────────────────────────────
-function manualSearch(filePath) {
-    const file = allFiles.find(f => f.path === filePath);
-    if (!file) return;
-    const title = file.filename
-        .replace(/\.[^.]+$/, '').replace(/\s*\[[^\]]*\]/g, '')
-        .replace(/\s*\([^)]{8,}\)/g, '').replace(/\s*\(\d{4}\)/g, '')
-        .replace(/[._]/g, ' ').replace(/\s*[-]\s*[Ss]\d+[Ee]\d+.*/i, '')
-        .replace(/\s*[Ss]\d+[Ee]\d+.*/i, '').replace(/\s*(19|20)\d{2}.*/i, '')
-        .replace(/\s+/g, ' ').trim();
-    window._manualSearchFilePath = filePath;
+function openManualSearchModal(title, opts = {}) {
+    window._manualSearchFilePath = opts.filePath ?? null;
+    window._manualSearchFolderPath = opts.folderPath ?? null;
+    window._manualSearchFromLibrary = !!opts.fromLibrary;
     document.getElementById('manualSearchContent').innerHTML = `
         <div class="form-field">
             <label>${tr('search_label')}</label>
@@ -831,30 +1308,63 @@ function manualSearch(filePath) {
     setTimeout(() => document.getElementById('search-title')?.focus(), 100);
 }
 
-function executeManualSearch() {
-    const filePath = window._manualSearchFilePath;
+function manualSearch(filePath) {
     const file = allFiles.find(f => f.path === filePath);
     if (!file) return;
+    const title = file.filename
+        .replace(/\.[^.]+$/, '').replace(/\s*\[[^\]]*\]/g, '')
+        .replace(/\s*\([^)]{8,}\)/g, '').replace(/\s*\(\d{4}\)/g, '')
+        .replace(/[._]/g, ' ').replace(/\s*[-]\s*[Ss]\d+[Ee]\d+.*/i, '')
+        .replace(/\s*[Ss]\d+[Ee]\d+.*/i, '').replace(/\s*(19|20)\d{2}.*/i, '')
+        .replace(/\s+/g, ' ').trim();
+    openManualSearchModal(title, { filePath });
+}
+
+function executeManualSearch() {
+    const folderPath = window._manualSearchFolderPath;
+    const filePath = window._manualSearchFilePath;
     const title = document.getElementById('search-title').value.trim();
     if (!title) return;
     const resultsDiv = document.getElementById('manual-results');
     resultsDiv.innerHTML = `<div class="loading"><div class="spinner"></div>${tr('searching')}</div>`;
-    const endpoint = file.media_type === 'movie' ? '/api/search/movie' : '/api/search/tv';
-    postJSON(endpoint, { title, path: filePath })
+    const isFolder = !!folderPath;
+    const file = isFolder ? null : allFiles.find(f => f.path === filePath);
+    const mediaType = isFolder ? 'tv' : (file ? (file.media_type === 'movie' ? 'movie' : 'tv') : 'tv');
+    const endpoint = mediaType === 'movie' ? '/api/search/movie' : '/api/search/tv';
+    const payload = { title, path: isFolder ? folderPath : filePath, force_refresh: true };
+    if (!isFolder && mediaType !== 'movie') { payload.season = file?.season; payload.episode = file?.episode; }
+    postJSON(endpoint, payload)
     .then(results => {
         // Accept either the old array response or the new envelope { results: [], cache_source: '...' }
         let list = results;
         if (results && results.results) list = results.results;
         if (!list?.length) { resultsDiv.innerHTML = `<div class="message error">${tr('search_none')}</div>`; return; }
         window._searchResults = list;
-        let html = `<p style="color:#888;font-size:0.82em;margin-bottom:10px;">${list.length} ${tr('search_results')}</p><div class="search-results">`;
+        let html = `<p style="color:#888;font-size:1em;margin-bottom:10px;">${list.length} ${tr('search_results')}</p><div class="search-results">`;
         list.forEach((r, i) => {
-            const poster = r.poster ? `<img src="${esc(r.poster)}" alt="">` : (file.media_type === 'movie' ? '🎬' : '📺');
+            const isTv = mediaType !== 'movie';
+            const od = r.omdb || {};
+            const eod = r.episode_omdb || {};
+            const omdbParts = [];
+            if (isTv) {
+                if (eod.imdbRating) omdbParts.push('ép. ★ ' + eod.imdbRating);
+                if (eod.Runtime && eod.Runtime !== 'N/A') omdbParts.push('ép. ' + eod.Runtime);
+            } else {
+                if (od.imdbRating) omdbParts.push('★ ' + od.imdbRating);
+                if (od.Rated && od.Rated !== 'N/A') omdbParts.push(od.Rated);
+                if (od.Runtime && od.Runtime !== 'N/A') omdbParts.push(od.Runtime);
+                if (od.Genre && od.Genre !== 'N/A') omdbParts.push(od.Genre);
+            }
+            const omdbLine = omdbParts.length ? `<div class="result-omdb">${omdbParts.map(esc).join(' · ')}</div>` : '';
+            const poster = (r.poster || od.Poster) ? `<img src="${esc(r.poster || od.Poster)}" alt="">` : (mediaType === 'movie' ? '🎬' : '📺');
             html += `<div class="result-item" data-ridx="${i}" onclick="selectResult(this)">
                 <div class="result-poster">${poster}</div>
-                <div class="result-title">${esc(r.title || '')}</div>
-                <div class="result-year">${r.year || 'N/A'}</div>
-                <div class="result-type">TVDB #${r.id}</div></div>`;
+                <div class="result-info">
+                    <div class="result-title">${esc(r.title || '')}</div>
+                    <div class="result-year">${r.year || 'N/A'}</div>
+                    ${omdbLine}
+                    <div class="result-type">TVDB #${r.id}</div>
+                </div></div>`;
         });
         resultsDiv.innerHTML = html + '</div>';
     })
@@ -863,6 +1373,14 @@ function executeManualSearch() {
 
 function selectResult(el) {
     const result = window._searchResults[parseInt(el.getAttribute('data-ridx'))];
+    const folderPath = window._manualSearchFolderPath;
+    if (folderPath) {
+        window._manualSearchFolderPath = null;
+        window._manualSearchFromLibrary = false;
+        closeModal('manualSearchModal');
+        libRenameFolder(folderPath, result);
+        return;
+    }
     const filePath = window._manualSearchFilePath;
     const file = allFiles.find(f => f.path === filePath);
     const resultsDiv = document.getElementById('manual-results');
@@ -871,12 +1389,7 @@ function selectResult(el) {
         ? `/api/movie/${result.id}?source=tvdb`
         : `/api/tv/${result.id}?season=${file.season || 1}&episode=${file.episode || 1}&source=tvdb`;
     fetch(url).then(r => r.json()).then(details => {
-        details.imdbid = details.imdbid || result.imdb_id || '';
-        details.imdb   = details.imdbid;
-        details.tmdbid = details.tmdbid || result.tmdb_id || '';
-        details.tmdb   = details.tmdbid;
-        if (!details.translations || !Object.keys(details.translations).length)
-            details.translations = result.translations || {};
+        mergeDetails(details, result);
         filesPreviews[file.path] = { loading: false, data: { source: result, details }, error: null };
         // Persist the manual selection to server-side file cache so refresh won't overwrite it
         try {
@@ -885,7 +1398,25 @@ function selectResult(el) {
         } catch (e) { /* ignore */ }
         updateFileRow(file);
         closeModal('manualSearchModal');
+        const fromLibrary = window._manualSearchFromLibrary;
+        window._manualSearchFromLibrary = false;
+        if (fromLibrary) libApplyRename(filePath);
     }).catch(e => { resultsDiv.innerHTML = `<div class="message error">Erreur: ${esc(e.message)}</div>`; });
+}
+
+function libApplyRename(filePath) {
+    const file = allFiles.find(f => f.path === filePath);
+    if (!file || !file.filename) { refreshLibrary(); return; }
+    const p = filesPreviews[file.path];
+    if (!p?.data) { refreshLibrary(); return; }
+    const newName = generateFilename(file, p.data.details);
+    if (newName === file.filename) { refreshLibrary(); return; }
+    postJSON('/api/rename', { path: file.path, new_name: newName })
+        .then(data => {
+            if (!data.success) { alert(`✗ ${tr('err_rename')}\n${data.message}`); refreshLibrary(); return; }
+            refreshLibrary();
+        })
+        .catch(e => { alert(`✗ ${tr('err_rename')}\n${e.message}`); refreshLibrary(); });
 }
 
 // ── File Picker ───────────────────────────────────────────────────────────────
@@ -917,7 +1448,7 @@ function browseFolder(path) {
             html += `<div class="picker-item" data-path="${esc(full)}" onclick="browseFolder(this.dataset.path)">📁 ${esc(d)}</div>`;
         });
         if (!data.roots?.length && !data.dirs?.length)
-            html += `<div style="padding:12px;color:#666;font-size:0.85em;">${tr('picker_empty')}</div>`;
+            html += `<div style="padding:12px;color:#666;font-size:1em;">${tr('picker_empty')}</div>`;
         html += `</div><div class="picker-actions">
             <button class="btn btn-primary" id="picker-select-btn">${tr('picker_select')}</button>
             <button class="btn btn-secondary" onclick="closeModal('folderPickerModal')">${tr('picker_cancel')}</button>
@@ -973,7 +1504,7 @@ function loadConfig() {
     fetch('/api/config')
         .then(r => { if (r.status === 401) { window.location='/login'; throw new Error('401'); } return r.json(); })
         .then(data => {
-            ['tvdb_api_key','movie_format','tv_format','input_path','movie_output_path','tv_output_path'].forEach(k => setVal(k, data[k] || ''));
+            ['tvdb_api_key','omdb_api_key','movie_format','tv_format','input_path','movie_output_path','tv_output_path'].forEach(k => setVal(k, data[k] || ''));
             const mf = localStorage.getItem('cleanflick_movie_format');
             const tf = localStorage.getItem('cleanflick_tv_format');
             if (mf) setVal('movie_format', mf);
@@ -986,6 +1517,7 @@ function loadConfig() {
 function initConfigAutoSave() {
     [
         { id: 'tvdb_api_key',       key: 'tvdb_api_key' },
+        { id: 'omdb_api_key',       key: 'omdb_api_key' },
         { id: 'input_path',         key: 'input_path' },
         { id: 'movie_output_path',  key: 'movie_output_path' },
         { id: 'tv_output_path',     key: 'tv_output_path' },
@@ -1001,23 +1533,18 @@ function initConfigAutoSave() {
     });
 }
 
-function clearCache() {
-    fetch('/api/cache/clear', { method: 'POST' })
-        .then(r => r.json())
-        .then(() => {
-            const msg = document.getElementById('config-message');
-            if (msg) msg.innerHTML = `<div class="message success">✓ Cache TVDB vidé</div>`;
-            setTimeout(() => { if (msg) msg.innerHTML = ''; }, 2000);
-        })
-        .catch(e => alert(`Erreur: ${e.message}`));
-}
-
-function testKeys() {
-    const btn = document.getElementById('tvdb_test_btn');
+function testKeys(service) {
+    const payload = {};
+    const btnIds = { tvdb: 'tvdb_test_btn', omdb: 'omdb_test_btn' };
+    const id = btnIds[service];
+    const btn = document.getElementById(id);
     if (btn) { btn.classList.remove('valid', 'invalid'); btn.disabled = true; }
-    postJSON('/api/test-keys', { tvdb_api_key: getVal('tvdb_api_key') })
+    if (service === 'tvdb') payload.tvdb_api_key = getVal('tvdb_api_key');
+    if (service === 'omdb') payload.omdb_api_key = getVal('omdb_api_key');
+    postJSON('/api/test-keys', payload)
         .then(data => {
-            if (btn) { btn.classList.toggle('valid', !!data.tvdb?.valid); btn.classList.toggle('invalid', !data.tvdb?.valid); btn.disabled = false; }
+            const res = data[service];
+            if (btn) { btn.classList.toggle('valid', !!res?.valid); btn.classList.toggle('invalid', !res?.valid); btn.disabled = false; }
         })
         .catch(() => { if (btn) { btn.classList.add('invalid'); btn.disabled = false; } });
 }
@@ -1025,33 +1552,16 @@ function testKeys() {
 // ── Init ──────────────────────────────────────────────────────────────────────
 // No periodic auto-scan is enabled. A new file discovery on disk is not observable
 // from the browser runtime itself, so the page is initialized with a one-shot scan only.
-let autoScanInterval = null;
-const AUTO_SCAN_INTERVAL = 0;
-let lastScannedFileCount = 0;
-let lastScannedPaths = new Set();
-
-function startAutoScan() {
-    // Keep it inert: only an explicit scan/reset should refresh the list.
-    if (autoScanInterval) {
-        clearInterval(autoScanInterval);
-    }
-    autoScanInterval = null;
-}
-
-function addNewFilesToTable(newFiles) {
-    renderTable();
-}
-
-function stopAutoScan() {
-    if (autoScanInterval) {
-        clearInterval(autoScanInterval);
-        autoScanInterval = null;
-    }
-}
 
 document.addEventListener('DOMContentLoaded', () => {
     if (typeof applyTranslations === 'function') applyTranslations();
     initConfigAutoSave();
+    loadApiUsage();
+
+    const savedTab = localStorage.getItem(LIB_TAB_KEY);
+    if (savedTab && ['files', 'library', 'history', 'config'].includes(savedTab)) {
+        switchTab(savedTab);
+    }
 
     if (window.EventSource) {
         try {
@@ -1059,7 +1569,7 @@ document.addEventListener('DOMContentLoaded', () => {
             scanEventSource.addEventListener('message', (event) => {
                 try {
                     const data = JSON.parse(event.data || '{}');
-                    if (data.event === 'scan-refresh' && Object.keys(activeTransfers).length === 0) {
+                    if (data.event === 'scan-refresh') {
                         scanFiles();
                     }
                 } catch (e) {

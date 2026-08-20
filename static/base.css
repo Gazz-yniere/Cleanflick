@@ -40,8 +40,7 @@ body {
     border-radius: 10px;
     box-shadow: var(--shadow);
     overflow: hidden;
-    margin: 0 auto;
-    max-width: 1400px;
+    margin: 0px 50px;
 }
 
 .content { padding: 25px; background: var(--c-surface); }
@@ -58,7 +57,7 @@ header {
     justify-content: space-between;
 }
 header h1 { font-size: 2em; letter-spacing: 1px; }
-header p  { font-size: 0.9em; opacity: 0.85; margin-top: 4px; }
+header p  { font-size: 1em; opacity: 0.85; margin-top: 4px; }
 .header-left { display: flex; align-items: center; gap: 14px; }
 .header-right { display: flex; gap: 10px; align-items: center; }
 
@@ -67,24 +66,19 @@ nav { background: #222; display: flex; border-bottom: 2px solid var(--c-accent);
 nav a {
     flex: 1; padding: 14px; text-align: center; text-decoration: none;
     color: var(--c-text3); border-bottom: 3px solid transparent;
-    cursor: pointer; transition: all 0.2s; font-size: 0.9em;
+    cursor: pointer; transition: all 0.2s; font-size: 1em;
 }
 nav a:hover { background: var(--c-surface3); color: var(--c-accent); }
 nav a.active { border-bottom-color: var(--c-accent); color: var(--c-accent); font-weight: bold; }
-nav a.logout {
-    display: none; flex: none; padding: 14px 20px;
-    color: var(--c-text); font-size: 0.82em; border-left: 1px solid var(--c-surface3);
-}
-nav a.logout:hover { color: var(--c-accent); background: var(--c-surface3); }
 
 /* ── MDI Icons ────────────────────────────────────────────────────────────── */
-.mdi { font-size: 1.5em; vertical-align: middle; display: inline-block; line-height: 1; }
+.mdi { font-size: 30px; vertical-align: middle; display: inline-block; line-height: 1; width: 30px; height: 30px; }
 .mdi + .i18n-text, .mdi + span, .mdi + * { margin-left: 7px; }
 
 /* ── Buttons ──────────────────────────────────────────────────────────────── */
 .btn {
     padding: 8px 16px; border: none; border-radius: var(--radius);
-    cursor: pointer; font-size: 0.88em; transition: all 0.2s;
+    cursor: pointer; font-size: 1em; transition: all 0.2s;
     display: inline-flex; align-items: center; justify-content: center;
     height: 36px;
 }
@@ -94,13 +88,13 @@ nav a.logout:hover { color: var(--c-accent); background: var(--c-surface3); }
 .btn-secondary:hover { background: var(--c-border); color: var(--c-accent); border-color: var(--c-accent); }
 .btn-lang {
     background: var(--c-surface2); color: var(--c-text); border: 1px solid var(--c-border2);
-    padding: 6px 12px; border-radius: var(--radius); cursor: pointer; font-size: 0.82em;
+    padding: 6px 12px; border-radius: var(--radius); cursor: pointer; font-size: 1em;
 }
 .btn-lang:hover { border-color: var(--c-accent); color: var(--c-accent); }
 .btn-test {
     background: var(--c-accent); color: white; border: none;
     padding: 0 14px; border-radius: 4px; cursor: pointer;
-    font-size: 0.82em; display: inline-flex; align-items: center;
+    font-size: 1em; display: inline-flex; align-items: center;
     height: 36px;
 }
 .btn-test:hover   { background: var(--c-accent-hv); }
@@ -108,7 +102,7 @@ nav a.logout:hover { color: var(--c-accent); background: var(--c-surface3); }
 .btn-test.invalid { background: #c0392b; }
 
 /* ── Messages ─────────────────────────────────────────────────────────────── */
-.message { padding: 10px 14px; margin: 8px 0; border-radius: var(--radius); font-size: 0.88em; }
+.message { padding: 10px 14px; margin: 8px 0; border-radius: var(--radius); font-size: 1em; }
 .message.success { background: var(--c-success-bg); color: var(--c-success); border: 1px solid var(--c-success-bd); }
 .message.error   { background: var(--c-error-bg);   color: var(--c-error);   border: 1px solid var(--c-error-bd); }
 .empty-state { text-align: center; padding: 40px; color: var(--c-text4); }
@@ -143,9 +137,11 @@ nav a.logout:hover { color: var(--c-accent); background: var(--c-surface3); }
 
 /* ── Footer ───────────────────────────────────────────────────────────────── */
 .app-footer {
-    margin: 20px auto 0; max-width: 1400px;
-    padding: 16px 25px; color: var(--c-text3);
-    text-align: center; font-size: 0.85em;
+    margin: 20px auto 0;
+    padding: 16px 25px; color: #fff; opacity: 0.95;
+    text-align: center; font-size: 1em;
+    background: linear-gradient(135deg, var(--c-accent) 0%, #e07118 100%);
+    border-radius: 0 0 10px 10px;
 }
-.app-footer a { color: var(--c-accent); text-decoration: none; }
-.app-footer a:hover { color: white; }
+.app-footer a { color: #fff; text-decoration: none; font-weight: 600; }
+.app-footer a:hover { color: #ffd9b3; }

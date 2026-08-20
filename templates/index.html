@@ -6,9 +6,9 @@
     <title>CleanFlick</title>
     <link rel="icon" type="image/x-icon" href="{{ url_for('static', filename='CleanFlick.ico') }}">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@mdi/font@7.4.47/css/materialdesignicons.min.css">
-    <link rel="stylesheet" href="{{ url_for('static', filename='base.css') }}">
-    <link rel="stylesheet" href="{{ url_for('static', filename='files.css') }}">
-    <link rel="stylesheet" href="{{ url_for('static', filename='config.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='base.css') }}?v={{ cache_bust }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='files.css') }}?v={{ cache_bust }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='config.css') }}?v={{ cache_bust }}">
 </head>
 <body>
 <div class="container">
@@ -46,32 +46,33 @@
                 <button class="btn btn-secondary" onclick="moveAll()" data-i18n="btn_move_all"><i class="mdi mdi-folder-move"></i></button>
             </div>
 
-            <table class="files-table">
-                <thead>
-                    <tr>
-                        <th class="col-file"     data-i18n="th_file"></th>
-                        <th class="col-preview"  data-i18n="th_preview"></th>
-                        <th class="col-progress" data-i18n="th_progress"></th>
-                        <th class="col-actions"  data-i18n="th_actions"></th>
-                    </tr>
-                </thead>
-                <tbody id="files-tbody">
-                    <tr><td colspan="4" class="empty-state" data-i18n="no_files"></td></tr>
-                </tbody>
-            </table>
+            <div class="files-grid">
+                    <div class="files-grid-header">
+                        <span class="col-file" data-i18n="th_file"></span>
+                        <span class="col-preview" data-i18n="th_preview"></span>
+                        <span class="col-actions" data-i18n="th_actions"></span>
+                    </div>
+                    <div id="files-tbody"></div>
+                </div>
         </div>
 
         <!-- ===== LIBRAIRIE ===== -->
         <div id="library" class="section">
             <div class="filter-bar">
-                <button class="btn btn-primary" onclick="loadLibrary()" data-i18n="btn_refresh_library"><i class="mdi mdi-refresh"></i></button>
-                <span class="lib-legend">
-                    <span class="lib-badge lib-badge--ok"><i class="mdi mdi-check-circle"></i></span> <span data-i18n="lib_valid"></span>
-                    &nbsp;
-                    <span class="lib-badge lib-badge--warn"><i class="mdi mdi-alert"></i></span> <span data-i18n="lib_invalid"></span>
+                <button class="btn btn-primary" onclick="refreshLibrary()" data-i18n="btn_refresh_library"><i class="mdi mdi-refresh"></i></button>
+                <span class="lib-sort">
+                    <button class="filter-btn active" id="lib-filter" onclick="cycleLibFilter()"><i class="mdi mdi-filter-variant"></i><span data-i18n="filter_all">Tous</span></button>
+                    <button class="filter-btn active" id="lib-sort-name" onclick="setLibSort('name')"><i class="mdi mdi-sort-ascending"></i><span data-i18n="lib_sort_name">Alphabétique</span></button>
+                    <button class="filter-btn" id="lib-sort-size" onclick="setLibSort('size')"><i class="mdi mdi-sort"></i><span data-i18n="lib_sort_size">Taille</span></button>
+                    <button class="filter-btn" id="lib-sort-rating" onclick="setLibSort('rating')"><i class="mdi mdi-star"></i><span data-i18n="lib_sort_rating">Note</span></button>
                 </span>
             </div>
             <div id="library-tree"></div>
+            <div class="lib-legend">
+                <span class="lib-badge lib-badge--ok"><i class="mdi mdi-check-circle"></i></span> <span data-i18n="lib_valid"></span>
+                &nbsp;
+                <span class="lib-badge lib-badge--warn"><i class="mdi mdi-alert"></i></span> <span data-i18n="lib_invalid"></span>
+            </div>
         </div>
 
         <!-- ===== HISTORIQUE ===== -->
@@ -98,17 +99,36 @@
         <!-- ===== CONFIGURATION ===== -->
         <div id="config" class="section">
             <div class="config-page">
-                <div class="config-section full-width">
+                <div class="config-section">
                     <h3 data-i18n="cfg_tvdb_section"><i class="mdi mdi-api"></i></h3>
                     <div class="form-field api-row">
                         <div class="api-key-field">
                             <label data-i18n="cfg_tvdb_key"></label>
                             <input type="password" id="tvdb_api_key" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx">
                         </div>
-                        <button id="tvdb_test_btn" class="btn-test" onclick="testKeys()" data-i18n="cfg_test_key"><i class="mdi mdi-check-network"></i></button>
-                        <button class="btn-test" onclick="clearCache()" title="Vider le cache TVDB"><i class="mdi mdi-database-remove"></i></button>
+                        <button id="tvdb_test_btn" class="btn-test" onclick="testKeys('tvdb')" data-i18n="cfg_test_key"><i class="mdi mdi-check-network"></i></button>
                     </div>
                     <span class="hint">→ <a href="https://www.thetvdb.com/dashboard/account/apikey" target="_blank">thetvdb.com/dashboard/account/apikey</a></span>
+                </div>
+
+                <div class="config-section">
+                    <h3 data-i18n="cfg_omdb_section"><i class="mdi mdi-star"></i></h3>
+                    <div class="form-field api-row">
+                        <div class="api-key-field">
+                            <label data-i18n="cfg_omdb_key"></label>
+                            <input type="password" id="omdb_api_key" placeholder="xxxxxxxx">
+                        </div>
+                        <button id="omdb_test_btn" class="btn-test" onclick="testKeys('omdb')" data-i18n="cfg_test_key"><i class="mdi mdi-check-network"></i></button>
+                    </div>
+                    <span class="hint">→ <a href="https://www.omdbapi.com/apikey.aspx" target="_blank">omdbapi.com/apikey.aspx</a></span>
+                </div>
+
+                <div class="config-section full-width">
+                    <h3 data-i18n="cfg_usage_section"><i class="mdi mdi-counter"></i></h3>
+                    <div class="form-field">
+                        <div class="usage-grid" id="api-usage"></div>
+                        <span class="hint" data-i18n="cfg_usage_hint"></span>
+                    </div>
                 </div>
 
                 <div class="config-section">
@@ -268,7 +288,7 @@
 
     <footer class="app-footer">
         <span data-i18n="footer_text"></span>
-        <span class="footer-meta">· <a href="https://github.com/Gazz-yniere/Cleanflick" target="_blank">GitHub</a> · v1.0.7</span>
+        <span class="footer-meta">· <a href="https://github.com/Gazz-yniere/Cleanflick" target="_blank">GitHub</a> · v1.0.8</span>
     </footer>
 </div>
 
@@ -347,7 +367,22 @@
     </div>
 </div>
 
-<script src="{{ url_for('static', filename='i18n.js') }}"></script>
-<script src="{{ url_for('static', filename='app.js') }}"></script>
+<!-- Modal Résultat Renommage Dossier -->
+<div id="libRenameResultModal" class="modal">
+    <div class="modal-content modal-content--narrow">
+        <div class="modal-header">
+            <h2><i class="mdi mdi-folder-move"></i> <span id="libRenameResultTitle"></span></h2>
+            <button class="close-btn" onclick="closeModal('libRenameResultModal')">&times;</button>
+        </div>
+        <div id="libRenameResultBody" style="max-height:60vh;overflow:auto;"></div>
+        <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:16px;">
+            <button class="btn btn-secondary" onclick="closeModal('libRenameResultModal')" data-i18n="picker_cancel"></button>
+            <button class="btn btn-primary" onclick="closeModal('libRenameResultModal')">OK</button>
+        </div>
+    </div>
+</div>
+
+<script src="{{ url_for('static', filename='i18n.js') }}?v={{ cache_bust }}"></script>
+<script src="{{ url_for('static', filename='app.js') }}?v={{ cache_bust }}"></script>
 </body>
 </html>

@@ -10,7 +10,6 @@ __pycache__
 downloads/
 # Config sensible — monter via volume Docker
 config.json
-rename_history.json
 # Dev
 venv/
 _archive/

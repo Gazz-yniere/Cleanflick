@@ -10,8 +10,7 @@ COPY . .
 
 # Créer les dossiers et fichiers par défaut
 RUN mkdir -p /downloads/movie /downloads/tv_shows && \
-    cp config.example.json config.json && \
-    echo '{}' > rename_history.json
+    cp config.example.json config.json
 
 EXPOSE 5000
 

@@ -4,10 +4,11 @@ import json, os, re, time, requests, logging, shutil, threading, uuid
 import hashlib
 import db
 from pathlib import Path
+import mediaduration
+
+_MEDIA_DUR_CACHE = {}
 from scanner import MediaScanner, MediaFile
 from api_handler import APIHandler
-from rename_engine import RenameEngine
-
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -20,10 +21,9 @@ scan_last_snapshot = None
 scan_watch_lock = threading.Lock()
 
 CONFIG_FILE = "config.json"
-HISTORY_FILE = "rename_history.json"
 
 DEFAULT_CONFIG = {
-    "tvdb_api_key": "", "tvdb_pin": "",
+    "tvdb_api_key": "", "tvdb_pin": "", "omdb_api_key": "",
     "input_path": "/downloads",
     "movie_output_path": "/downloads/movie",
     "tv_output_path": "/downloads/tv_shows",
@@ -92,6 +92,16 @@ def _ensure_dir(path):
     if path:
         os.makedirs(path, exist_ok=True)
 
+def _static_version():
+    base = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static')
+    total = 0
+    for name in ('app.js', 'i18n.js', 'base.css', 'files.css', 'config.css'):
+        try:
+            total += int(os.path.getmtime(os.path.join(base, name)))
+        except OSError:
+            pass
+    return total
+
 def _move_path(source_path, destination_path, job_id=None):
     src, dst = os.path.abspath(source_path), os.path.abspath(destination_path)
     if src == dst:
@@ -134,11 +144,20 @@ def _move_path(source_path, destination_path, job_id=None):
                     })
                     last_update, last_copied = now, copied
         try:
-            os.fsync(os.open(dst, os.O_RDONLY))
+            fd = os.open(dst, os.O_RDONLY)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
         except Exception:
             pass
         if not os.path.exists(dst):
             raise FileNotFoundError(f"Le fichier de destination n'a pas été créé : {dst}")
+        move_progress[job_id].update({
+            'copied': file_size, 'file_size': file_size, 'percent': 100,
+            'speed': 0, 'eta': 0, 'phase': 'verifying', 'finished': False,
+            'elapsed': round(time.time() - start, 2),
+        })
         os.remove(src)
         if os.path.exists(src):
             raise FileExistsError(f"Le fichier source n'a pas quitté le dossier source : {src}")
@@ -190,7 +209,6 @@ def save_config(cfg):
 config = load_config()
 scanner = MediaScanner(config['_input_path'], [config.get('_movie_output_path'), config.get('_tv_output_path')])
 api_handler = APIHandler(config)
-rename_engine = RenameEngine(config)
 scanned_files = []
 move_progress = {}  # job_id -> progress dict
 
@@ -296,7 +314,7 @@ def _run_file_op(job_id, src_path, dst_path, history_entry):
                         fmtime = int(os.path.getmtime(new_p))
                         old_fkey = hashlib.md5(f"{os.path.abspath(old_p)}|{os.path.getsize(old_p) if os.path.exists(old_p) else 0}|{int(os.path.getmtime(old_p)) if os.path.exists(old_p) else 0}".encode('utf-8')).hexdigest()
                         new_fkey = hashlib.md5(f"{os.path.abspath(new_p)}|{fsize}|{fmtime}".encode('utf-8')).hexdigest()
-                        db.file_cache_migrate(old_fkey, new_fkey, os.path.abspath(new_p), fsize, fmtime)
+                        db.file_cache_migrate(old_fkey, new_fkey, os.path.abspath(new_p), fsize, fmtime, os.path.basename(old_p))
                 except Exception:
                     pass
             else:
@@ -330,7 +348,7 @@ def login():
 @app.route('/')
 @login_required
 def index():
-    return render_template('index.html')
+    return render_template('index.html', cache_bust=_static_version())
 
 @app.route('/api/browse')
 @login_required
@@ -363,11 +381,26 @@ def api_browse():
 def api_scan():
     global scanned_files
     scanned_files = scanner.scan()
-    return jsonify([{
-        'filename': f.filename, 'path': f.path,
-        'media_type': f.media_type, 'title': f.title,
-        'season': f.season, 'episode': f.episode, 'year': f.year
-    } for f in scanned_files])
+    out = []
+    for f in scanned_files:
+        item = {
+            'filename': f.filename, 'path': f.path,
+            'media_type': f.media_type, 'title': f.title,
+            'season': f.season, 'episode': f.episode, 'year': f.year
+        }
+        try:
+            mt = int(os.path.getmtime(f.path))
+            key = (f.path, mt)
+            if key in _MEDIA_DUR_CACHE:
+                item['duration'] = _MEDIA_DUR_CACHE[key]
+            else:
+                item['duration'] = mediaduration.get_duration_minutes(f.path)
+                _MEDIA_DUR_CACHE[key] = item['duration']
+        except Exception:
+            item['duration'] = None
+        out.append(item)
+    threading.Thread(target=_ensure_library_series_episodes, daemon=True).start()
+    return jsonify(out)
 
 @app.route('/api/scan/events')
 @login_required
@@ -400,6 +433,143 @@ def api_scan_events():
         'Connection': 'keep-alive'
     })
 
+def _fetch_omdb_single(imdb_id, title=None, year=None, is_series=False):
+    """Récupère et met en cache l'OMDb d'un seul imdb_id (repli on-demand)."""
+    key = (config.get('omdb_api_key') or '').strip()
+    if not key or not imdb_id:
+        return None
+    imdb = imdb_id.strip().lower()
+    if db.omdb_get(imdb) is not None:
+        return db.omdb_get(imdb)
+    try:
+        if is_series and title:
+            params = {'t': title, 'y': year, 'type': 'series', 'apikey': key}
+        else:
+            params = {'i': imdb, 'apikey': key}
+        db.usage_bump('omdb')
+        resp = requests.get('https://www.omdbapi.com/', params=params, timeout=6)
+        data = resp.json()
+        if data.get('Response') != 'True':
+            return None
+        oimdb = (data.get('imdbID') or '').lower()
+        db.omdb_set(oimdb or imdb, data)
+        if oimdb and oimdb != imdb:
+            db.omdb_set(imdb, data)
+        return data
+    except Exception as e:
+        logger.warning(f"OMDb single fetch error for {imdb}: {e}")
+        return None
+
+
+def _fetch_omdb_ratings(results):
+    key = (config.get('omdb_api_key') or '').strip()
+    if not key:
+        return
+    for res in results or []:
+        imdb = (res.get('imdb_id') or '').strip().lower()
+        if not imdb:
+            continue
+        if db.omdb_get(imdb) is not None:
+            continue
+        is_series = (res.get('type') or '').lower() in ('series', 'show', 'tv')
+        _fetch_omdb_single(imdb, res.get('title'), res.get('year'), is_series)
+
+def _attach_omdb(results):
+    try:
+        omdb_map = db.omdb_all()
+    except Exception:
+        return results
+    for r in results or []:
+        imdb = (r.get('imdb_id') or '').strip().lower()
+        if imdb and imdb in omdb_map:
+            r['omdb'] = omdb_map[imdb]
+    return results
+
+def _attach_episode_omdb(results, season, episode):
+    """Attache l'OMDb de l'épisode (durée/note/date) à chaque résultat TV, distinct de la série."""
+    try:
+        omdb_ep = db.omdb_episode_all()
+    except Exception:
+        omdb_ep = {}
+    for r in (results or [])[:3]:
+        imdb = (r.get('imdb_id') or '').strip().lower()
+        title = r.get('title')
+        year = r.get('year')
+        rtype = (r.get('type') or '').lower()
+        if not imdb or not title or not season or not episode:
+            continue
+        if rtype and rtype not in ('series', 'show', 'tv'):
+            continue
+        _fetch_omdb_episode(imdb, title, year, season, episode)
+        ekey = f"{imdb}:y{year}:s{int(season):02d}e{int(episode):02d}"
+        ed = omdb_ep.get(ekey) or db.omdb_episode_get(ekey)
+        if ed:
+            r['episode_omdb'] = ed
+    return results
+
+def _fetch_omdb_episode(series_imdb, title, year, season, episode):
+    """Récupère la note OMDb d'un épisode (titre + année + saison + épisode) et la met en cache."""
+    key = (config.get('omdb_api_key') or '').strip()
+    if not key or not title or not season or not episode:
+        return
+    cache_key = f"{series_imdb}:y{year}:s{int(season):02d}e{int(episode):02d}"
+    if db.omdb_episode_get(cache_key) is not None:
+        return
+    try:
+        params = {
+            't': title, 'Season': int(season), 'Episode': int(episode), 'type': 'series', 'apikey': key
+        }
+        if year:
+            params['y'] = year
+        db.usage_bump('omdb')
+        resp = requests.get('https://www.omdbapi.com/', params=params, timeout=6)
+        data = resp.json()
+        if data.get('Response') == 'True':
+            db.omdb_episode_set(cache_key, data)
+    except Exception as e:
+        logger.warning(f"OMDb episode fetch error for {title} S{season}E{episode}: {e}")
+
+# ── Search cache helpers ──────────────────────────────────────────────────────
+
+def _file_fingerprint(file_path):
+    """Compute the cache fingerprint for a file (path + size + mtime)."""
+    try:
+        if file_path and os.path.exists(file_path):
+            fsize = os.path.getsize(file_path)
+            fmtime = int(os.path.getmtime(file_path))
+            return {
+                'fkey': hashlib.md5(f"{os.path.abspath(file_path)}|{fsize}|{fmtime}".encode('utf-8')).hexdigest(),
+                'abspath': os.path.abspath(file_path),
+                'size': fsize,
+                'mtime': fmtime,
+            }
+    except Exception:
+        pass
+    return None
+
+def _file_cache_lookup(file_path):
+    """Return the cached file search results for a path, or None."""
+    fp = _file_fingerprint(file_path)
+    if not fp:
+        return None
+    try:
+        return db.file_cache_get(fp['fkey'])
+    except Exception:
+        return None
+
+def _file_cache_store(file_path, media_type, results):
+    """Persist search results against a file fingerprint."""
+    fp = _file_fingerprint(file_path)
+    if not fp:
+        return
+    try:
+        db.file_cache_set(fp['fkey'], fp['abspath'], fp['size'], fp['mtime'], media_type, results)
+    except Exception:
+        pass
+
+def _params_cache_key(params):
+    return hashlib.md5(json.dumps(params, sort_keys=True, ensure_ascii=False).encode('utf-8')).hexdigest()
+
 @app.route('/api/search/auto', methods=['POST'])
 @login_required
 def api_search_auto():
@@ -411,48 +581,38 @@ def api_search_auto():
     }
     # If client provided a file path, try file-specific cache (fingerprint based)
     file_path = d.get('path') or d.get('file_path')
-    if file_path:
-        try:
-            if os.path.exists(file_path):
-                fsize = os.path.getsize(file_path)
-                fmtime = int(os.path.getmtime(file_path))
-                fkey_raw = f"{os.path.abspath(file_path)}|{fsize}|{fmtime}"
-                fkey = hashlib.md5(fkey_raw.encode('utf-8')).hexdigest()
-                cached_file = db.file_cache_get(fkey)
-                if cached_file is not None:
-                    logger.info(f"Search auto: cache hit (file) for {file_path}")
-                    out = dict(cached_file)
-                    out['cache_source'] = 'file'
-                    return jsonify(out)
-        except Exception:
-            pass
+    cached_file = _file_cache_lookup(file_path)
+    if cached_file is not None:
+        logger.info(f"Search auto: cache hit (file) for {file_path}")
+        out = dict(cached_file)
+        out['cache_source'] = 'file'
+        _fetch_omdb_ratings(out.get('results', [])[:3])
+        _attach_omdb(out.get('results', []))
+        return jsonify(out)
 
-    key = hashlib.md5(json.dumps(params, sort_keys=True, ensure_ascii=False).encode('utf-8')).hexdigest()
+    key = _params_cache_key(params)
     cached = db.cache_get(key)
     if cached is not None:
         logger.info(f"Search auto: cache hit (params) key={key}")
         out = dict(cached)
         out['cache_source'] = 'params'
+        _fetch_omdb_ratings(out.get('results', [])[:3])
+        _attach_omdb(out.get('results', []))
         return jsonify(out)
 
     logger.info(f"Search auto: cache miss for title={params['title']} year={params.get('year')}")
     result = api_handler.search_auto(params['title'], params['year'], params['filename'], params['season'], params['episode'], params['media_hint'])
+    _fetch_omdb_ratings(result.get('results', [])[:3])
+    if params.get('season') and params.get('episode'):
+        _attach_episode_omdb(result.get('results', []), params['season'], params['episode'])
+    _attach_omdb(result.get('results', []))
     try:
         db.cache_set(key, result.get('media_type', ''), result.get('results', []))
     except Exception:
         pass
 
     # Store per-file cache if path was provided and exists
-    if file_path:
-        try:
-            if os.path.exists(file_path):
-                fsize = os.path.getsize(file_path)
-                fmtime = int(os.path.getmtime(file_path))
-                fkey_raw = f"{os.path.abspath(file_path)}|{fsize}|{fmtime}"
-                fkey = hashlib.md5(fkey_raw.encode('utf-8')).hexdigest()
-                db.file_cache_set(fkey, os.path.abspath(file_path), fsize, fmtime, result.get('media_type', ''), result.get('results', []))
-        except Exception:
-            pass
+    _file_cache_store(file_path, result.get('media_type', ''), result.get('results', []))
     result_with_source = dict(result)
     result_with_source['cache_source'] = 'tvdb'
     logger.info(f"Search auto: returning {len(result.get('results', []))} results from TVDB for title={params['title']}")
@@ -463,45 +623,36 @@ def api_search_auto():
 def api_search_movie():
     d = request.json or {}
     params = {'title': d.get('title', ''), 'year': d.get('year')}
+    force_refresh = bool(d.get('force_refresh'))
     # file-specific cache support
     file_path = d.get('path') or d.get('file_path')
-    if file_path:
-        try:
-            if os.path.exists(file_path):
-                fsize = os.path.getsize(file_path)
-                fmtime = int(os.path.getmtime(file_path))
-                fkey_raw = f"{os.path.abspath(file_path)}|{fsize}|{fmtime}"
-                fkey = hashlib.md5(fkey_raw.encode('utf-8')).hexdigest()
-                cached_file = db.file_cache_get(fkey)
-                if cached_file is not None:
-                    logger.info(f"Search movie: cache hit (file) for {file_path}")
-                    out = {'results': cached_file.get('results', []), 'cache_source': 'file'}
-                    return jsonify(out)
-        except Exception:
-            pass
+    if not force_refresh:
+        cached_file = _file_cache_lookup(file_path)
+        if cached_file is not None:
+            logger.info(f"Search movie: cache hit (file) for {file_path}")
+            out = {'results': cached_file.get('results', []), 'cache_source': 'file'}
+            _fetch_omdb_ratings(out['results'][:3])
+            _attach_omdb(out['results'])
+            return jsonify(out)
 
-    key = hashlib.md5(json.dumps({'type': 'movie', **params}, sort_keys=True, ensure_ascii=False).encode('utf-8')).hexdigest()
-    cached = db.cache_get(key)
-    if cached is not None:
-        logger.info(f"Search movie: cache hit (params) key={key}")
-        out = {'results': cached.get('results', []), 'cache_source': 'params'}
-        return jsonify(out)
+    key = _params_cache_key({'type': 'movie', **params})
+    if not force_refresh:
+        cached = db.cache_get(key)
+        if cached is not None:
+            logger.info(f"Search movie: cache hit (params) key={key}")
+            out = {'results': cached.get('results', []), 'cache_source': 'params'}
+            _fetch_omdb_ratings(out['results'][:3])
+            _attach_omdb(out['results'])
+            return jsonify(out)
     res = api_handler.search_movie(params['title'], params['year'])
+    _fetch_omdb_ratings(res[:3])
+    _attach_omdb(res)
     try:
         db.cache_set(key, 'movie', res)
     except Exception:
         pass
 
-    if file_path:
-        try:
-            if os.path.exists(file_path):
-                fsize = os.path.getsize(file_path)
-                fmtime = int(os.path.getmtime(file_path))
-                fkey_raw = f"{os.path.abspath(file_path)}|{fsize}|{fmtime}"
-                fkey = hashlib.md5(fkey_raw.encode('utf-8')).hexdigest()
-                db.file_cache_set(fkey, os.path.abspath(file_path), fsize, fmtime, 'movie', res)
-        except Exception:
-            pass
+    _file_cache_store(file_path, 'movie', res)
     logger.info(f"Search movie: returning {len(res)} results from TVDB for title={params['title']}")
     return jsonify({'results': res, 'cache_source': 'tvdb'})
 
@@ -510,44 +661,40 @@ def api_search_movie():
 def api_search_tv():
     d = request.json or {}
     params = {'title': d.get('title', '')}
+    season = d.get('season')
+    episode = d.get('episode')
+    force_refresh = bool(d.get('force_refresh'))
     file_path = d.get('path') or d.get('file_path')
-    if file_path:
-        try:
-            if os.path.exists(file_path):
-                fsize = os.path.getsize(file_path)
-                fmtime = int(os.path.getmtime(file_path))
-                fkey_raw = f"{os.path.abspath(file_path)}|{fsize}|{fmtime}"
-                fkey = hashlib.md5(fkey_raw.encode('utf-8')).hexdigest()
-                cached_file = db.file_cache_get(fkey)
-                if cached_file is not None:
-                    logger.info(f"Search tv: cache hit (file) for {file_path}")
-                    out = {'results': cached_file.get('results', []), 'cache_source': 'file'}
-                    return jsonify(out)
-        except Exception:
-            pass
+    if not force_refresh:
+        cached_file = _file_cache_lookup(file_path)
+        if cached_file is not None:
+            logger.info(f"Search tv: cache hit (file) for {file_path}")
+            out = {'results': cached_file.get('results', []), 'cache_source': 'file'}
+            _fetch_omdb_ratings(out['results'][:3])
+            _attach_omdb(out['results'])
+            _attach_episode_omdb(out['results'], season, episode)
+            return jsonify(out)
 
-    key = hashlib.md5(json.dumps({'type': 'tv', **params}, sort_keys=True, ensure_ascii=False).encode('utf-8')).hexdigest()
-    cached = db.cache_get(key)
-    if cached is not None:
-        logger.info(f"Search tv: cache hit (params) key={key}")
-        out = {'results': cached.get('results', []), 'cache_source': 'params'}
-        return jsonify(out)
+    key = _params_cache_key({'type': 'tv', **params})
+    if not force_refresh:
+        cached = db.cache_get(key)
+        if cached is not None:
+            logger.info(f"Search tv: cache hit (params) key={key}")
+            out = {'results': cached.get('results', []), 'cache_source': 'params'}
+            _fetch_omdb_ratings(out['results'][:3])
+            _attach_omdb(out['results'])
+            _attach_episode_omdb(out['results'], season, episode)
+            return jsonify(out)
     res = api_handler.search_tv(params['title'])
+    _fetch_omdb_ratings(res[:3])
+    _attach_omdb(res)
+    _attach_episode_omdb(res, season, episode)
     try:
         db.cache_set(key, 'tv', res)
     except Exception:
         pass
 
-    if file_path:
-        try:
-            if os.path.exists(file_path):
-                fsize = os.path.getsize(file_path)
-                fmtime = int(os.path.getmtime(file_path))
-                fkey_raw = f"{os.path.abspath(file_path)}|{fsize}|{fmtime}"
-                fkey = hashlib.md5(fkey_raw.encode('utf-8')).hexdigest()
-                db.file_cache_set(fkey, os.path.abspath(file_path), fsize, fmtime, 'tv', res)
-        except Exception:
-            pass
+    _file_cache_store(file_path, 'tv', res)
     logger.info(f"Search tv: returning {len(res)} results from TVDB for title={params['title']}")
     return jsonify({'results': res, 'cache_source': 'tvdb'})
 
@@ -595,6 +742,15 @@ def api_tv_details(tv_id):
         db.details_set('tv', cache_key, details)
     except Exception:
         pass
+    if details.get('title') and season and episode:
+        try:
+            _fetch_omdb_episode(details.get('imdbid') or details.get('imdb') or '', details.get('title'), details.get('year'), season, episode)
+            ekey = f"{(details.get('imdbid') or details.get('imdb') or '').strip().lower()}:y{details.get('year')}:s{int(season):02d}e{int(episode):02d}"
+            ed = db.omdb_episode_get(ekey)
+            if ed:
+                details['episode_omdb'] = ed
+        except Exception:
+            pass
     details['cache_source'] = 'tvdb'
     return jsonify(details)
 
@@ -629,7 +785,7 @@ def api_rename():
                 fmtime = int(os.path.getmtime(new_p))
                 old_fkey = hashlib.md5(f"{os.path.abspath(old_p)}|{os.path.getsize(old_p) if os.path.exists(old_p) else 0}|{int(os.path.getmtime(old_p)) if os.path.exists(old_p) else 0}".encode('utf-8')).hexdigest()
                 new_fkey = hashlib.md5(f"{os.path.abspath(new_p)}|{fsize}|{fmtime}".encode('utf-8')).hexdigest()
-                db.file_cache_migrate(old_fkey, new_fkey, os.path.abspath(new_p), fsize, fmtime)
+                db.file_cache_migrate(old_fkey, new_fkey, os.path.abspath(new_p), fsize, fmtime, os.path.basename(old_p))
         except Exception:
             pass
         return jsonify({"success": True, "new_path": str(new_path), "new_name": new_name})
@@ -650,15 +806,11 @@ def api_search_cache_file():
     if not file_path or results is None:
         return jsonify({'success': False, 'message': 'Missing path or results'}), 400
     try:
-        if os.path.exists(file_path):
-            fsize = os.path.getsize(file_path)
-            fmtime = int(os.path.getmtime(file_path))
-            fkey_raw = f"{os.path.abspath(file_path)}|{fsize}|{fmtime}"
-            fkey = hashlib.md5(fkey_raw.encode('utf-8')).hexdigest()
-            db.file_cache_set(fkey, os.path.abspath(file_path), fsize, fmtime, media_type, results)
-            return jsonify({'success': True})
-        else:
+        fp = _file_fingerprint(file_path)
+        if not fp:
             return jsonify({'success': False, 'message': 'File not found'}), 400
+        _file_cache_store(file_path, media_type, results)
+        return jsonify({'success': True})
     except Exception as e:
         logger.error(f"Error caching file search: {e}")
         return jsonify({'success': False, 'message': str(e)}), 500
@@ -800,6 +952,109 @@ def api_history():
                 e['revert_status'] = 'available'
     return jsonify(history)
 
+def _folder_size(path):
+    total = 0
+    try:
+        for root, dirs, files in os.walk(path):
+            dirs[:] = [d for d in dirs if not d.startswith('.')]
+            for f in files:
+                try:
+                    total += os.path.getsize(os.path.join(root, f))
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    return total
+
+
+def _tvdb_series_episodes(series_id):
+    """Liste complète des épisodes TVDB (toutes saisons), mise en cache 24h."""
+    cached = db.series_episodes_get(series_id)
+    if cached and cached.get('episodes'):
+        return cached['episodes']
+    try:
+        res = api_handler.get_series_episodes(series_id)
+        episodes = [{'s': e.get('s'), 'e': e.get('e'), 'title': e.get('title', '')}
+                    for e in res.get('episodes', []) if e.get('s') is not None and e.get('e') is not None]
+        if episodes:
+            db.series_episodes_set(series_id, {'episodes': episodes})
+            return episodes
+    except Exception as e:
+        logger.warning(f"Missing-episodes TVDB fetch error for {series_id}: {e}")
+    return cached.get('episodes', []) if cached else []
+
+
+def _present_episodes(path):
+    """Ensemble des (saison, episode) présents dans un dossier série."""
+    VIDEO_EXT = {'.mkv', '.mp4', '.avi', '.mov', '.wmv', '.m4v', '.ts', '.flv', '.webm'}
+    present = set()
+    sxe = re.compile(r'[Ss](\d{1,2})[Ee](\d{1,3})')
+    try:
+        for entry in os.scandir(path):
+            if entry.is_file(follow_symlinks=False) and Path(entry.name).suffix.lower() in VIDEO_EXT:
+                m = sxe.search(entry.name)
+                if m:
+                    present.add((int(m.group(1)), int(m.group(2))))
+    except Exception:
+        pass
+    return present
+
+
+def _series_episodes_cached(series_id):
+    """Lit la liste d'épisodes depuis le cache uniquement (aucune requête TVDB)."""
+    cached = db.series_episodes_get(series_id)
+    if cached and cached.get('episodes'):
+        return cached['episodes']
+    return []
+
+
+def _ensure_library_series_episodes():
+    """Pré-remplit le cache TVDB des épisodes pour toutes les séries de la librairie TV."""
+    tv_root = os.path.abspath(config.get('_tv_output_path') or config.get('tv_output_path') or '')
+    if not tv_root or not os.path.isdir(tv_root):
+        return
+    try:
+        for entry in os.scandir(tv_root):
+            if entry.is_dir(follow_symlinks=False):
+                m = re.search(r'\[tvdbid-([0-9]+)\]', entry.name, re.I)
+                if m:
+                    _tvdb_series_episodes(m.group(1))
+    except Exception as e:
+        logger.warning(f"Library series episodes prefill error: {e}")
+
+
+@app.route('/api/library/missing')
+@login_required
+def api_library_missing():
+    path = request.args.get('path', '').strip()
+    if not path or not os.path.isdir(path):
+        return jsonify({'error': 'Dossier introuvable'}), 404
+    tv_root = os.path.abspath(config.get('_tv_output_path') or config.get('tv_output_path') or '')
+    if not os.path.abspath(path).startswith(tv_root):
+        return jsonify({'error': 'Non autorisé hors du dossier TV'}), 403
+    name = os.path.basename(path.rstrip('/\\'))
+    m = re.search(r'\[tvdbid-([0-9]+)\]', name, re.I)
+    if not m:
+        return jsonify({'series_id': '', 'count': 0, 'missing': []})
+    series_id = m.group(1)
+    episodes = _series_episodes_cached(series_id)
+    present = _present_episodes(path)
+    missing = [e for e in episodes if (e['s'], e['e']) not in present]
+    missing.sort(key=lambda x: (x['s'], x['e']))
+    return jsonify({
+        'series_id': series_id,
+        'available': bool(episodes),
+        'count': len(missing),
+        'missing': [{'s': e['s'], 'e': e['e'], 'label': f"S{int(e['s']):02d}E{int(e['e']):02d}", 'title': e['title']} for e in missing]
+    })
+
+
+@app.route('/api/usage')
+@login_required
+def api_usage():
+    return jsonify({'usage': db.usage_get()})
+
+
 @app.route('/api/library')
 @login_required
 def api_library():
@@ -812,7 +1067,7 @@ def api_library():
         for lib_type, cfg_key in [('movie', '_movie_output_path'), ('tv', '_tv_output_path')]:
             lib_path = config.get(cfg_key) or config.get(cfg_key.lstrip('_'))
             if lib_path and os.path.isdir(lib_path):
-                roots.append({'name': os.path.basename(lib_path) or lib_path, 'path': lib_path, 'type': lib_type, 'is_dir': True})
+                roots.append({'name': os.path.basename(lib_path) or lib_path, 'path': lib_path, 'type': lib_type, 'is_dir': True, 'size': _folder_size(lib_path)})
         return jsonify({'path': '', 'type': 'root', 'entries': roots})
 
     if not os.path.isdir(path):
@@ -863,6 +1118,229 @@ def api_library():
                 return False
         return True
 
+    OMDB_MONTHS = {'Jan': 1, 'Feb': 2, 'Mar': 3, 'Apr': 4, 'May': 5, 'Jun': 6, 'Jul': 7, 'Aug': 8, 'Sep': 9, 'Oct': 10, 'Nov': 11, 'Dec': 12}
+
+    def _media_duration(path):
+        """Durée réelle (min) du fichier vidéo, lue en Python pur (Docker-safe)."""
+        try:
+            mt = int(os.path.getmtime(path))
+        except Exception:
+            return None
+        key = (path, mt)
+        if key in _MEDIA_DUR_CACHE:
+            return _MEDIA_DUR_CACHE[key]
+        minutes = mediaduration.get_duration_minutes(path)
+        _MEDIA_DUR_CACHE[key] = minutes
+        return minutes
+
+    def _omdb_date(s):
+        m = re.match(r'(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})', s or '')
+        if m:
+            mon = OMDB_MONTHS.get(m.group(2).capitalize())
+            if mon:
+                return f"{m.group(3)}-{mon:02d}-{int(m.group(1)):02d}"
+        return s or ''
+
+    def _apply_omdb(meta, imdb_id, title=None, year=None, is_series=False):
+        if not imdb_id:
+            return meta
+        imdb = imdb_id.strip().lower()
+        od = omdb_map.get(imdb)
+        if not od:
+            od = _fetch_omdb_single(imdb, title, year, is_series)
+            if od:
+                omdb_map[imdb] = od
+        if od and od.get('imdbRating'):
+            meta['rating'] = od['imdbRating']
+        if od.get('Released'):
+            meta['date'] = _omdb_date(od['Released'])
+        if od.get('Genre'):
+            meta['genres'] = od['Genre']
+        if od.get('Rated') and od.get('Rated') != 'N/A':
+            meta['certification'] = od['Rated']
+        if od.get('Runtime') and od.get('Runtime') != 'N/A':
+            meta['runtime'] = od['Runtime']
+        if not meta.get('poster') and od.get('Poster'):
+            meta['poster'] = od['Poster']
+        return meta
+
+    def cache_meta(cached):
+        if not cached:
+            return None
+        results = cached.get('results') or []
+        if not results:
+            return None
+        top = results[0]
+        meta = {
+            'title': top.get('title', ''),
+            'year': top.get('year'),
+            'imdb': top.get('imdb_id', ''),
+            'tmdb': top.get('tmdb_id', ''),
+            'tvdb': str(top.get('id_tvdb') or top.get('id') or ''),
+            'genres': top.get('genres', ''),
+            'poster': top.get('poster', ''),
+            'rating': '', 'date': top.get('date', ''), 'certification': '', 'runtime': '',
+            'type': top.get('type') or cached.get('media_type', ''),
+        }
+        return _apply_omdb(meta, meta['imdb'])
+
+    # Charge une seule fois le cache de recherche, puis matche par nom de fichier.
+    # (Le cache stocke le chemin d'origine ; après un déplacement vers la librairie
+    # le chemin change, mais le nom de fichier reste identique.)
+    basename_map = {}
+    conn = None
+    try:
+        conn = db.get_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT file_path, media_type, results_json, loaded_at FROM file_search_cache")
+        for r in cur.fetchall():
+            try:
+                base = os.path.basename(r['file_path'])
+                if base not in basename_map or (r['loaded_at'] or 0) > (basename_map[base]['loaded_at'] or 0):
+                    basename_map[base] = {
+                        'media_type': r['media_type'],
+                        'results': json.loads(r['results_json'] or '[]'),
+                        'loaded_at': r['loaded_at'],
+                    }
+            except Exception:
+                continue
+    except Exception:
+        pass
+    finally:
+        try:
+            if conn:
+                conn.close()
+        except Exception:
+            pass
+
+    # Notes OMDb (par imdb_id) chargées une seule fois, en lecture seule.
+    try:
+        omdb_map = db.omdb_all()
+    except Exception:
+        omdb_map = {}
+    try:
+        episode_omdb_map = db.omdb_episode_all()
+    except Exception:
+        episode_omdb_map = {}
+
+    def folder_meta(name):
+        best = None
+        for base, cached in basename_map.items():
+            if base.startswith(name):
+                if best is None or (cached['loaded_at'] or 0) > (best['loaded_at'] or 0):
+                    best = cached
+        meta = cache_meta(best)
+        meta = meta or id_meta(name) or name_meta(name)
+        if meta and lib_type == 'tv':
+            # Pour un dossier de série : pas de durée (elle n'apparaît que sur les fichiers/épisodes).
+            meta.pop('runtime', None)
+            meta.pop('episode_runtime', None)
+        return meta
+
+    # Index secondaire : (préfixe avant le marqueur d'épisode, marqueur) -> meilleur résultat
+    # Permet de retrouver un épisode même si le titre de l'épisode a changé depuis le cache.
+    episode_map = {}
+    for base, cached in basename_map.items():
+        m = re.search(r'([Ss]\d{2}[Ee]\d{2}|\d+x\d{2})', base)
+        if m:
+            key = (base[:m.start()].strip().lower(), m.group(1).lower())
+            if key not in episode_map or (cached['loaded_at'] or 0) > (episode_map[key]['loaded_at'] or 0):
+                episode_map[key] = cached
+
+    # Index par identifiants externes (imdb/tmdb/tvdb) du meilleur résultat.
+    # Retrouve l'info même si le fichier a été renommé, tant que l'id figure dans le nom.
+    id_index = {}
+    for cached in basename_map.values():
+        top = (cached.get('results') or [{}])[0]
+        for kind, val in (('imdb', top.get('imdb_id')), ('tmdb', top.get('tmdb_id')), ('tvdb', top.get('id_tvdb') or top.get('id'))):
+            if val:
+                key = (kind, str(val).strip().lower())
+                if key not in id_index or (cached['loaded_at'] or 0) > (id_index[key]['loaded_at'] or 0):
+                    id_index[key] = cached
+
+    def ids_from_name(name):
+        ids = []
+        m = re.search(r'\[(?:imdbid?|imdb)-([a-zA-Z0-9]+)\]', name, re.I)
+        if m:
+            ids.append(('imdb', m.group(1).lower()))
+        m = re.search(r'\[tmdb(?:id)?-([0-9]+)\]', name, re.I)
+        if m:
+            ids.append(('tmdb', m.group(1).lower()))
+        m = re.search(r'\[tvdbid-([0-9]+)\]', name, re.I)
+        if m:
+            ids.append(('tvdb', m.group(1).lower()))
+        return ids
+
+    def id_meta(name):
+        for kind, val in ids_from_name(name):
+            cached = id_index.get((kind, val))
+            if cached:
+                return cache_meta(cached)
+        return None
+
+    # Affiche l'info extraite du nom seul (sans API ni cache) :
+    # "Titre (Année) [imdbid-XXX] - (Titre FR).ext" -> titre + année + ids.
+    def name_meta(name):
+        m = re.match(r'^(.*?)\s*\((\d{4})\)', name)
+        if not m:
+            return None
+        meta = {
+            'title': m.group(1).strip(),
+            'year': m.group(2),
+            'imdb': '', 'tmdb': '', 'tvdb': '',
+            'genres': '', 'poster': '', 'rating': '', 'date': '', 'type': '',
+            'certification': '', 'runtime': '',
+        }
+        for kind, val in ids_from_name(name):
+            if kind == 'imdb':
+                meta['imdb'] = val
+            elif kind == 'tmdb':
+                meta['tmdb'] = val
+            elif kind == 'tvdb':
+                meta['tvdb'] = val
+        return _apply_omdb(meta, meta['imdb'])
+
+    def file_meta(name, duration=None):
+        m = re.search(r'([Ss]\d{2}[Ee]\d{2}|\d+x\d{2})', name)
+        ep_num = None
+        ep_name = ''
+        if m:
+            ep_num = m.group(1).upper()
+            tail = name[m.end():].strip(' -')
+            if tail:
+                ep_name = os.path.splitext(tail.split(' - ')[0].strip())[0] or ''
+        meta = cache_meta(basename_map.get(name))
+        if not meta:
+            if m:
+                key = (name[:m.start()].strip().lower(), m.group(1).lower())
+                meta = cache_meta(episode_map.get(key))
+            if not meta:
+                meta = id_meta(name) or name_meta(name)
+        if meta and ep_num:
+            meta['episode'] = ep_num
+            meta['episode_name'] = ep_name
+            m2 = re.match(r'[Ss](\d{2})[Ee](\d{2})', ep_num)
+            if duration:
+                meta['episode_runtime'] = f"{duration} min"
+            if m2 and meta.get('imdb'):
+                s_num, e_num = int(m2.group(1)), int(m2.group(2))
+                ekeys = [f"{meta['imdb']}:y{meta.get('year')}:s{s_num:02d}e{e_num:02d}",
+                         f"{meta['imdb']}:s{s_num:02d}e{e_num:02d}"]
+                ed = {}
+                for ek in ekeys:
+                    ed = episode_omdb_map.get(ek) or {}
+                    if ed:
+                        break
+                if ed.get('imdbRating'):
+                    meta['episode_rating'] = ed['imdbRating']
+                if not duration and ed.get('Runtime') and ed.get('Runtime') != 'N/A':
+                    meta['episode_runtime'] = ed['Runtime']
+                if ed.get('Released') and ed.get('Released') != 'N/A':
+                    meta['episode_date'] = _omdb_date(ed['Released'])
+        elif meta and not ep_num and duration:
+            meta['runtime'] = f"{duration} min"
+        return meta
+
     entries = []
     try:
         for entry in sorted(os.scandir(path), key=lambda e: (not e.is_dir(), e.name.lower())):
@@ -872,10 +1350,16 @@ def api_library():
                 except Exception:
                     child_count = 0
                 valid_dir = is_valid_name(entry.name, lib_type, is_dir=True)
-                entries.append({'name': entry.name, 'path': entry.path, 'type': lib_type, 'is_dir': True, 'child_count': child_count, 'valid': valid_dir})
+                entries.append({'name': entry.name, 'path': entry.path, 'type': lib_type, 'is_dir': True, 'child_count': child_count, 'size': _folder_size(entry.path), 'valid': valid_dir, 'meta': folder_meta(entry.name)})
             elif entry.is_file() and Path(entry.name).suffix.lower() in VIDEO_EXT:
                 valid = is_valid_name(entry.name, lib_type)
-                entries.append({'name': entry.name, 'path': entry.path, 'type': lib_type, 'is_dir': False, 'valid': valid})
+                size = 0
+                try:
+                    size = entry.stat(follow_symlinks=False).st_size
+                except OSError:
+                    pass
+                dur = _media_duration(entry.path)
+                entries.append({'name': entry.name, 'path': entry.path, 'type': lib_type, 'is_dir': False, 'size': size, 'valid': valid, 'meta': file_meta(entry.name, dur)})
     except PermissionError:
         return jsonify({'error': 'Permission refusée'}), 403
 
@@ -908,9 +1392,6 @@ def api_library_send_back_folder():
                 moved.append(entry.name)
             except Exception as e:
                 errors.append(f"{entry.name}: {e}")
-    global scan_last_snapshot
-    with scan_watch_lock:
-        scan_last_snapshot = _scan_snapshot()
     if errors:
         return jsonify({'success': False, 'message': '\n'.join(errors), 'moved': moved}), 400
     return jsonify({'success': True, 'moved': moved})
@@ -929,12 +1410,48 @@ def api_library_send_back():
         append_history({'id': str(uuid.uuid4()), 'op': 'move', 'date': time.strftime('%Y-%m-%d %H:%M:%S'),
                         'from_path': src, 'from_name': os.path.basename(src),
                         'to_path': dst, 'to_name': os.path.basename(dst)})
+        return jsonify({'success': True})
+    except Exception as e:
+        logger.error(f"Send-back error for {src} -> {dst}: {e}")
+        return jsonify({'success': False, 'message': str(e)}), 400
+
+
+@app.route('/api/library/rename-folder', methods=['POST'])
+@login_required
+def api_library_rename_folder():
+    d = request.json or {}
+    folder = d.get('path')
+    new_name = d.get('new_name')
+    if not folder or not os.path.isdir(folder):
+        return jsonify({'success': False, 'message': 'Dossier introuvable'}), 400
+    movie_root = os.path.abspath(config.get('_movie_output_path') or config.get('movie_output_path') or '')
+    tv_root    = os.path.abspath(config.get('_tv_output_path')    or config.get('tv_output_path')    or '')
+    abs_folder = os.path.abspath(folder)
+    if not (abs_folder.startswith(movie_root) or abs_folder.startswith(tv_root)):
+        return jsonify({'success': False, 'message': 'Renommage non autorisé hors des dossiers médias'}), 403
+    new_name = (new_name or '').strip().rstrip('/\\')
+    new_name = os.path.basename(new_name)
+    if not new_name or new_name in ('.', '..'):
+        return jsonify({'success': False, 'message': 'Nom invalide'}), 400
+    if os.path.sep in new_name or (os.path.altsep and os.path.altsep in new_name):
+        return jsonify({'success': False, 'message': 'Nom invalide'}), 400
+    parent = os.path.dirname(abs_folder)
+    dst = os.path.join(parent, new_name)
+    if dst == abs_folder:
+        return jsonify({'success': True, 'new_path': dst, 'new_name': new_name})
+    if os.path.exists(dst):
+        return jsonify({'success': False, 'message': f"Le dossier '{new_name}' existe déjà"}), 400
+    try:
+        shutil.move(abs_folder, dst)
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 400
+    try:
         global scan_last_snapshot
         with scan_watch_lock:
             scan_last_snapshot = _scan_snapshot()
-        return jsonify({'success': True})
-    except Exception as e:
-        return jsonify({'success': False, 'message': str(e)}), 400
+    except Exception:
+        pass
+    return jsonify({'success': True, 'new_path': dst, 'new_name': new_name})
 
 
 @app.route('/api/library/delete-folder', methods=['POST'])
@@ -959,17 +1476,6 @@ def api_library_delete_folder():
         return jsonify({'success': False, 'message': str(e)}), 400
 
 
-@app.route('/api/cache/clear', methods=['POST'])
-@login_required
-def api_cache_clear():
-    conn = db.get_conn()
-    conn.execute('DELETE FROM search_cache')
-    conn.execute('DELETE FROM file_search_cache')
-    conn.execute('DELETE FROM details_cache')
-    conn.commit()
-    conn.close()
-    return jsonify({'success': True})
-
 @app.route('/api/history/clear', methods=['POST'])
 @login_required
 def api_history_clear():
@@ -986,7 +1492,7 @@ def api_get_config():
 @app.route('/api/config', methods=['POST'])
 @login_required
 def api_set_config():
-    global config, scanner, api_handler, rename_engine
+    global config, scanner, api_handler
     d = request.json
     for key, val in d.items():
         if key in ('movie_path', 'tv_path'):
@@ -995,6 +1501,8 @@ def api_set_config():
         elif key in ('movie_output_path', 'tv_output_path'):
             config[key] = val
         elif key == 'tvdb_api_key' and val and '...' in val:
+            continue
+        elif key == 'omdb_api_key' and val and '...' in val:
             continue
         elif key == 'password':
             continue
@@ -1007,7 +1515,6 @@ def api_set_config():
         [config.get('_movie_output_path'), config.get('_tv_output_path')]
     )
     api_handler = APIHandler(config)
-    rename_engine = RenameEngine(config)
     return jsonify({"success": True, "message": "Configuration sauvegardée"})
 
 @app.route('/api/test-keys', methods=['POST'])
@@ -1017,14 +1524,31 @@ def api_test_keys():
     tvdb_key = d.get('tvdb_api_key', '').strip()
     if not tvdb_key or '...' in tvdb_key:
         tvdb_key = config.get('tvdb_api_key', '')
-    if not tvdb_key:
-        return jsonify({"tvdb": {"valid": False, "message": "Clé non fournie"}})
-    try:
-        resp = requests.post("https://api4.thetvdb.com/v4/login", json={"apikey": tvdb_key}, timeout=5)
-        ok = resp.status_code == 200
-        return jsonify({"tvdb": {"valid": ok, "message": "✓ TVDB OK" if ok else f"✗ HTTP {resp.status_code}"}})
-    except Exception as e:
-        return jsonify({"tvdb": {"valid": False, "message": f"✗ {e}"}})
+    omdb_key = d.get('omdb_api_key', '').strip()
+    if not omdb_key or '...' in omdb_key:
+        omdb_key = config.get('omdb_api_key', '')
+    out = {}
+    if tvdb_key:
+        try:
+            resp = requests.post("https://api4.thetvdb.com/v4/login", json={"apikey": tvdb_key}, timeout=5)
+            ok = resp.status_code == 200
+            out["tvdb"] = {"valid": ok, "message": "✓ TVDB OK" if ok else f"✗ HTTP {resp.status_code}"}
+        except Exception as e:
+            out["tvdb"] = {"valid": False, "message": f"✗ {e}"}
+    else:
+        out["tvdb"] = {"valid": False, "message": "Clé TVDB non fournie"}
+    if omdb_key:
+        try:
+            resp = requests.get("https://www.omdbapi.com/", params={'i': 'tt0266915', 'apikey': omdb_key}, timeout=5)
+            data = resp.json()
+            ok = data.get('Response') == 'True'
+            rating = data.get('imdbRating', '')
+            out["omdb"] = {"valid": ok, "message": f"✓ OMDb OK (note {rating})" if ok else f"✗ {data.get('Error', 'réponse invalide')}"}
+        except Exception as e:
+            out["omdb"] = {"valid": False, "message": f"✗ {e}"}
+    else:
+        out["omdb"] = {"valid": False, "message": "Clé OMDb non fournie"}
+    return jsonify(out)
 
 if __name__ == '__main__':
     debug = os.environ.get('FLASK_DEBUG', 'false').lower() == 'true'
