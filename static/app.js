@@ -756,6 +756,8 @@ function buildLibNode(entry, depth, autoExpand) {
     wrap._loaded = false;
     wrap._nextOffset = 0;
     wrap._missingBadge = null;
+    wrap._imdb = (entry.meta && entry.meta.imdb) ? entry.meta.imdb : '';
+    wrap._meta = entry.meta || null;
 
     if (entry.is_dir) {
         const row = document.createElement('div');
@@ -884,6 +886,7 @@ function loadLibChildren(entry, children, row, offset, limit) {
             if (offset === 0) children.innerHTML = '';
             if (data.entries?.length) {
                 sortEntries(data.entries).forEach(child => children.appendChild(buildLibNode(child, 1, false)));
+                collectUncachedImdb(data.entries);
             }
             const loaded = offset + (data.entries?.length || 0);
             const total = data.total ?? loaded;
@@ -999,6 +1002,67 @@ function finalizeSync(entry, childrenEl, depth, node, acc, total) {
     if (/\[tvdbid-/.test(entry.name)) loadLibMissing(entry.path, node._missingBadge, childrenEl);
     else refreshSeriesBadges(childrenEl);
     applyLibFilter();
+}
+
+// ── Enrichissement OMDb en arrière-plan (non bloquant) ───────────────────────
+let enrichQueue = [];
+let enrichRunning = false;
+
+function collectUncachedImdb(entries) {
+    const ids = [];
+    for (const e of entries) {
+        const m = e.meta;
+        if (!m || !m.imdb || m.rating) continue;
+        // Dossiers (séries) et films : on enrichit. Épisodes : on ignore (série déjà couverte).
+        if (e.is_dir || !m.episode) ids.push(m.imdb);
+    }
+    if (ids.length) enqueueLibraryEnrich(ids);
+}
+
+function enqueueLibraryEnrich(ids) {
+    enrichQueue = enrichQueue.concat(ids);
+    flushEnrichQueue();
+}
+
+function flushEnrichQueue() {
+    if (enrichRunning || !enrichQueue.length) return;
+    enrichRunning = true;
+    const batch = [...new Set(enrichQueue)].slice(0, 60);
+    enrichQueue = enrichQueue.filter(x => !batch.includes(x));
+    postJSON('/api/library/enrich', { imdb_ids: batch })
+        .then(d => { if (d.results) applyEnrichResults(d.results); })
+        .catch(() => {})
+        .finally(() => {
+            enrichRunning = false;
+            if (enrichQueue.length) setTimeout(flushEnrichQueue, 300);
+        });
+}
+
+function applyEnrichResults(results) {
+    if (!results) return;
+    Object.keys(results).forEach(imdb => {
+        document.querySelectorAll('.lib-node').forEach(n => {
+            if (n._imdb === imdb) applyEnrichedMeta(n, results[imdb]);
+        });
+    });
+}
+
+function applyEnrichedMeta(node, en) {
+    const m = node._meta || {};
+    if (en.rating) m.rating = en.rating;
+    if (en.date) m.date = en.date;
+    if (en.genres) m.genres = en.genres;
+    if (en.certification) m.certification = en.certification;
+    if (en.runtime) m.runtime = en.runtime;
+    if (en.poster && !m.poster) m.poster = en.poster;
+    node._meta = m;
+    if (node._sort) node._sort.rating = sortRating({ meta: m });
+    const nameEl = node.querySelector('.lib-name');
+    if (!nameEl) return;
+    const newMeta = metaText(m) ? metaHtml(m) : '';
+    const oldMeta = nameEl.querySelector('.lib-meta');
+    if (oldMeta) oldMeta.outerHTML = newMeta;
+    else if (newMeta) nameEl.insertAdjacentHTML('beforeend', newMeta);
 }
 
 function libSendBack(filePath) {

@@ -1167,12 +1167,12 @@ def api_library():
                 return f"{m.group(3)}-{mon:02d}-{int(m.group(1)):02d}"
         return s or ''
 
-    def _apply_omdb(meta, imdb_id, title=None, year=None, is_series=False):
+    def _apply_omdb(meta, imdb_id, title=None, year=None, is_series=False, live=True):
         if not imdb_id:
             return meta
         imdb = imdb_id.strip().lower()
         od = omdb_map.get(imdb)
-        if not od:
+        if not od and live:
             od = _fetch_omdb_single(imdb, title, year, is_series)
             if od:
                 omdb_map[imdb] = od
@@ -1210,7 +1210,7 @@ def api_library():
             'rating': '', 'date': top.get('date', ''), 'certification': '', 'runtime': '',
             'type': top.get('type') or cached.get('media_type', ''),
         }
-        return _apply_omdb(meta, meta['imdb'])
+        return _apply_omdb(meta, meta['imdb'], live=False)
 
     # Charge une seule fois le cache de recherche, puis matche par nom de fichier.
     # (Le cache stocke le chemin d'origine ; après un déplacement vers la librairie
@@ -1326,7 +1326,7 @@ def api_library():
                 meta['tmdb'] = val
             elif kind == 'tvdb':
                 meta['tvdb'] = val
-        return _apply_omdb(meta, meta['imdb'])
+        return _apply_omdb(meta, meta['imdb'], live=False)
 
     def file_meta(name, duration=None):
         m = re.search(r'([Ss]\d{2}[Ee]\d{2}|\d+x\d{2})', name)
@@ -1420,6 +1420,38 @@ def api_library():
             entries.append({'name': entry.name, 'path': entry.path, 'type': lib_type, 'is_dir': False, 'size': size, 'valid': valid, 'meta': file_meta(entry.name, dur)})
 
     return jsonify({'path': path, 'type': lib_type, 'entries': entries, 'total': total, 'offset': offset, 'limit': limit})
+
+
+@app.route('/api/library/enrich', methods=['POST'])
+@login_required
+def api_library_enrich():
+    """Enrichit en arrière-plan le cache OMDb des imdb_ids non encore cachés,
+    pour compléter les notes/dates/genres des entrées de la bibliothèque.
+    Ne bloque pas l'affichage : appelé par le frontend après le rendu."""
+    d = request.json or {}
+    ids = d.get('imdb_ids') or []
+    seen = set()
+    clean = []
+    for x in ids:
+        s = str(x).strip().lower()
+        if s and s not in seen:
+            seen.add(s)
+            clean.append(s)
+    results = {}
+    for imdb in clean:
+        if db.omdb_get(imdb) is not None:
+            continue
+        od = _fetch_omdb_single(imdb)
+        if od:
+            results[imdb] = {
+                'rating': od.get('imdbRating') or '',
+                'date': od.get('Released') or '',
+                'genres': od.get('Genre') or '',
+                'certification': od.get('Rated') or '',
+                'runtime': od.get('Runtime') or '',
+                'poster': od.get('Poster') or '',
+            }
+    return jsonify({'results': results})
 
 
 @app.route('/api/library/send-back-folder', methods=['POST'])
