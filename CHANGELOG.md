@@ -10,7 +10,6 @@
 
 ### Changed
 - **Restructuration en paquet `src/`** — le code applicatif est empaqueté sous `src/` (métier + `src/api/` + `src/routes/`) ; `app.py` ne fait plus que l'assemblage et le lancement.
-- **Docker non-root** — le conteneur tourne sous l'utilisateur `appuser` (plus root).
 - **Build Docker sur PR** — l'image est construite (sans push) sur chaque pull request pour valider le Dockerfile.
 
 ### Fixed

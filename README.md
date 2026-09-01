@@ -370,7 +370,6 @@ environment:
 
 **Changed**
 - Code reorganized into a `src/` package (business logic + `src/api/` + `src/routes/`); `app.py` only assembles and starts the app
-- Docker now runs as a non-root user (`appuser`)
 - Docker image is built (not pushed) on every pull request to validate the Dockerfile
 
 **Fixed**
