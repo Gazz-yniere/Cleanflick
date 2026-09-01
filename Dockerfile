@@ -12,6 +12,14 @@ COPY . .
 RUN mkdir -p /downloads/movie /downloads/tv_shows && \
     cp config.example.json config.json
 
+# Utilisateur non-root : /app est chowné à appuser pour que l'app puisse écrire
+# sa BDD et sa config (quand elles ne sont pas montées en volume).
+RUN useradd -m appuser && chown -R appuser /app
+USER appuser
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')"
+
 EXPOSE 5000
 
 # Worker gthread (threads OS réels) avec worker unique :

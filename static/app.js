@@ -419,36 +419,43 @@ function metaText(meta) {
     return parts.join(' · ');
 }
 
-function metaChips(meta) {
-    if (!meta) return '';
-    const isEp = !!meta.episode;
+function metaChips(meta, opts = {}) {
+    const isEp = !!(meta && meta.episode);
     const chips = [];
-    if (isEp) chips.push(`<span class="chip chip-ep">${esc(meta.episode)}${meta.episode_name ? ' ' + esc(meta.episode_name) : ''}</span>`);
-    if (!isEp && meta.rating != null && meta.rating !== '') chips.push(`<span class="chip chip-rating">★ ${esc(meta.rating)}</span>`);
-    if (meta.episode_rating != null && meta.episode_rating !== '') chips.push(`<span class="chip chip-rating">★ ${esc(meta.episode_rating)}</span>`);
-    if (isEp) {
-        if (meta.episode_date) chips.push(`<span class="chip chip-epdate">ép. ${esc(meta.episode_date.slice(0, 10))}</span>`);
-        if (meta.episode_runtime) chips.push(`<span class="chip chip-runtime">${esc(meta.episode_runtime)}</span>`);
-    } else {
-        const date = meta.date || '';
-        if (date.length > 4) chips.push(`<span class="chip chip-date">${esc(date.slice(0, 10))}</span>`);
-        else if (meta.year) chips.push(`<span class="chip chip-date">${esc(String(meta.year))}</span>`);
-        if (meta.runtime) chips.push(`<span class="chip chip-runtime">${esc(meta.runtime)}</span>`);
+    if (meta) {
+        if (isEp) chips.push(`<span class="chip chip-ep">${esc(meta.episode)}${meta.episode_name ? ' ' + esc(meta.episode_name) : ''}</span>`);
+        if (!isEp && meta.rating != null && meta.rating !== '') chips.push(`<span class="chip chip-rating">★ ${esc(meta.rating)}</span>`);
+        if (meta.episode_rating != null && meta.episode_rating !== '') chips.push(`<span class="chip chip-rating">★ ${esc(meta.episode_rating)}</span>`);
+        if (isEp) {
+            if (meta.episode_date) chips.push(`<span class="chip chip-epdate">ép. ${esc(meta.episode_date.slice(0, 10))}</span>`);
+            if (opts.dur_pending) chips.push(`<span class="chip chip-runtime chip-duration-pending"><span class="lib-spinner lib-spinner--chip"></span> min</span>`);
+            else if (meta.episode_runtime) chips.push(`<span class="chip chip-runtime">${esc(meta.episode_runtime)}</span>`);
+        } else {
+            const date = meta.date || '';
+            if (date.length > 4) chips.push(`<span class="chip chip-date">${esc(date.slice(0, 10))}</span>`);
+            else if (meta.year) chips.push(`<span class="chip chip-date">${esc(String(meta.year))}</span>`);
+            if (opts.dur_pending) chips.push(`<span class="chip chip-runtime chip-duration-pending"><span class="lib-spinner lib-spinner--chip"></span> min</span>`);
+            else if (meta.runtime) chips.push(`<span class="chip chip-runtime">${esc(meta.runtime)}</span>`);
+        }
+        if (meta.certification) chips.push(`<span class="chip chip-cert">${esc(meta.certification)}</span>`);
+        if (meta.genres) chips.push(`<span class="chip chip-genre">${esc(meta.genres)}</span>`);
+    } else if (opts.dur_pending) {
+        chips.push(`<span class="chip chip-runtime chip-duration-pending"><span class="lib-spinner lib-spinner--chip"></span> min</span>`);
     }
-    if (meta.certification) chips.push(`<span class="chip chip-cert">${esc(meta.certification)}</span>`);
-    if (meta.genres) chips.push(`<span class="chip chip-genre">${esc(meta.genres)}</span>`);
     return chips.join('');
 }
 
-function metaHtml(meta) {
+function metaHtml(meta, opts) {
     if (!meta) return '';
-    const chips = metaChips(meta);
+    const chips = metaChips(meta, opts);
     return chips ? `<span class="lib-meta">${chips}</span>` : '';
 }
 
 function libLead(entry, iconClass) {
-    if (entry.meta && entry.meta.poster) {
-        return `<img class="lib-poster lib-lead" src="${esc(entry.meta.poster)}" alt="" loading="lazy" onerror="this.style.display='none'">`;
+    // OMDb renvoie parfois "N/A" en guise d'URL : on filtre pour éviter un 404.
+    const poster = entry.meta && entry.meta.poster && entry.meta.poster !== 'N/A' ? entry.meta.poster : '';
+    if (poster) {
+        return `<img class="lib-poster lib-lead" src="${esc(poster)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.style.display='none'">`;
     }
     return `<i class="mdi ${iconClass} lib-lead"></i>`;
 }
@@ -659,7 +666,9 @@ function loadLibMissing(path, badgeEl, childrenEl) {
                 }
             }
             if (childrenEl && d.missing && d.missing.length) {
-                const existing = [...childrenEl.querySelectorAll(':scope > .lib-node')];
+                // Nettoyage : supprimer les anciens nœuds "manquants" avant d'en ajouter,
+                // sinon l'actualisation dupliquerait chaque épisode manquant.
+                [...childrenEl.querySelectorAll(':scope > .lib-node > .lib-row.lib-row--missing')].forEach(n => n.remove());
                 d.missing.forEach(m => {
                     const node = document.createElement('div');
                     node.className = 'lib-node';
@@ -675,8 +684,9 @@ function loadLibMissing(path, badgeEl, childrenEl) {
                         <span class="lib-badge lib-badge--warn"><i class="mdi mdi-alert"></i></span>`;
                     node.appendChild(row);
                     const se = (parseInt(m.s, 10) || 0) * 1000 + (parseInt(m.e, 10) || 0);
+                    // Tri : comparer avec le DOM en direct (vrais fichiers + manquants déjà insérés).
                     let inserted = false;
-                    for (const n of existing) {
+                    for (const n of childrenEl.children) {
                         const main = n.querySelector(':scope > .lib-row .lib-name-main');
                         if (!main) continue;
                         const mm = main.textContent.match(/[Ss](\d{1,2})[Ee](\d{1,3})/);
@@ -757,7 +767,14 @@ function buildLibNode(entry, depth, autoExpand) {
     wrap._nextOffset = 0;
     wrap._missingBadge = null;
     wrap._imdb = (entry.meta && entry.meta.imdb) ? entry.meta.imdb : '';
+    let _tvdbId = (entry.meta && entry.meta.tvdb) ? String(entry.meta.tvdb) : '';
+    if (!_tvdbId) {
+        const _mtv = String(entry.name || '').match(/\[tvdbid-(\d+)\]/i);
+        if (_mtv) _tvdbId = _mtv[1];
+    }
+    wrap._tvdb = _tvdbId;
     wrap._meta = entry.meta || null;
+    wrap._durPending = !entry.is_dir && !!entry.dur_pending;
 
     if (entry.is_dir) {
         const row = document.createElement('div');
@@ -849,7 +866,7 @@ function buildLibNode(entry, depth, autoExpand) {
             ${libLead(entry, 'mdi-file-video lib-icon-file')}
             <span class="lib-name lib-name--file">
                 <span class="lib-name-main">${esc(entry.name)}</span>
-                ${metaText(entry.meta) ? metaHtml(entry.meta) : ''}
+                ${(metaText(entry.meta) || entry.dur_pending) ? metaHtml(entry.meta, { dur_pending: !!entry.dur_pending }) : ''}
             </span>
             <span class="lib-size">${formatBytes(entry.size)}</span>
             <span class="lib-badge ${badgeClass}"><i class="mdi ${badgeIcon}"></i></span>`;
@@ -871,11 +888,73 @@ function buildLibNode(entry, depth, autoExpand) {
         actions.appendChild(sendBtn);
         row.appendChild(actions);
         wrap.appendChild(row);
+        if (entry.dur_pending) registerPendingDuration(entry.path, wrap);
     }
     return wrap;
 }
 
 const LIB_PAGE_SIZE = 200;
+
+// ── Durées en attente (scan rapide) : les fichiers s'affichent d'abord, la
+// durée (spinner) est complétée au fur et à mesure qu'elle arrive du serveur.
+const _pendingDurations = new Map();   // path -> { node, retry }
+let _durFlushTimer = null;
+const _DUR_POLL_BATCH = 20;            // nombre max de paths interrogés par tour
+
+function registerPendingDuration(path, node) {
+    let p = _pendingDurations.get(path);
+    if (p) {
+        // Nœud déjà résolu (durée reçue) : un rafraîchissement qui recrée la ligne
+        // ne doit pas raviver le spinner pour toujours.
+        const resolved = node._meta && (node._meta.runtime || node._meta.episode_runtime || node._meta.episode_date);
+        if (node._durPending && !resolved) p.node = node;
+    } else {
+        _pendingDurations.set(path, { node, retry: 0 });
+    }
+    if (!_durFlushTimer) _durFlushTimer = setTimeout(flushPendingDurations, 250);
+}
+
+function flushPendingDurations() {
+    _durFlushTimer = null;
+    // Purge les entrées dont le nœud a été retiré de l'arborescence.
+    for (const [path, p] of [..._pendingDurations]) {
+        if (!p.node.isConnected) _pendingDurations.delete(path);
+    }
+    if (!_pendingDurations.size) return;
+    // Par groupes (dans l'ordre d'affichage) : le serveur calcule au fur et à mesure,
+    // on ne sollicite que le lot courant pour que la progression reste visible.
+    const paths = [..._pendingDurations.keys()].slice(0, _DUR_POLL_BATCH);
+    postJSON('/api/lib-durations', { paths })
+        .then(d => {
+            const results = d.results || {};
+            let remaining = 0;
+            for (const [path, p] of _pendingDurations) {
+                const dur = results[path];
+                if (dur === undefined) { remaining++; p.retry++; continue; }
+                const node = p.node;
+                if (!node._durPending) { _pendingDurations.delete(path); continue; }
+                node._durPending = false;
+                if (dur !== null && dur >= 0) {
+                    const m = node._meta ? { ...node._meta } : {};
+                    if (m.episode) m.episode_runtime = dur + ' min'; else m.runtime = dur + ' min';
+                    node._meta = m;
+                }
+                const nameEl = node.querySelector('.lib-name');
+                if (nameEl) {
+                    const newMeta = metaText(m) ? metaHtml(m) : '';
+                    const oldMeta = nameEl.querySelector('.lib-meta');
+                    if (oldMeta) oldMeta.outerHTML = newMeta;
+                    else if (newMeta) nameEl.insertAdjacentHTML('beforeend', newMeta);
+                }
+                _pendingDurations.delete(path);
+            }
+            if (remaining > 0 && _pendingDurations.size > 0) {
+                // Pas encore prête côté serveur (calcul en cours) : nouvelle tentative.
+                _durFlushTimer = setTimeout(flushPendingDurations, 1000);
+            }
+        })
+        .catch(() => { _durFlushTimer = setTimeout(flushPendingDurations, 2000); });
+}
 
 function loadLibChildren(entry, children, row, offset, limit) {
     const wrap = row.parentElement;
@@ -948,8 +1027,21 @@ function updateLibNode(node, entry) {
     const countEl = node.querySelector('.lib-count');
     if (countEl && entry.child_count !== undefined) countEl.textContent = entry.child_count;
     node._valid = entry.valid;
+    if (entry.meta) {
+        node._meta = entry.meta;
+        if (entry.meta.imdb) node._imdb = entry.meta.imdb;
+        if (entry.meta.tvdb) node._tvdb = String(entry.meta.tvdb);
+    }
+    // La durée arrive plus tard : ré-enregistre le nœud s'il a été recréé
+    // entre-temps (réconciliation) et perd sa référence dans _pendingDurations.
+    if (!entry.is_dir) {
+        const wasPending = node._durPending;
+        node._durPending = !!entry.dur_pending;
+        if (entry.dur_pending && wasPending && !_pendingDurations.has(entry.path))
+            registerPendingDuration(entry.path, node);
+    }
     const nameEl = node.querySelector('.lib-name');
-    const newMeta = metaText(entry.meta) ? metaHtml(entry.meta) : '';
+    const newMeta = metaText(entry.meta) ? metaHtml(entry.meta, { dur_pending: !!node._durPending }) : '';
     if (nameEl) {
         const oldMeta = nameEl.querySelector('.lib-meta');
         if (oldMeta && newMeta && oldMeta.outerHTML !== newMeta) oldMeta.outerHTML = newMeta;
@@ -1005,50 +1097,144 @@ function finalizeSync(entry, childrenEl, depth, node, acc, total) {
 }
 
 // ── Enrichissement OMDb en arrière-plan (non bloquant) ───────────────────────
+// Les films ont un ID IMDb dans leur nom ; les séries n'ont que l'ID TVDB :
+// le serveur résout TVDB → IMDb (1 requête TVDB, mise en cache) puis enrichit.
 let enrichQueue = [];
+let tvdbEnrichQueue = [];
+let epEnrichQueue = [];
 let enrichRunning = false;
+let _epEnrichPending = new Set();
+
+function _seriesEpLabels(node, cap = 100) {
+    const labels = [];
+    const childrenEl = node.querySelector(':scope > .lib-children');
+    if (!childrenEl) return labels;
+    childrenEl.querySelectorAll(':scope > .lib-node > .lib-row.lib-row--file').forEach(row => {
+        const n = row.closest('.lib-node');
+        if (n && n._meta && n._meta.episode_rating) return;
+        const main = row.querySelector('.lib-name-main');
+        if (!main) return;
+        const m = String(main.textContent || '').match(/[Ss](\d{1,2})[Ee](\d{1,3})/);
+        if (m) labels.push(`S${m[1]}E${m[2]}`);
+    });
+    return labels.slice(0, cap);
+}
 
 function collectUncachedImdb(entries) {
     const ids = [];
+    const tvdbIds = [];
+    const series = [];
     for (const e of entries) {
         const m = e.meta;
-        if (!m || !m.imdb || m.rating) continue;
-        // Dossiers (séries) et films : on enrichit. Épisodes : on ignore (série déjà couverte).
-        if (e.is_dir || !m.episode) ids.push(m.imdb);
+        if (!m) continue;
+        if (e.is_dir) {
+            let tv = m.tvdb ? String(m.tvdb) : '';
+            if (!tv) {
+                const mtv = String(e.name || '').match(/\[tvdbid-(\d+)\]/i);
+                if (mtv) tv = mtv[1];
+            }
+            if (!m.rating && tv) tvdbIds.push(tv);
+            continue;
+        }
+        if (m.episode) continue; // épisodes : enrichis via leur série
+        if (m.imdb && !m.rating) ids.push(m.imdb);
     }
-    if (ids.length) enqueueLibraryEnrich(ids);
+    // Épisodes des dossiers séries ouverts : note/durée/date OMDb par épisode.
+    document.querySelectorAll('#library-tree .lib-node').forEach(n => {
+        if (!n._tvdb || n._epEnriched || _epEnrichPending.has(n._tvdb)) return;
+        const labels = _seriesEpLabels(n);
+        if (labels.length) {
+            _epEnrichPending.add(n._tvdb);
+            series.push({
+                tvdbid: n._tvdb,
+                imdb: n._imdb || '',
+                title: n._meta && n._meta.title ? n._meta.title : '',
+                year: n._meta && n._meta.year ? String(n._meta.year) : '',
+                episodes: labels,
+            });
+        }
+    });
+    if (ids.length || tvdbIds.length || series.length) enqueueLibraryEnrich(ids, tvdbIds, series);
 }
 
-function enqueueLibraryEnrich(ids) {
-    enrichQueue = enrichQueue.concat(ids);
+function enqueueLibraryEnrich(ids, tvdbIds, series) {
+    enrichQueue = enrichQueue.concat(ids || []);
+    tvdbEnrichQueue = tvdbEnrichQueue.concat(tvdbIds || []);
+    (series || []).forEach(s => epEnrichQueue.push(s));
     flushEnrichQueue();
 }
 
 function flushEnrichQueue() {
-    if (enrichRunning || !enrichQueue.length) return;
+    if (enrichRunning || (!enrichQueue.length && !tvdbEnrichQueue.length && !epEnrichQueue.length)) return;
     enrichRunning = true;
-    const batch = [...new Set(enrichQueue)].slice(0, 60);
-    enrichQueue = enrichQueue.filter(x => !batch.includes(x));
-    postJSON('/api/library/enrich', { imdb_ids: batch })
+    const imdbIds = [...new Set(enrichQueue.splice(0, 120))];
+    const tvdbIds = [...new Set(tvdbEnrichQueue.splice(0, 120))];
+    const series = epEnrichQueue.splice(0, 50);
+    postJSON('/api/library/enrich', { imdb_ids: imdbIds, tvdb_ids: tvdbIds })
         .then(d => { if (d.results) applyEnrichResults(d.results); })
         .catch(() => {})
         .finally(() => {
             enrichRunning = false;
-            if (enrichQueue.length) setTimeout(flushEnrichQueue, 300);
+            if (enrichQueue.length || tvdbEnrichQueue.length || epEnrichQueue.length) setTimeout(flushEnrichQueue, 300);
         });
+    if (series.length) {
+        postJSON('/api/library/enrich-episodes', { series })
+            .then(d => { if (d.results) applyEpisodeEnrichResults(d.results); })
+            .catch(() => {});
+    }
 }
 
 function applyEnrichResults(results) {
-    if (!results) return;
-    Object.keys(results).forEach(imdb => {
+    const tvdbResults = {};
+    Object.keys(results).forEach(k => {
+        if (k.startsWith('tvdb:')) { tvdbResults[k.slice(5)] = results[k]; return; }
+        const imdb = k;
         document.querySelectorAll('.lib-node').forEach(n => {
             if (n._imdb === imdb) applyEnrichedMeta(n, results[imdb]);
+        });
+    });
+    Object.keys(tvdbResults).forEach(tvdb => {
+        document.querySelectorAll('.lib-node').forEach(n => {
+            if (n._tvdb && String(n._tvdb) === tvdb) applyEnrichedMeta(n, tvdbResults[tvdb]);
+        });
+    });
+}
+
+function applyEpisodeEnrichResults(results) {
+    Object.keys(results).forEach(key => {
+        document.querySelectorAll('.lib-node').forEach(node => {
+            if (!node._tvdb || String(node._tvdb) !== key) return;
+            node._epEnriched = true;
+            const childrenEl = node.querySelector(':scope > .lib-children');
+            if (!childrenEl) return;
+            childrenEl.querySelectorAll(':scope > .lib-node').forEach(epNode => {
+                const row = epNode.querySelector(':scope > .lib-row');
+                const main = row && row.querySelector('.lib-name-main');
+                if (!main) return;
+                const m = String(main.textContent || '').match(/[Ss](\d{1,2})[Ee](\d{1,3})/);
+                if (!m) return;
+                const info = results[`S${m[1]}E${m[2]}`];
+                if (!info) return;
+                const meta = epNode._meta ? { ...epNode._meta } : {};
+                if (info.rating) meta.episode_rating = info.rating;
+                if (info.runtime && !meta.episode_runtime) meta.episode_runtime = info.runtime;
+                if (info.date) meta.episode_date = info.date.slice(0, 10);
+                epNode._meta = meta;
+                if (epNode._sort) epNode._sort.rating = sortRating({ meta });
+                const nameEl = epNode.querySelector('.lib-name');
+                if (!nameEl) return;
+                const newMeta = metaText(meta) ? metaHtml(meta) : '';
+                const oldMeta = nameEl.querySelector('.lib-meta');
+                if (oldMeta) oldMeta.outerHTML = newMeta;
+                else if (newMeta) nameEl.insertAdjacentHTML('beforeend', newMeta);
+            });
         });
     });
 }
 
 function applyEnrichedMeta(node, en) {
     const m = node._meta || {};
+    if (en.imdb) { m.imdb = en.imdb; node._imdb = en.imdb; }
     if (en.rating) m.rating = en.rating;
     if (en.date) m.date = en.date;
     if (en.genres) m.genres = en.genres;
@@ -1059,7 +1245,7 @@ function applyEnrichedMeta(node, en) {
     if (node._sort) node._sort.rating = sortRating({ meta: m });
     const nameEl = node.querySelector('.lib-name');
     if (!nameEl) return;
-    const newMeta = metaText(m) ? metaHtml(m) : '';
+    const newMeta = metaText(m) ? metaHtml(m, { dur_pending: !!node._durPending }) : '';
     const oldMeta = nameEl.querySelector('.lib-meta');
     if (oldMeta) oldMeta.outerHTML = newMeta;
     else if (newMeta) nameEl.insertAdjacentHTML('beforeend', newMeta);
@@ -1696,8 +1882,8 @@ let _pickerCurrentPath = '';
 
 function pickFolder(inputId) {
     _pickerTarget = inputId;
-    browseFolder(document.getElementById(inputId)?.value || null);
     document.getElementById('folderPickerModal').classList.add('active');
+    browseFolder(document.getElementById(inputId)?.value || null);
 }
 
 function browseFolder(path) {
@@ -1708,23 +1894,48 @@ function browseFolder(path) {
     fetch(url).then(r => r.json()).then(data => {
         if (data.error && !data.path) { content.innerHTML = `<div class="message error">${esc(data.error)}</div>`; return; }
         _pickerCurrentPath = data.path || '';
-        const sep = (_pickerCurrentPath || '').includes('\\') ? '\\' : '/';
-        let html = `<div class="picker-path">${esc(data.path || tr('picker_root'))}</div><div class="picker-list">`;
-        if (data.parent !== null && data.parent !== undefined)
-            html += `<div class="picker-item up" data-path="${esc(data.parent)}" onclick="browseFolder(this.dataset.path)">📁 ..</div>`;
-        (data.roots || []).forEach(root =>
-            html += `<div class="picker-item" data-path="${esc(root)}" onclick="browseFolder(this.dataset.path)">💾 ${esc(root)}</div>`);
+        const sep = _pickerCurrentPath.includes('\\') ? '\\' : '/';
+        let html = `<div class="picker-bar">
+            <input type="text" class="picker-path-input" placeholder="${tr('picker_type_path')}"
+                   value="${esc(_pickerCurrentPath)}" onkeydown="if(event.key==='Enter') pickerGoTo(this.value)">
+            <button class="btn btn-secondary" onclick="pickerGoTo(this.previousElementSibling.value)"><i class="mdi mdi-navigation-variant"></i> ${tr('picker_open')}</button>
+        </div>`;
+        const segs = pickerBreadcrumbs(_pickerCurrentPath);
+        const computerView = !!data.is_computer;
+        if (segs.length)
+            html += `<div class="picker-crumbs">`
+                + segs.map((s, i) => (i ? `<span class="sep">▸</span>` : '')
+                    + (computerView && i === 0
+                        ? `<button class="current-clickable" data-path="" onclick="browseFolder(this.dataset.path)" title="${esc(tr('picker_back_to_home'))}">${esc(s.label)}</button>`
+                        : (i === segs.length - 1
+                            ? `<span class="current">${esc(s.label)}</span>`
+                            : `<button data-path="${esc(s.path)}" onclick="browseFolder(this.dataset.path)">${esc(s.label)}</button>`))).join('')
+                + `</div>`;
+        if (data.error) html += `<div class="message error">${esc(data.error)}</div>`;
+        html += `<div class="picker-list">`;
+        if (data.parent !== undefined && data.parent !== null)
+            html += `<div class="picker-item up" data-path="${esc(data.parent)}" onclick="browseFolder(this.dataset.path || null)"><i class="mdi mdi-arrow-up-bold"></i> ${tr('picker_up')}</div>`;
+        if (!_pickerCurrentPath) {
+            html += `<div class="picker-section">${tr('picker_local_drives')}</div>`;
+            (data.roots || []).forEach(root =>
+                html += `<div class="picker-item" data-path="${esc(root)}" onclick="browseFolder(this.dataset.path)"><i class="mdi mdi-harddisk"></i> ${esc(root)}</div>`);
+            html += `<div class="picker-section">${tr('picker_network')}</div>`;
+            (data.net_roots || []).forEach(root =>
+                html += `<div class="picker-item" data-path="${esc(root)}" onclick="browseFolder(this.dataset.path)"><i class="mdi mdi-desktop-network"></i> ${esc(root)}</div>`);
+            html += `<div class="picker-net-list"><div class="picker-net-loading">${tr('picker_net_loading')}</div></div>`;
+        }
         (data.dirs || []).forEach(d => {
             const full = _pickerCurrentPath.replace(/[\/\\]+$/, '') + sep + d;
-            html += `<div class="picker-item" data-path="${esc(full)}" onclick="browseFolder(this.dataset.path)">📁 ${esc(d)}</div>`;
+            html += `<div class="picker-item" data-path="${esc(full)}" onclick="browseFolder(this.dataset.path)"><i class="mdi mdi-folder-outline"></i> ${esc(d)}</div>`;
         });
-        if (!data.roots?.length && !data.dirs?.length)
-            html += `<div style="padding:12px;color:#666;font-size:1em;">${tr('picker_empty')}</div>`;
+        if (data.path && !(data.dirs?.length) && !data.error)
+            html += `<div class="picker-empty-note">${tr('picker_empty')}</div>`;
         html += `</div><div class="picker-actions">
-            <button class="btn btn-primary" id="picker-select-btn">${tr('picker_select')}</button>
             <button class="btn btn-secondary" onclick="closeModal('folderPickerModal')">${tr('picker_cancel')}</button>
+            <button class="btn btn-primary picker-select-btn" id="picker-select-btn">${tr('picker_select')}</button>
         </div>`;
         content.innerHTML = html;
+        if (!_pickerCurrentPath) loadPickerNet(content);
         document.getElementById('picker-select-btn').onclick = () => {
             if (_pickerTarget) {
                 document.getElementById(_pickerTarget).value = _pickerCurrentPath;
@@ -1733,6 +1944,54 @@ function browseFolder(path) {
             closeModal('folderPickerModal');
         };
     }).catch(e => { content.innerHTML = `<div class="message error">Erreur: ${esc(e.message)}</div>`; });
+}
+
+// Équivalent du fil d'adresse de l'explorateur : chaque segment est cliquable
+// pour remonter (D:\films\x → D:\films → D:\ ; \\serveur\partage → \\serveur).
+function pickerBreadcrumbs(p) {
+    const segs = [];
+    if (!p) return segs;
+    const norm = p.replace(/\//g, '\\');
+    if (norm.startsWith('\\\\')) {
+        const parts = norm.replace(/^\\\\+/, '').split('\\').filter(Boolean);
+        if (parts.length) {
+            segs.push({ label: parts[0], path: '\\\\' + parts[0] });
+            for (let i = 1; i < parts.length; i++)
+                segs.push({ label: parts[i], path: '\\\\' + parts.slice(0, i + 1).join('\\') });
+        }
+    } else {
+        const m = norm.match(/^([A-Za-z]:)(.*)$/);
+        if (m) {
+            let cur = m[1] + '\\';
+            segs.push({ label: m[1] + '\\', path: cur });
+            for (const r of (m[2] || '').split('\\').filter(Boolean)) {
+                cur = cur.replace(/[\\]+$/, '') + '\\' + r;
+                segs.push({ label: r, path: cur });
+            }
+        }
+    }
+    return segs;
+}
+
+// Postes de la LAN (groupe de travail + domaine + UNC de la config).
+function loadPickerNet(content) {
+    const el = content.querySelector('.picker-net-list');
+    if (!el) return;
+    fetch('/api/browse-net').then(r => r.json()).then(nd => {
+        if (!el.isConnected) return;
+        const pcs = nd.pcs || [];
+        let html = pcs.length
+            ? pcs.map(p => `<div class="picker-item" data-path="${esc('\\\\' + p)}" onclick="browseFolder(this.dataset.path)"><i class="mdi mdi-desktop-network"></i> ${esc(p)}</div>`).join('')
+            : `<div class="picker-empty-note">${tr('picker_net_none')}</div>`;
+        if (nd.err) html += `<div class="picker-net-err">${esc(nd.err)}</div>`;
+        el.innerHTML = html;
+    }).catch(() => { if (el.isConnected) el.innerHTML = `<div class="picker-empty-note">${tr('picker_net_none')}</div>`; });
+}
+
+// Aller directement à un chemin saisi (local ou réseau, ex: \\serveur\partage).
+function pickerGoTo(value) {
+    const v = (value || '').trim();
+    if (v) browseFolder(v);
 }
 
 // ── Modal ─────────────────────────────────────────────────────────────────────
@@ -1775,7 +2034,9 @@ function loadConfig() {
     fetch('/api/config')
         .then(r => { if (r.status === 401) { window.location='/login'; throw new Error('401'); } return r.json(); })
         .then(data => {
-            ['tvdb_api_key','omdb_api_key','movie_format','tv_format','input_path','movie_output_path','tv_output_path'].forEach(k => setVal(k, data[k] || ''));
+            ['tvdb_api_key','omdb_api_key','movie_format','tv_format','input_path','movie_output_path','tv_output_path','cache_refresh_days'].forEach(k => setVal(k, data[k] ?? ''));
+            const fast = document.getElementById('lib_fast_scan');
+            if (fast) fast.checked = data.lib_fast_scan !== false;
             const mf = localStorage.getItem('cleanflick_movie_format');
             const tf = localStorage.getItem('cleanflick_tv_format');
             if (mf) setVal('movie_format', mf);
@@ -1794,6 +2055,7 @@ function initConfigAutoSave() {
         { id: 'tv_output_path',     key: 'tv_output_path' },
         { id: 'movie_format',       key: 'movie_format' },
         { id: 'tv_format',          key: 'tv_format' },
+        { id: 'cache_refresh_days', key: 'cache_refresh_days' },
     ].forEach(({ id, key }) => {
         document.getElementById(id)?.addEventListener('input', e => {
             const value = e.target.value.trim();
@@ -1801,6 +2063,9 @@ function initConfigAutoSave() {
             if (key === 'tv_format')    { localStorage.setItem('cleanflick_tv_format', value);    globalConfig.tv_format = value; }
             scheduleSaveConfigField(key, value);
         });
+    });
+    document.getElementById('lib_fast_scan')?.addEventListener('change', e => {
+        scheduleSaveConfigField('lib_fast_scan', e.target.checked);
     });
 }
 
@@ -1842,6 +2107,8 @@ document.addEventListener('DOMContentLoaded', () => {
                     const data = JSON.parse(event.data || '{}');
                     if (data.event === 'scan-refresh') {
                         scanFiles();
+                    } else if (data.event === 'usage-refresh') {
+                        loadApiUsage();
                     }
                 } catch (e) {
                     console.warn('Bad scan refresh payload', e);

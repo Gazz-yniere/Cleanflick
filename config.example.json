@@ -5,5 +5,7 @@
     "movie_output_path":"/movies",
     "tv_output_path":"/tv_shows",
     "movie_format":"{n} ({y})",
-    "tv_format":"{n} - {s00e00} - {t}"
+    "tv_format":"{n} - {s00e00} - {t}",
+    "lib_fast_scan": true,
+    "cache_refresh_days": 0
 }

@@ -1,5 +1,24 @@
 # Changelog
 
+## [1.0.9] - 2026-09-01
+
+### Added
+- **CI GitHub Actions** — lint (ruff) + tests (pytest) sur push/PR, avec rapport HTML (artifact `test-report`), couverture de code (artifact `coverage`) et un check-run par test (`dorny/test-reporter`).
+- **Endpoint `/health`** + `HEALTHCHECK` Docker et `healthcheck` compose pour surveiller le conteneur.
+- **Posters dans la bibliothèque** — les épisodes et dossiers de série sans poster héritent du poster de la série (cache de recherche ou cache OMDb, sans requête API).
+- **Badge CI** dans le README.
+
+### Changed
+- **Restructuration en paquet `src/`** — le code applicatif est empaqueté sous `src/` (métier + `src/api/` + `src/routes/`) ; `app.py` ne fait plus que l'assemblage et le lancement.
+- **Docker non-root** — le conteneur tourne sous l'utilisateur `appuser` (plus root).
+- **Build Docker sur PR** — l'image est construite (sans push) sur chaque pull request pour valider le Dockerfile.
+
+### Fixed
+- **`USER` mal placé** dans le Dockerfile (exécuté comme commande shell dans un `RUN`), ce qui cassait le build.
+
+### Removed
+- **`gevent`** retiré des dépendances de production (le worker `gthread` + le fallback stdlib des files SSE suffisent).
+
 ## [1.0.8] - 2026-08-20
 
 ### Added

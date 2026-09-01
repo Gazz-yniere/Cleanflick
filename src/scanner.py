@@ -65,16 +65,16 @@ class MediaScanner:
         except PermissionError:
             pass
         return files
-    
+
     def _is_video(self, filename: str) -> bool:
         """Vérifie si c'est un fichier vidéo"""
         video_extensions = {'.mp4', '.mkv', '.avi', '.mov', '.flv', '.wmv', '.webm'}
         return Path(filename).suffix.lower() in video_extensions
-    
+
     def _extract_title(self, filename: str, media_type: str) -> str:
         """Extrait le titre du nom de fichier"""
         name = Path(filename).stem
-        
+
         # Supprimer les tags qualité/source communs
         quality_tags = re.compile(
             r'\b(\d{3,4}p|WEB[-.]?(?:RIP|DL)?|BluRay|BDRip|DVDRip|HDTV|AMZN|NF|DSNP'
@@ -84,7 +84,7 @@ class MediaScanner:
             r'|[A-Z0-9]{2,8}-[A-Z0-9]{2,10})\b.*',
             re.IGNORECASE
         )
-        
+
         if media_type == "tv":
             # Enlever tags [xxx] et (yyyy)
             name = re.sub(r'\s*\[[^\]]*\]', '', name)
@@ -108,11 +108,11 @@ class MediaScanner:
                 title = quality_tags.sub('', name).strip()
                 if not title:
                     title = name
-        
+
         # Remplacer les points par des espaces (sauf si déjà des espaces)
         if '.' in title and ' ' not in title:
             title = title.replace('.', ' ')
-        
+
         # Nettoyer
         title = re.sub(r'[-_]+$', '', title)  # tirets/underscores en fin
         title = re.sub(r'\s+', ' ', title).strip()
@@ -136,7 +136,7 @@ class MediaScanner:
         if any(re.search(pattern, filename, re.IGNORECASE) for pattern in patterns):
             return 'tv'
         return 'movie'
-    
+
     def _extract_episode_info(self, filename: str, media: MediaFile):
         """Extrait season/episode info pour les séries"""
         # Pattern: S01E01, s01e01 ou 1x03

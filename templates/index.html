@@ -6,9 +6,7 @@
     <title>CleanFlick</title>
     <link rel="icon" type="image/x-icon" href="{{ url_for('static', filename='CleanFlick.ico') }}">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@mdi/font@7.4.47/css/materialdesignicons.min.css">
-    <link rel="stylesheet" href="{{ url_for('static', filename='base.css') }}?v={{ cache_bust }}">
-    <link rel="stylesheet" href="{{ url_for('static', filename='files.css') }}?v={{ cache_bust }}">
-    <link rel="stylesheet" href="{{ url_for('static', filename='config.css') }}?v={{ cache_bust }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}?v={{ cache_bust }}">
 </head>
 <body>
 <div class="container">
@@ -129,6 +127,11 @@
                         <div class="usage-grid" id="api-usage"></div>
                         <span class="hint" data-i18n="cfg_usage_hint"></span>
                     </div>
+                    <div class="cache-row">
+                        <label for="cache_refresh_days" data-i18n="cfg_cache_refresh"></label>
+                        <input type="text" inputmode="numeric" pattern="[0-9]*" id="cache_refresh_days" placeholder="0">
+                    </div>
+                    <span class="hint" data-i18n="cfg_cache_refresh_hint"></span>
                 </div>
 
                 <div class="config-section">
@@ -156,6 +159,15 @@
                             <button class="btn-test" onclick="pickFolder('tv_output_path')"><i class="mdi mdi-folder-open"></i></button>
                         </div>
                         <span class="hint" data-i18n="cfg_tv_output_path_hint"></span>
+                    </div>
+                    <div class="form-field cfg-toggle-row">
+                        <label class="cfg-toggle" for="lib_fast_scan">
+                            <input type="checkbox" id="lib_fast_scan">
+                            <span class="cfg-toggle-text">
+                                <span data-i18n="cfg_lib_fast_scan"></span>
+                                <span class="hint" data-i18n="cfg_lib_fast_scan_hint"></span>
+                            </span>
+                        </label>
                     </div>
                 </div>
 
@@ -288,7 +300,7 @@
 
     <footer class="app-footer">
         <span data-i18n="footer_text"></span>
-        <span class="footer-meta">· <a href="https://github.com/Gazz-yniere/Cleanflick" target="_blank">GitHub</a> · v1.0.8</span>
+        <span class="footer-meta">· <a href="https://github.com/Gazz-yniere/Cleanflick" target="_blank">GitHub</a> · v1.0.9</span>
     </footer>
 </div>
 

@@ -10,6 +10,3 @@ tvdb_v4_official==1.1.0
 # Serveur web performant pour le mode production - améliore les performances et la gestion des connexions
 gunicorn==21.2.0
 
-# Worker async pour Gunicorn - requis pour les connexions longues (SSE /api/scan/events)
-gevent==24.2.1
-

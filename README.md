@@ -5,6 +5,7 @@
 </div>
 
 <p align="center">
+  <a href="https://github.com/Gazz-yniere/Cleanflick/actions/workflows/ci.yml"><img src="https://github.com/Gazz-yniere/Cleanflick/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://www.python.org/"><img src="https://img.shields.io/badge/python-3.11+-blue?logo=python" alt="Python"></a>
   <a href="https://flask.palletsprojects.com/"><img src="https://img.shields.io/badge/Flask-2.3-green?logo=flask" alt="Flask"></a>
   <img src="https://img.shields.io/badge/TVDB-v4-orange" alt="TVDB v4">
@@ -43,7 +44,7 @@
 - **Multi-language titles** (`{n:fr}`, `{n:de}`, `{n:ja}`...)
 - **External IDs** in filenames (IMDb, TVDB, TMDB)
 - **Recursive folder scanning** with live refresh, reacting to changes in real time
-- **Smart caching** with 7-day expiry — auto-scan uses the cache first (fast), manual search always queries the API fresh to find alternatives
+- **Smart caching** — cached info is kept forever by default (no repeated API calls); an optional auto-refresh can re-query the API in the background, manual search always queries fresh to find alternatives
 - **SQLite persistence** — history and all caches survive restarts in a single `cleanflick.db`
 - **Rename history** with revert support (persistent across restarts)
 - **Manual search** with full TVDB results selection (confirmed choices are remembered)
@@ -55,6 +56,7 @@
 - **6 languages** interface (FR, EN, ES, DE, IT, PT) with language switch
 - **Dark theme** (orange & dark grey)
 - **Docker support** for easy deployment
+- **Unit test suite** (`tests/`) — scanner, duration parser, SQLite layer, API handlers and Flask routes, runnable via `pytest` and in CI
 
 ---
 
@@ -66,7 +68,7 @@ CleanFlick turns messy download folders into a clean, organized media library. T
 
 - CleanFlick **recursively scans** your `input_path` and lists every movie / TV episode file.
 - For each file it queries **TVDB** (and **OMDb** for episode ratings) and proposes a cleaned filename using your `movie_format` / `tv_format`.
-- Results are **cached for 7 days** so repeated scans are instant. The **scan/auto-scan** path uses the cache first and only queries the API when needed; the **manual search** (`🔍`) always forces a fresh API call so you can pick an alternative title even when a proposal is already cached. Once you confirm a manual selection, it is remembered per-file.
+- Results are **cached permanently by default** so repeated scans are instant. The **scan/auto-scan** path uses the cache first and only queries the API when there is no cached info; the **manual search** (`🔍`) always forces a fresh API call so you can pick an alternative title even when a proposal is already cached. Once you confirm a manual selection, it is remembered per-file.
 - Each row offers **Rename** and **Move** (plus a transfer overlay with a live progress bar, speed, ETA and a final *verifying* phase that confirms the file really moved before removing the row).
 
 ### 2. Library
@@ -84,7 +86,7 @@ CleanFlick turns messy download folders into a clean, organized media library. T
 
 - Enter your **TVDB** and **OMDb** API keys (side by side) with a **test** button each, adjust paths and naming formats, and switch the interface language.
 
-> **Caching summary:** searches, per-file results and details are cached in SQLite with a **7-day expiry** and re-fetched automatically, so there is no cache to manage manually.
+> **Caching summary:** searches, per-file results and details are cached in SQLite **permanently by default** — no cache to manage manually, no repeated API calls. The optional **auto-refresh** (Config → "Rafraîchissement automatique des infos") re-queries the API in the background for entries older than the given number of days; `0` (default) disables it.
 
 ---
 
@@ -126,6 +128,21 @@ python app.py
 ```
 
 Open **http://localhost:5000** in your browser.
+
+### Testing
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest tests -q
+```
+
+The suite covers the scanner (title/year/episode parsing), the pure-Python duration parser (MP4/MKV/AVI), the SQLite layer (`db.py`), the TVDB API handlers (mocked, no network) and the Flask routes (isolated app instance with a temp database).
+
+Linting uses [ruff](https://docs.astral.sh/ruff/):
+
+```bash
+ruff check src tests app.py
+```
 
 ---
 
@@ -230,13 +247,51 @@ Copy `config.example.json` to `config.json` and fill in your settings:
 
 ```
 CleanFlick/
-├── app.py                    # Flask application & routes
-├── scanner.py                # Media file scanner
-├── api_handler.py            # TVDB/OMDb API handlers
-├── db.py                     # SQLite persistence (history + caches)
-├── mediaduration.py          # Media duration probing
+├── app.py                    # Lanceur : crée l'app Flask et démarre le serveur
+├── src/                      # Code applicatif (métier + routes)
+│   ├── state.py              # État partagé (config, scanner, api_handler, progress)
+│   ├── config.py             # Chargement / sauvegarde de la config
+│   ├── auth.py               # Authentification (mot de passe)
+│   ├── history.py            # Historique des opérations (persisté en base)
+│   ├── utils.py              # Déplacement de fichiers, progression, helpers
+│   ├── db.py                 # SQLite (history + caches)
+│   ├── scanner.py            # Scan des fichiers médias (MediaScanner)
+│   ├── mediaduration.py      # Lecture de durée (MP4/MKV/AVI, Python pur)
+│   ├── duration.py           # Cache durée + worker FIFO (scan rapide)
+│   ├── network.py            # Découverte réseau (SMB, LDAP, postes LAN)
+│   ├── library.py            # Bibliothèque (tailles, épisodes, présence)
+│   ├── cache.py              # Caches de recherche + worker de rafraîchissement
+│   ├── watcher.py            # Surveillance du dossier d'entrée + SSE
+│   ├── api/
+│   │   ├── tvdb.py           # Client TVDB (recherche, détails, épisodes)
+│   │   ├── handler.py        # Façade API (délégation TVDB)
+│   │   └── omdb.py           # Service OMDb (notes, quota, résolution TVDB→IMDb)
+│   └── routes/               # Blueprints Flask (1 fichier par domaine)
+│       ├── __init__.py       # create_app() : assemblage + workers de fond
+│       ├── auth.py           # /login, /
+│       ├── browse.py         # /api/browse, /api/browse-net
+│       ├── scan.py           # /api/scan, /api/scan/events
+│       ├── search.py         # /api/search/*, /api/movie/*, /api/tv/*
+│       ├── library.py        # /api/library*, /api/lib-durations
+│       ├── files.py          # /api/move*, /api/rename, /api/revert, /api/history*
+│       ├── config.py         # /api/config, /api/test-keys
+│       └── usage.py          # /api/usage
+├── scripts/
+│   └── check_js.py           # Vérifie l'équilibrage des accolades de app.js
+├── .github/workflows/
+│   ├── ci.yml                # CI : lint (ruff) + tests (pytest) + coverage
+│   └── docker.yml            # Build Docker (push sur release, build sur PR)
 ├── config.example.json       # Configuration template
 ├── requirements.txt          # Python dependencies
+├── requirements-dev.txt      # Test dependencies (pytest, ruff)
+├── ruff.toml                 # Config lint (ruff)
+├── tests/                    # Unit tests (pytest)
+│   ├── conftest.py           # Fixtures: isolated DB + Flask app
+│   ├── test_scanner.py
+│   ├── test_mediaduration.py
+│   ├── test_db.py
+│   ├── test_api_handler.py
+│   └── test_app.py
 ├── Dockerfile                # Docker build
 ├── docker-compose.yml        # Docker Compose config
 ├── templates/
@@ -245,10 +300,7 @@ CleanFlick/
 ├── static/
 │   ├── app.js                # Frontend logic
 │   ├── i18n.js               # Translations (fr, en, es, de, it, pt)
-│   ├── base.css              # Base styles & CSS variables
-│   ├── files.css             # Files & history table styles
-│   ├── config.css            # Config page styles
-│   ├── login.css             # Login page styles
+│   ├── app.css               # All styles (base, files, config, login)
 │   ├── CleanFlick.png        # Logo
 │   └── CleanFlick.ico        # Favicon
 ```
@@ -307,6 +359,25 @@ environment:
 ---
 
 ## Changelog
+
+### [1.0.9] - 2026-09-01
+
+**Added**
+- GitHub Actions CI — ruff lint + pytest on push/PR, with an HTML test report and a coverage artifact, plus a per-test check run
+- `/health` endpoint + Docker `HEALTHCHECK` and compose `healthcheck`
+- Library posters — episodes and series folders without a poster now inherit the series poster (from the search or OMDb cache, no API call)
+- CI badge in the README
+
+**Changed**
+- Code reorganized into a `src/` package (business logic + `src/api/` + `src/routes/`); `app.py` only assembles and starts the app
+- Docker now runs as a non-root user (`appuser`)
+- Docker image is built (not pushed) on every pull request to validate the Dockerfile
+
+**Fixed**
+- Misplaced `USER` in the Dockerfile (run as a shell command inside a `RUN`), which broke the build
+
+**Removed**
+- `gevent` from production dependencies (the `gthread` worker + stdlib SSE queue fallback is sufficient)
 
 ### [1.0.8] - 2026-08-20
 

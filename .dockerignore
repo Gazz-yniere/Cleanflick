@@ -13,4 +13,6 @@ config.json
 # Dev
 venv/
 _archive/
+scripts/
+tests/
 cleanflick.db

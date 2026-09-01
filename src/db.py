@@ -3,7 +3,8 @@ import json
 import os
 import time
 
-BASE = os.path.dirname(__file__)
+# Racine du projet (le module vit dans src/ mais la BDD reste à la racine).
+BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DB_PATH = os.path.join(BASE, 'cleanflick.db')
 
 
@@ -82,6 +83,13 @@ def init_db():
         loaded_at INTEGER
     )''')
     cur.execute('''
+    CREATE TABLE IF NOT EXISTS series_meta_cache (
+        tvdb_id TEXT PRIMARY KEY,
+        imdb_id TEXT,
+        data_json TEXT,
+        loaded_at INTEGER
+    )''')
+    cur.execute('''
     CREATE TABLE IF NOT EXISTS usage_counters (
         service TEXT PRIMARY KEY,
         total INTEGER,
@@ -94,6 +102,13 @@ def init_db():
         size INTEGER,
         mtime INTEGER,
         minutes INTEGER,
+        loaded_at INTEGER
+    )''')
+    cur.execute('''
+    CREATE TABLE IF NOT EXISTS folder_size_cache (
+        path TEXT PRIMARY KEY,
+        mtime INTEGER,
+        size INTEGER,
         loaded_at INTEGER
     )''')
     cur.execute('''
@@ -150,7 +165,7 @@ def clear_history():
     conn.close()
 
 
-def cache_get(key: str, max_age_seconds: int = 7 * 24 * 3600):
+def cache_get(key: str, max_age_seconds: int = None):
     conn = get_conn()
     cur = conn.cursor()
     cur.execute('SELECT media_type, results_json, loaded_at FROM search_cache WHERE key = ?', (key,))
@@ -158,7 +173,7 @@ def cache_get(key: str, max_age_seconds: int = 7 * 24 * 3600):
     conn.close()
     if not r:
         return None
-    if int(time.time()) - int(r['loaded_at'] or 0) > max_age_seconds:
+    if max_age_seconds is not None and int(time.time()) - int(r['loaded_at'] or 0) > max_age_seconds:
         return None
     try:
         return {'media_type': r['media_type'], 'results': json.loads(r['results_json'] or '[]')}
@@ -176,7 +191,7 @@ def cache_set(key: str, media_type: str, results: list):
     conn.close()
 
 
-def file_cache_get(fkey: str, max_age_seconds: int = 7 * 24 * 3600):
+def file_cache_get(fkey: str, max_age_seconds: int = None):
     conn = get_conn()
     cur = conn.cursor()
     cur.execute('SELECT media_type, results_json, loaded_at FROM file_search_cache WHERE fkey = ?', (fkey,))
@@ -184,7 +199,7 @@ def file_cache_get(fkey: str, max_age_seconds: int = 7 * 24 * 3600):
     conn.close()
     if not r:
         return None
-    if int(time.time()) - int(r['loaded_at'] or 0) > max_age_seconds:
+    if max_age_seconds is not None and int(time.time()) - int(r['loaded_at'] or 0) > max_age_seconds:
         return None
     try:
         return {'media_type': r['media_type'], 'results': json.loads(r['results_json'] or '[]')}
@@ -225,7 +240,7 @@ def file_cache_migrate(old_fkey: str, new_fkey: str, new_file_path: str, size: i
         conn.close()
 
 
-def details_get(kind: str, id: str, max_age_seconds: int = 7 * 24 * 3600):
+def details_get(kind: str, id: str, max_age_seconds: int = None):
     conn = get_conn()
     cur = conn.cursor()
     try:
@@ -233,7 +248,7 @@ def details_get(kind: str, id: str, max_age_seconds: int = 7 * 24 * 3600):
         r = cur.fetchone()
         if not r:
             return None
-        if int(time.time()) - int(r['loaded_at'] or 0) > max_age_seconds:
+        if max_age_seconds is not None and int(time.time()) - int(r['loaded_at'] or 0) > max_age_seconds:
             return None
         try:
             return json.loads(r['details_json'] or '{}')
@@ -296,6 +311,31 @@ def omdb_all():
             except Exception:
                 continue
         return out
+    finally:
+        conn.close()
+
+
+def folder_size_get(path: str, mtime: int):
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute('SELECT size FROM folder_size_cache WHERE path = ? AND mtime = ?', (path, mtime))
+        r = cur.fetchone()
+        if not r:
+            return None
+        return {'size': r['size']}
+    finally:
+        conn.close()
+
+
+def folder_size_set(path: str, size, mtime):
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute('INSERT OR REPLACE INTO folder_size_cache (path, mtime, size, loaded_at) VALUES (?, ?, ?, ?)', (
+            path, mtime, size, int(time.time())
+        ))
+        conn.commit()
     finally:
         conn.close()
 
@@ -369,7 +409,7 @@ def omdb_episode_all():
         conn.close()
 
 
-def series_episodes_get(series_id: str, max_age: int = 86400):
+def series_episodes_get(series_id: str, max_age: int = None):
     conn = get_conn()
     cur = conn.cursor()
     try:
@@ -377,7 +417,7 @@ def series_episodes_get(series_id: str, max_age: int = 86400):
         r = cur.fetchone()
         if not r:
             return None
-        if r['loaded_at'] and (time.time() - r['loaded_at']) > max_age:
+        if max_age is not None and r['loaded_at'] and (time.time() - r['loaded_at']) > max_age:
             return None
         try:
             return json.loads(r['data_json'] or '{}')
@@ -399,6 +439,81 @@ def series_episodes_set(series_id: str, data: dict):
         conn.close()
 
 
+def series_meta_get(tvdb_id: str):
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute('SELECT imdb_id, data_json, loaded_at FROM series_meta_cache WHERE tvdb_id = ?', (str(tvdb_id).lower(),))
+        r = cur.fetchone()
+        if not r:
+            return None
+        try:
+            return {'imdb_id': r['imdb_id'] or '', 'data': json.loads(r['data_json'] or '{}'), 'loaded_at': r['loaded_at'] or 0}
+        except Exception:
+            return {'imdb_id': r['imdb_id'] or '', 'data': {}, 'loaded_at': r['loaded_at'] or 0}
+    finally:
+        conn.close()
+
+
+def series_meta_set(tvdb_id: str, imdb_id: str, data: dict):
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute('INSERT OR REPLACE INTO series_meta_cache (tvdb_id, imdb_id, data_json, loaded_at) VALUES (?, ?, ?, ?)', (
+            str(tvdb_id).lower(), (imdb_id or '').strip().lower(), json.dumps(data or {}, ensure_ascii=False), int(time.time())
+        ))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def series_meta_all():
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute('SELECT tvdb_id, imdb_id, data_json FROM series_meta_cache')
+        out = {}
+        for r in cur.fetchall():
+            try:
+                out[r['tvdb_id']] = {'imdb_id': r['imdb_id'] or '', 'data': json.loads(r['data_json'] or '{}')}
+            except Exception:
+                continue
+        return out
+    finally:
+        conn.close()
+
+
+def refresh_due(table: str, refresh_days: int, now: float = None) -> list:
+    """Clés d'une table de cache (search_cache, file_search_cache, details_cache,
+    series_episodes_cache) dont loaded_at est plus vieux que refresh_days.
+    Les entrées sans loaded_at sont exclues. now permet de tester."""
+    if not refresh_days or refresh_days <= 0:
+        return []
+    if now is None:
+        now = time.time()
+    cutoff = int(now) - int(refresh_days * 86400)
+    col = {'search_cache': 'key', 'file_search_cache': 'fkey',
+           'details_cache': 'kind', 'series_episodes_cache': 'series_id'}[table]
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(f'SELECT {col}, loaded_at FROM {table} WHERE loaded_at IS NOT NULL AND loaded_at <= ?', (cutoff,))
+        return [r[0] for r in cur.fetchall()]
+    except Exception:
+        return []
+    finally:
+        conn.close()
+
+
+_usage_listener = None
+
+
+def usage_set_listener(fn):
+    """Callback appelé après chaque usage_bump (pour le temps réel UI)."""
+    global _usage_listener
+    _usage_listener = fn
+
+
 def usage_bump(service: str):
     conn = get_conn()
     cur = conn.cursor()
@@ -416,6 +531,11 @@ def usage_bump(service: str):
         conn.commit()
     finally:
         conn.close()
+    if _usage_listener:
+        try:
+            _usage_listener(service)
+        except Exception:
+            pass
 
 
 def usage_get():

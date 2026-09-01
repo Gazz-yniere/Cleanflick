@@ -149,9 +149,20 @@ def _ebml_read_vint(b, off):
     return value, length
 
 
+# Un ID EBML est un Vint : le décodage retire le bit de marque et les bits
+# de longueur qui précèdent, d'où ces valeurs attendues (masquées) et non
+# l'ID brut (ex. 0x4489 se compare à 0x489, 0x18538067 à 0x8538067).
+_EID_SEGMENT = 0x08538067
+_EID_INFO    = 0x0549A966
+_EID_TCS     = 0x000AD7B1
+_EID_DUR     = 0x00000489
+_EID_CLUSTER = 0x00F43B675
+_EID_TC      = 0x00000067
+
+
 def _mkv_from_buffer(buf):
     n = len(buf)
-    # Recherche de l'élément Segment (0x18538067)
+    # Recherche de l'élément Segment
     i = 0
     while i < n:
         try:
@@ -160,7 +171,7 @@ def _mkv_from_buffer(buf):
         except Exception:
             return (None, 1000000)
         hdrlen = elen + slen
-        if eid == 0x18538067:
+        if eid == _EID_SEGMENT:
             return _parse_segment(buf, i + hdrlen, min(n, i + hdrlen + size) if size < (1 << 50) else n)
         if size >= (1 << 50):
             return (None, 1000000)
@@ -183,7 +194,7 @@ def _parse_segment(buf, start, end):
         data_end = data_start + size
         if data_end > len(buf):
             break
-        if eid == 0x1549A966:  # Info
+        if eid == _EID_INFO:
             j = data_start
             while j < data_end:
                 try:
@@ -193,17 +204,19 @@ def _parse_segment(buf, start, end):
                     break
                 fhdr = fel + fsl
                 fdata = j + fhdr
-                if feid == 0x2AD7B1:  # TimecodeScale
+                if feid == _EID_TCS:  # TimecodeScale
                     v = int.from_bytes(buf[fdata:fdata + fsize], 'big')
                     if v:
                         timecode_scale = v
-                elif feid == 0x4489:  # Duration (float secondes, souvent 8 octets)
+                elif feid == _EID_DUR:  # Duration (float secondes, souvent 8 octets)
                     if fsize == 8:
-                        duration = struct.unpack('>d', buf[fdata:fdata + 8])[0]
+                        duration = struct.unpack('>d', buf[fdata:fdata + fsize])[0]
                     elif fsize == 4:
-                        duration = struct.unpack('>f', buf[fdata:fdata + 4])[0]
+                        duration = struct.unpack('>f', buf[fdata:fdata + fsize])[0]
                     else:
                         duration = int.from_bytes(buf[fdata:fdata + fsize], 'big')
+                if fdata + fsize <= j:
+                    break  # taille mal lue : on évite une boucle infinie
                 j = fdata + fsize
             return (duration, timecode_scale)
         if size == 0:
@@ -239,7 +252,7 @@ def _mkv_last_cluster_timecode(tail):
         except Exception:
             break
         hdrlen = elen + szlen
-        if eid == 0xE7 and 0 < size <= 8:  # Timecode
+        if eid == _EID_TC and 0 < size <= 8:  # Timecode
             return int.from_bytes(tail[i + hdrlen:i + hdrlen + size], 'big')
         i += hdrlen + size
     return None

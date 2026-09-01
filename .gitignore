@@ -1,5 +1,8 @@
 # Python
 __pycache__/
+.pytest_cache/
+.ruff_cache/
+.opencode/
 
 *.py[cod]
 *.so
@@ -32,3 +35,5 @@ cleanflick.db
 
 # Archive fichiers non essentiels
 _archive/
+
+AGENTS.md
