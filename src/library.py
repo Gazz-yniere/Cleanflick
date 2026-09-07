@@ -9,6 +9,7 @@ from . import db, state
 logger = logging.getLogger(__name__)
 
 _FOLDER_DIR_CACHE = {}      # path -> (mtime, size) : taille de dossier (non récursif)
+_EP_CACHE = {}              # path -> (mtime, set) : épisodes (saison, numéro) présents
 VIDEO_EXT = {'.mkv', '.mp4', '.avi', '.mov', '.wmv', '.m4v', '.ts', '.flv', '.webm'}
 
 
@@ -116,21 +117,57 @@ def tvdb_series_episodes(series_id):
     return cached.get('episodes', []) if cached else []
 
 
+_EP_REF_PATTERNS = [
+    # S01E01-E02 / S01E01E02 / S01E01, E02 (multi-épisodes dans un même fichier)
+    re.compile(r'[Ss](\d{1,2})[Ee](\d{1,3})[.,\s]*(?:[-–—~]\s*[Ee](\d{1,3})|[Ee](\d{1,3}))'),
+    # 1x02-03
+    re.compile(r'\b(\d{1,2})x(\d{2})\s*[-–—~]\s*(\d{2})\b'),
+    # S01E01 / 1x02
+    re.compile(r'[Ss](\d{1,2})[Ee](\d{1,3})'),
+    re.compile(r'\b(\d{1,2})x(\d{2})\b'),
+]
+
+
+def episode_refs(filename):
+    """Liste des (saison, episode) référencés dans un nom de fichier.
+    Gère les fichiers multi-épisodes : S01E01-E02, S01E01E02, S01E01, E02,
+    1x02-03... (un seul fichier peut donc couvrir plusieurs épisodes)."""
+    for pat in _EP_REF_PATTERNS:
+        m = pat.search(filename)
+        if m:
+            g = m.groups()
+            season = int(g[0])
+            first = int(g[1])
+            last = int(g[2] or g[3]) if (len(g) > 2 and (g[2] or g[3])) else first
+            if last < first:
+                first, last = last, first
+            return [(season, e) for e in range(first, last + 1)]
+    return []
+
+
 def present_episodes(path):
     """Ensemble des (saison, episode) présents dans un dossier série (scan récursif,
-    car les épisodes peuvent être répartis dans des sous-dossiers par saison)."""
+    car les épisodes peuvent être répartis dans des sous-dossiers par saison).
+    Mémoïsé par mtime du dossier : le re-scan ne coûte qu'un seul scandir."""
+    try:
+        mtime = int(os.path.getmtime(path))
+    except OSError:
+        return set()
+    mem = _EP_CACHE.get(path)
+    if mem and mem[0] == mtime:
+        return mem[1]
     present = set()
-    sxe = re.compile(r'[Ss](\d{1,2})[Ee](\d{1,3})')
     try:
         for root, dirs, files in os.walk(path):
             dirs[:] = [d for d in dirs if not d.startswith('.')]
             for f in files:
                 if Path(f).suffix.lower() in VIDEO_EXT:
-                    m = sxe.search(f)
-                    if m:
-                        present.add((int(m.group(1)), int(m.group(2))))
+                    present.update(episode_refs(f))
     except Exception:
         pass
+    _EP_CACHE[path] = (mtime, present)
+    if len(_EP_CACHE) > 2000:
+        _EP_CACHE.clear()
     return present
 
 

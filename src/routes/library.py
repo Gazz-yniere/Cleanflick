@@ -5,7 +5,9 @@ import re
 import json
 import time
 import uuid
+import shutil
 import logging
+import threading
 from pathlib import Path
 
 from flask import Blueprint, jsonify, request
@@ -13,15 +15,20 @@ from flask import Blueprint, jsonify, request
 from .. import db, state
 from ..auth import login_required
 from ..history import append_history
-from ..utils import _move_path, _run_file_op
+from ..utils import _move_path, _run_file_op, _migrate_file_cache, _refresh_scan_snapshot
 from .. import library
+from .. import naming
 from .. import duration
+from .. import watcher
 from ..api import omdb
 
 logger = logging.getLogger(__name__)
 bp = Blueprint('library', __name__)
 
 VIDEO_EXT = {'.mkv', '.mp4', '.avi', '.mov', '.wmv', '.m4v', '.ts', '.flv', '.webm'}
+
+# Marqueur d'épisode (y compris multi-épisodes : S01E01-E02, S01E01E02, 1x02-03).
+_EP_MARKER = r'[Ss]\d{2}[Ee]\d{2}(?:[-–—~]\s*[Ee]\d{2}|[Ee]\d{2})?|\d+x\d{2}(?:[-–—~]\d{2})?'
 
 
 @bp.route('/api/library/missing')
@@ -40,12 +47,14 @@ def api_library_missing():
     series_id = m.group(1)
     episodes = library.series_episodes_cached(series_id)
     present = library.present_episodes(path)
-    # Ignore les épisodes spéciaux (saison 0 / S00) : seules les saisons S01..S0X sont prises en compte.
+    # Épisodes spéciaux (saison 0 / S00) ignorés par défaut ; affichés si l'option
+    # « show_s00_specials » est activée dans la configuration.
+    show_s00 = bool(state.config.get('show_s00_specials'))
     # Déduplication par (saison, episode) : le cache TVDB peut contenir des doublons.
     missing = []
     seen = set()
     for e in episodes:
-        if e['s'] <= 0:
+        if e['s'] <= 0 and not show_s00:
             continue
         key = (e['s'], e['e'])
         if key in present or key in seen:
@@ -259,9 +268,9 @@ def api_library():
     # Permet de retrouver un épisode même si le titre de l'épisode a changé depuis le cache.
     episode_map = {}
     for base, cached in basename_map.items():
-        m = re.search(r'([Ss]\d{2}[Ee]\d{2}|\d+x\d{2})', base)
+        m = re.search(_EP_MARKER, base)
         if m:
-            key = (base[:m.start()].strip().lower(), m.group(1).lower())
+            key = (base[:m.start()].strip().lower(), m.group(0).lower())
             if key not in episode_map or (cached['loaded_at'] or 0) > (episode_map[key]['loaded_at'] or 0):
                 episode_map[key] = cached
 
@@ -366,7 +375,7 @@ def api_library():
         return meta
 
     def file_meta(name, duration_val=None, entry_path=None):
-        m = re.search(r'([Ss]\d{2}[Ee]\d{2}|\d+x\d{2})', name)
+        m = re.search(f'({_EP_MARKER})', name)
         ep_num = None
         ep_name = ''
         if m:
@@ -464,7 +473,18 @@ def api_library():
             except Exception:
                 child_count = 0
             valid_dir = is_valid_name(entry.name, lib_type, is_dir=True)
-            entries.append({'name': entry.name, 'path': entry.path, 'type': lib_type, 'is_dir': True, 'child_count': child_count, 'size': library.folder_size(entry.path, recursive=False), 'valid': valid_dir, 'meta': folder_meta(entry.name)})
+            ep_present = ep_total = None
+            if lib_type == 'tv':
+                mep = re.search(r'\[tvdbid-([0-9]+)\]', entry.name, re.I)
+                if mep:
+                    # Compteur d'épisodes « présents / total TVDB » (S00 inclus
+                    # uniquement si l'option show_s00_specials est activée).
+                    show_s00 = bool(state.config.get('show_s00_specials'))
+                    eps = library.series_episodes_cached(mep.group(1))
+                    ep_total = sum(1 for e in eps if (e.get('s') or 0) > 0 or show_s00)
+                    present = library.present_episodes(entry.path)
+                    ep_present = sum(1 for (s, _e) in present if s > 0 or show_s00)
+            entries.append({'name': entry.name, 'path': entry.path, 'type': lib_type, 'is_dir': True, 'child_count': child_count, 'size': library.folder_size(entry.path, recursive=False), 'valid': valid_dir, 'meta': folder_meta(entry.name), 'ep_present': ep_present, 'ep_total': ep_total})
         elif entry.is_file() and Path(entry.name).suffix.lower() in VIDEO_EXT:
             valid = is_valid_name(entry.name, lib_type)
             size = 0
@@ -668,8 +688,6 @@ def api_library_send_back():
 @bp.route('/api/library/rename-folder', methods=['POST'])
 @login_required
 def api_library_rename_folder():
-    import shutil
-    from .. import watcher
     d = request.json or {}
     folder = d.get('path')
     new_name = d.get('new_name')
@@ -702,6 +720,162 @@ def api_library_rename_folder():
     except Exception:
         pass
     return jsonify({'success': True, 'new_path': dst, 'new_name': new_name})
+
+
+def _folder_series_files(folder):
+    """Fichiers vidéo d'un dossier série (scan récursif, ordre stable) avec
+    (saison, épisode) extraits du nom. Un fichier multi-épisodes (S01E01-E02)
+    génère une entrée par épisode. Renvoie [(s, e, path, name), ...]."""
+    out = []
+    for root, dirs, files in os.walk(folder):
+        dirs[:] = sorted(d for d in dirs if not d.startswith('.'))
+        for name in sorted(files):
+            if Path(name).suffix.lower() not in VIDEO_EXT:
+                continue
+            refs = library.episode_refs(name)
+            if refs:
+                s, e = refs[0]
+                out.append((s, e, os.path.join(root, name), name))
+    return out
+
+
+def _folder_series_rename(folder, series_title, year, tvdb_id, imdb_id, tmdb_id, translations):
+    """Renomme les fichiers d'un dossier série selon le format TV configuré.
+    Les titres d'épisodes viennent du cache TVDB ; au 1er passage le cache est
+    vide (parsing en arrière-plan) et le renommage est complété après parsing.
+    Renvoie [ {from, to}, ... ]."""
+    ep_titles = {}
+    try:
+        cached = db.series_episodes_get(str(tvdb_id))
+        for ep in (cached or {}).get('episodes') or []:
+            if ep.get('s') is not None and ep.get('e') is not None:
+                ep_titles[(ep.get('s'), ep.get('e'))] = ep.get('title') or ''
+    except Exception:
+        pass
+    details = {
+        'title': series_title, 'year': year or '',
+        'tvdbid': str(tvdb_id or ''), 'tvdb': str(tvdb_id or ''),
+        'imdbid': imdb_id or '', 'imdb': imdb_id or '',
+        'tmdbid': tmdb_id or '', 'tmdb': tmdb_id or '',
+        'translations': translations or {},
+    }
+    renames = []
+    for s, e, path, name in _folder_series_files(folder):
+        details['episode_title'] = ep_titles.get((s, e), '')
+        new_name = naming.generate_filename(name, 'tv', s, e, details)
+        if not new_name or new_name == name:
+            continue
+        dst = os.path.join(os.path.dirname(path), new_name)
+        try:
+            _move_path(path, dst)
+        except Exception as ex:
+            logger.warning(f"[Rename série] échec {name} → {new_name}: {ex}")
+            continue
+        append_history({'id': str(uuid.uuid4()), 'op': 'rename',
+                        'date': time.strftime('%Y-%m-%d %H:%M:%S'),
+                        'from_path': path, 'from_name': name,
+                        'to_path': dst, 'to_name': new_name})
+        _migrate_file_cache(path, dst)
+        renames.append({'from': name, 'to': new_name})
+    return renames
+
+
+@bp.route('/api/library/rename-folder-series', methods=['POST'])
+@login_required
+def api_library_rename_folder_series():
+    """Renommage complet d'un dossier série sélectionné manuellement :
+    synchrone (fichiers + dossier), le parsing TVDB (titres d'épisodes,
+    épisodes manquants, enrichissement OMDb) continue en arrière-plan."""
+    d = request.json or {}
+    folder = d.get('path')
+    if not folder or not os.path.isdir(folder):
+        return jsonify({'success': False, 'message': 'Dossier introuvable'}), 400
+    tv_root = os.path.abspath(state.config.get('_tv_output_path') or state.config.get('tv_output_path') or '')
+    abs_folder = os.path.abspath(folder)
+    if not abs_folder.startswith(tv_root):
+        return jsonify({'success': False, 'message': 'Renommage non autorisé hors du dossier TV'}), 403
+    tvdb_id = str(d.get('tvdbid') or '').strip().lower()
+    if not tvdb_id:
+        return jsonify({'success': False, 'message': 'ID TVDB manquant'}), 400
+    year = d.get('year') or None
+    try:
+        year = int(year) if year not in (None, '', 'None') else None
+    except (TypeError, ValueError):
+        year = None
+    translations = d.get('translations') or {}
+    details = {}
+    try:
+        details = db.series_meta_get(tvdb_id) or {}
+    except Exception:
+        details = {}
+    series_title = naming.clean_title(details.get('data', {}).get('title') or d.get('title') or '')
+    if not series_title:
+        series_title = naming.clean_title(os.path.basename(abs_folder))
+    imdb_id = (details.get('imdb_id') or d.get('imdb') or '').strip().lower()
+    tmdb_id = str(d.get('tmdb') or '').strip()
+    if not imdb_id:
+        try:
+            imdb_id = omdb.resolve_series_imdb(tvdb_id, title=series_title, year=year)
+        except Exception:
+            imdb_id = ''
+
+    renames = _folder_series_rename(abs_folder, series_title, year, tvdb_id, imdb_id, tmdb_id, translations)
+
+    # Nom du dossier : dérivé du nom d'épisode généré (même format que le JS).
+    sample_name = naming.generate_filename('sample.mkv', 'tv', 1, 1, {
+        'title': series_title, 'year': year or '',
+        'tvdbid': tvdb_id, 'tvdb': tvdb_id,
+        'imdbid': imdb_id, 'imdb': imdb_id,
+        'tmdbid': tmdb_id, 'tmdb': tmdb_id,
+        'translations': translations,
+    })
+    desired_folder = naming.series_folder_name(sample_name)
+    folder_note = None
+    folder_base = os.path.basename(abs_folder)
+    new_folder = abs_folder
+    if desired_folder and desired_folder != folder_base:
+        dst = os.path.join(os.path.dirname(abs_folder), desired_folder)
+        if not os.path.exists(dst):
+            try:
+                shutil.move(abs_folder, dst)
+                new_folder = dst
+                folder_note = {'from': folder_base, 'to': desired_folder}
+            except Exception as e:
+                folder_note = {'from': folder_base, 'to': desired_folder, 'error': str(e)}
+    _refresh_scan_snapshot()
+
+    def _background():
+        try:
+            library.tvdb_series_episodes(tvdb_id)
+        except Exception as e:
+            logger.warning(f"[Rename série] cache épisodes {tvdb_id}: {e}")
+        # 2e passe de renommage : le parsing TVDB a rempli le cache des
+        # épisodes, les titres manquant au 1er passage sont complétés ici.
+        try:
+            _folder_series_rename(new_folder, series_title, year, tvdb_id, imdb_id, tmdb_id, translations)
+            _refresh_scan_snapshot()
+        except Exception as e:
+            logger.warning(f"[Rename série] 2e passe {tvdb_id}: {e}")
+        try:
+            imdb2 = omdb.series_imdb_cached(tvdb_id) or imdb_id
+            if imdb2:
+                od = omdb.fetch_omdb_single(imdb2, is_series=True)
+                if od and od.get('Poster') and od.get('Poster') != 'N/A':
+                    try:
+                        db.series_meta_set(tvdb_id, imdb2, {
+                            **(details.get('data') or {}),
+                            'poster': od['Poster'],
+                        })
+                    except Exception:
+                        pass
+        except Exception as e:
+            logger.warning(f"[Rename série] enrichissement {tvdb_id}: {e}")
+        watcher.broadcast_library_refresh()
+
+    threading.Thread(target=_background, daemon=True).start()
+    return jsonify({'success': True, 'new_path': new_folder, 'new_name': os.path.basename(new_folder),
+                    'renames': renames, 'folder': folder_note,
+                    'background': True, 'tvdbid': tvdb_id, 'imdb': imdb_id})
 
 
 @bp.route('/api/library/delete-folder', methods=['POST'])

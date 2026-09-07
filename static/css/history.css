@@ -1,0 +1,53 @@
+/* ── History table column widths ─────────────────────────────────────────── */
+.col-hist-date    { width: 12%; }
+.col-hist-op      { width: 10%; }
+.col-hist-change  { width: 64%; }
+.col-hist-actions { width: 14%; }
+
+/* ── History ──────────────────────────────────────────────────────────────── */
+.hist-date    { font-size: 1em; color: var(--c-text3); white-space: nowrap; padding: 12px; }
+.hist-op      { display: inline-block; padding: 4px 12px; border-radius: 12px; font-size: 1em; font-weight: 600; white-space: nowrap; }
+.hist-op.op-rename { background: #3a2a0a; color: var(--c-accent); border: 1px solid #c0621a; }
+.hist-op.op-move   { background: #1a2a3a; color: #5dade2;         border: 1px solid #2980b9; }
+.hist-op.op-revert { background: #1a3a2a; color: var(--c-success); border: 1px solid #27ae60; }
+
+.hist-combined { padding: 10px 12px !important; vertical-align: middle !important; }
+
+.hist-name-section { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+
+.hist-name-from {
+    flex: 1; min-width: 150px; font-size: 1em; color: var(--c-text);
+    word-break: break-word; padding: 4px 8px;
+    background: rgba(0,0,0,0.2); border-radius: 3px;
+}
+
+.hist-arrow { color: var(--c-accent); font-weight: bold; flex-shrink: 0; font-size: 1em; }
+
+.hist-name-to {
+    flex: 1; min-width: 150px; font-size: 1em; color: var(--c-bright);
+    word-break: break-word; padding: 4px 8px;
+    background: rgba(102, 187, 106, 0.1); border-radius: 3px; border-left: 2px solid var(--c-success);
+}
+
+.hist-actions { text-align: center; vertical-align: middle; padding: 6px 12px; }
+
+/* ── History status badges ────────────────────────────────────────────────── */
+.hist-status {
+    display: inline-flex; align-items: center; gap: 4px;
+    font-size: 1em; font-weight: 600; padding: 3px 8px;
+    border-radius: 10px; white-space: nowrap;
+}
+.hist-status--reverted { background: #1a3a2a; color: var(--c-success); border: 1px solid #27ae60; }
+.hist-status--missing  { background: var(--c-error-bg); color: var(--c-error); border: 1px solid var(--c-error-bd); }
+.hist-status--conflict { background: #3a3a0a; color: #f0c040; border: 1px solid #a08000; }
+
+/* Lignes historique plus compactes */
+#history .files-table tr          { height: 52px; }
+#history .files-table thead tr    { height: auto; }
+#history .files-table td     { padding: 6px 12px; }
+#history .hist-combined      { padding: 6px 12px !important; }
+#history .hist-date          { padding: 6px 12px; }
+#history .hist-actions       { padding: 6px 12px; }
+#history .hist-name-section  { gap: 6px; }
+#history .hist-name-from,
+#history .hist-name-to       { padding: 2px 6px; min-width: 100px; }

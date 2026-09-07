@@ -15,6 +15,7 @@ DEFAULT_CONFIG = {
     "movie_format": "{n} ({y})",
     "tv_format": "{n} - {s00e00} - {t}",
     "lib_fast_scan": True,
+    "show_s00_specials": False,
 }
 
 
@@ -56,6 +57,7 @@ def load_config():
     cfg.setdefault('movie_output_path', '/movies')
     cfg.setdefault('tv_output_path', '/tv_shows')
     cfg.setdefault('lib_fast_scan', True)
+    cfg.setdefault('show_s00_specials', False)
     cfg['_input_path'] = _resolve(cfg['input_path'])
     cfg['_movie_output_path'] = _resolve(cfg['movie_output_path'])
     cfg['_tv_output_path'] = _resolve(cfg['tv_output_path'])

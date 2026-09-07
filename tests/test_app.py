@@ -249,6 +249,51 @@ def test_api_unauthorized_without_session(app_client, monkeypatch):
     assert r.status_code == 401
 
 
+def test_library_missing_multi_episode_file(app_client, monkeypatch):
+    """Un fichier multi-épisodes (S01E01-E02) couvre ses deux épisodes :
+    ni E01 ni E02 n'apparaissent dans les épisodes manquants."""
+    from src import db
+
+    series_dir = "out/tv/The Legend of Korra (2012) [tvdbid-251085]"
+    os.makedirs(series_dir, exist_ok=True)
+    with open(f"{series_dir}/Korra - S01E01-E02 - Welcome & Leaf.avi", 'wb') as f:
+        f.write(b'x')
+    with open(f"{series_dir}/Korra - S01E03 - The Revelation.avi", 'wb') as f:
+        f.write(b'x')
+
+    db.series_episodes_set('251085', {'episodes': [
+        {'s': 1, 'e': 1, 'title': 'Welcome to Republic City'},
+        {'s': 1, 'e': 2, 'title': 'A Leaf in the Wind'},
+        {'s': 1, 'e': 3, 'title': 'The Revelation'},
+    ]})
+
+    r = app_client.get(f"/api/library/missing?path={series_dir}")
+    d = r.get_json()
+    assert r.status_code == 200
+    assert d['count'] == 0
+    assert d['missing'] == []
+
+
+def test_library_missing_single_episode_file(app_client, monkeypatch):
+    """Contrôle : sans plage, l'épisode absent est bien signalé manquant."""
+    from src import db
+
+    series_dir = "out/tv/Show X [tvdbid-555]"
+    os.makedirs(series_dir, exist_ok=True)
+    with open(f"{series_dir}/Show X - S01E01 - Pilot.mkv", 'wb') as f:
+        f.write(b'x')
+
+    db.series_episodes_set('555', {'episodes': [
+        {'s': 1, 'e': 1, 'title': 'Pilot'},
+        {'s': 1, 'e': 2, 'title': 'Second'},
+    ]})
+
+    r = app_client.get(f"/api/library/missing?path={series_dir}")
+    d = r.get_json()
+    assert d['count'] == 1
+    assert d['missing'][0]['label'] == 'S01E02'
+
+
 def test_library_episode_inherits_series_poster(app_client):
     """Épisode sans poster dans le cache : il hérite du poster de la série
     (dossier [tvdbid-XXX]) depuis le cache de recherche, sans requête API."""
@@ -312,3 +357,60 @@ def test_library_episode_poster_from_omdb_cache(app_client, monkeypatch):
     ep = [e for e in r.get_json()['entries'] if e['name'].endswith('.mkv')][0]
     assert ep['meta'] is not None
     assert ep['meta'].get('poster') == 'https://img.test/omdb.jpg'
+
+
+def test_library_rename_folder_series_sync(app_client, monkeypatch, tmp_path):
+    """Renommage manuel d'un dossier série : fichiers + dossier renommés de
+    façon synchrone ; le parsing TVDB (cache épisodes) passe en arrière-plan."""
+    import time
+
+    from src import db
+    from src import library
+    from src.api import omdb
+
+    monkeypatch.setattr(omdb, '_SERIES_META_MEM', {})
+    monkeypatch.setattr(omdb, 'resolve_series_imdb', lambda *a, **k: 'tt9999999')
+    monkeypatch.setattr(omdb, 'fetch_omdb_single', lambda *a, **k: None)
+    episodes = [{'s': 1, 'e': 1, 'title': 'Pilot'}, {'s': 1, 'e': 2, 'title': 'Second'}]
+    monkeypatch.setattr(library, 'tvdb_series_episodes',
+                        lambda sid: db.series_episodes_set(sid, {'episodes': episodes}) or episodes)
+
+    tv_root = str(tmp_path / 'out' / 'tv')
+    folder = os.path.join(tv_root, 'bad folder')
+    os.makedirs(folder)
+    f1 = os.path.join(folder, 'Breaking Bad S01E01.mkv')
+    f2 = os.path.join(folder, 'Breaking Bad S01E02.mkv')
+    for p in (f1, f2):
+        with open(p, 'wb') as f:
+            f.write(b'x')
+    db.series_meta_set('81189', 'tt0903747', {'title': 'Breaking Bad', 'year': '2008'})
+
+    r = app_client.post('/api/library/rename-folder-series', json={
+        'path': folder, 'tvdbid': '81189', 'title': 'Breaking Bad', 'year': 2008,
+    })
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body['success'] is True
+    assert body['background'] is True
+    assert body['imdb'] == 'tt0903747'
+    assert len(body['renames']) == 2
+    new_folder = body['new_path']
+    assert os.path.isdir(new_folder)
+    assert not os.path.isdir(folder)
+    # Le dossier a été renommé (le format par défaut ne porte pas d'ID).
+    assert body['new_name'] == 'Breaking Bad'
+
+    # Le parsing TVDB + 2e passe de renommage se font en arrière-plan :
+    # on attend que les titres d'épisodes soient complétés dans les noms.
+    deadline = time.time() + 10
+    names = []
+    while time.time() < deadline:
+        names = sorted(os.listdir(new_folder))
+        if all('- Pilot.mkv' in n or '- Second.mkv' in n for n in names):
+            break
+        time.sleep(0.1)
+    assert names == ['Breaking Bad - S01E01 - Pilot.mkv',
+                     'Breaking Bad - S01E02 - Second.mkv']
+    # Le parsing TVDB s'est exécuté en arrière-plan (cache BDD rempli).
+    cached = db.series_episodes_get('81189')
+    assert cached and len(cached['episodes']) == 2

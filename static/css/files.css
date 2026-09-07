@@ -1,0 +1,216 @@
+/* ── Files grid ──────────────────────────────────────────────────────────── */
+.files-grid {
+    width: 100%; margin-top: 10px;
+    border: 1px solid var(--c-border); border-radius: 8px; overflow: hidden;
+}
+.files-grid-header,
+.file-row {
+    display: grid;
+    grid-template-columns: 1fr 2fr 185px;
+    align-items: center;
+    gap: 12px;
+    padding: 12px;
+}
+.files-grid-header .col-file { text-align: left; }
+.file-row {
+    min-height: 104px; color: var(--c-text);
+    border-bottom: 1px solid var(--c-surface3);
+}
+.file-row:last-child { border-bottom: none; }
+.file-row:hover { background: var(--c-surface2); }
+.file-row .preview-cell { display: flex; align-items: center; }
+.file-row .actions-cell { display: flex; justify-content: center; }
+.loading-row {
+    padding: 24px; text-align: center; color: var(--c-accent);
+    display: flex; align-items: center; justify-content: center; gap: 10px;
+}
+
+/* ── Filter bar ───────────────────────────────────────────────────────────── */
+.filter-bar { display: flex; gap: 10px; margin-bottom: 20px; align-items: center; flex-wrap: wrap; }
+.filter-btn {
+    padding: 0 16px; border: 1px solid var(--c-border2); background: var(--c-surface2);
+    color: var(--c-text); cursor: pointer; border-radius: var(--radius);
+    transition: all 0.2s; font-size: 1em; display: inline-flex; align-items: center;
+    gap: 6px; height: 36px;
+}
+.filter-btn.active          { background: var(--c-accent); color: white; border-color: var(--c-accent); }
+.filter-btn:hover:not(.active) { border-color: var(--c-accent); color: var(--c-accent); }
+
+/* ── Table ────────────────────────────────────────────────────────────────── */
+.files-table { width: 100%; border-collapse: collapse; margin-top: 10px; table-layout: fixed; }
+.files-table thead,
+.files-grid-header {
+    background: #222; border-bottom: 2px solid var(--c-accent);
+    font-weight: bold; color: var(--c-accent);
+    font-size: 1em; text-transform: uppercase; letter-spacing: 0.5px;
+    text-align: center;
+}
+.files-table th { padding: 12px; }
+.files-table tr          { height: 104px; }
+.files-table thead tr    { height: auto; }
+.files-table td          { padding: 12px; border-bottom: 1px solid var(--c-surface3); vertical-align: middle; color: var(--c-text); }
+.files-table tr:hover td { background: var(--c-surface2); }
+
+/* ── Preview cell ─────────────────────────────────────────────────────────── */
+.preview-wrap   { display: flex; align-items: center; gap: 12px; }
+.preview-poster {
+    width: 55px; height: 80px; background: var(--c-surface3); border-radius: 4px;
+    display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0; overflow: hidden; font-size: 1.5em; border: 1px solid var(--c-border);
+}
+.preview-poster img  { width: 100%; height: 100%; object-fit: cover; }
+.preview-info        { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; justify-content: center; }
+.preview-line1       { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 6px; min-width: 0; }
+.preview-chips       { display: inline-flex; flex-wrap: wrap; gap: 3px 8px; min-width: 0; }
+.preview-title       { font-weight: bold; color: var(--c-bright); font-size: 1em; }
+.preview-year        { color: #9e9e9e; font-weight: normal; font-size: 1em; }
+.rename-preview      { color: var(--c-accent); font-size: 1em; margin-top: 2px; word-break: break-all; font-family: monospace; }
+.no-preview          { color: var(--c-text4); font-size: 1em; font-style: italic; }
+.file-name-cell { word-break: break-all; font-size: 1em; color: var(--c-text2); }
+.loading-cell        { color: var(--c-accent); font-size: 1em; }
+
+/* ── Actions cell ─────────────────────────────────────────────────────────── */
+.actions-cell {
+    text-align: center; vertical-align: middle; padding: 8px;
+}
+.actions-cell .btn-group {
+    display: flex; flex-wrap: wrap; gap: 6px;
+    align-items: center; justify-content: center;
+}
+.btn-small {
+    padding: 0; font-size: 1em; border: none; border-radius: 4px;
+    cursor: pointer; transition: all 0.2s;
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 48px; height: 36px; flex-shrink: 0;
+}
+.btn-small.move,
+.btn-small.revert,
+.btn-small.search {
+    background: var(--c-border2); color: var(--c-bright); border: 1px solid var(--c-text4);
+}
+.btn-small.move:hover,
+.btn-small.revert:hover,
+.btn-small.search:hover {
+    background: var(--c-accent); color: white; border-color: var(--c-accent);
+}
+.btn-small.rename {
+    background: var(--c-accent); color: white; border-color: var(--c-accent);
+}
+.btn-small.rename:hover { background: var(--c-accent-hv); }
+.btn-small.ok-label {
+    background: var(--c-success-bg); color: var(--c-success); cursor: default;
+    width: 48px; height: 36px; border-radius: 4px;
+    display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0;
+}
+.btn-small:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* ── Progress cell ────────────────────────────────────────────────────────── */
+.progress-bar-container {
+    width: 100%; height: 24px; background: var(--c-surface3);
+    border-radius: 4px; overflow: hidden; border: 1px solid var(--c-border);
+    position: relative; isolation: isolate;
+}
+
+.progress-bar {
+    height: 100%; background: linear-gradient(90deg, var(--c-accent), #ff9800);
+    transition: width 0.25s ease-out;
+    display: flex; align-items: center; justify-content: center;
+}
+
+.progress-bar--pulse {
+    background: linear-gradient(90deg, var(--c-accent), #ff9800, var(--c-accent));
+    background-size: 200% 100%;
+    animation: progress-shimmer 1.2s linear infinite;
+}
+
+@keyframes progress-shimmer {
+    0%   { background-position: 200% 0; }
+    100% { background-position: -200% 0; }
+}
+
+.progress-text {
+    position: absolute; top: 50%; left: 50%;
+    transform: translate(-50%, -50%);
+    color: white; font-weight: bold; font-size: 1em;
+    text-shadow: 0 1px 2px rgba(0,0,0,0.5);
+    pointer-events: none;
+}
+
+.progress-stats {
+    display: flex; gap: 8px; font-size: 1em;
+    color: var(--c-text3); flex-wrap: wrap;
+    justify-content: center;
+}
+
+.progress-stats span {
+    background: var(--c-surface3);
+    padding: 2px 6px; border-radius: 3px;
+    border: 1px solid var(--c-border2);
+}
+
+/* ── Transferring state ───────────────────────────────────────────────────── */
+.file-row.transferring {
+    position: relative;
+}
+.file-row.transferring .preview-wrap {
+    opacity: 0.8;
+}
+
+.transfer-cell {
+    grid-column: 1 / -1;
+    position: relative;
+    min-height: 104px;
+    display: flex;
+}
+
+.transfer-overlay {
+    position: absolute; inset: 0;
+    background: var(--c-surface);
+    border: 1px solid var(--c-border);
+    border-left: 4px solid var(--c-accent);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 8px; z-index: 5; padding: 14px 24px;
+}
+
+.transfer-overlay-title {
+    display: flex; align-items: center; gap: 8px;
+    color: var(--c-accent); font-weight: 700; font-size: 1.05em;
+    max-width: 100%; min-width: 0;
+}
+.transfer-overlay-label { flex-shrink: 0; }
+.transfer-overlay-file {
+    color: var(--c-text2); font-size: 1em; font-family: var(--font-mono, monospace);
+    flex: 1 1 auto; min-width: 0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+.transfer-progress-line {
+    display: flex; align-items: center; gap: 14px;
+    width: 100%; max-width: 560px;
+}
+.transfer-progress-line .progress-bar-container {
+    flex: 1 1 auto; height: 26px;
+}
+.transfer-progress-line .progress-stats {
+    flex-shrink: 0; display: flex; align-items: center; gap: 8px;
+}
+.transfer-progress-line .progress-stats span {
+    font-size: 0.95em; white-space: nowrap;
+}
+
+.transfer-overlay--done {
+    border-left-color: var(--c-success);
+    background: var(--c-success-bg);
+}
+.transfer-overlay--done .transfer-overlay-title {
+    color: var(--c-success);
+}
+.transfer-overlay--error {
+    border-left-color: var(--c-error);
+    background: var(--c-error-bg);
+}
+.transfer-overlay--error .transfer-overlay-title {
+    color: var(--c-error);
+}

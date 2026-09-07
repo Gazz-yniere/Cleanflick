@@ -36,6 +36,23 @@ def broadcast_scan_refresh():
             pass
 
 
+def broadcast_library_refresh():
+    """Notifie les clients SSE que la bibliothèque a changé (renommage de
+    dossier série en arrière-plan) pour un rafraîchissement incrémental."""
+    payload = json.dumps({'event': 'library-refresh', 'ts': time.time()})
+    dead = []
+    for client in list(state.scan_clients):
+        try:
+            client.put(payload)
+        except Exception:
+            dead.append(client)
+    for client in dead:
+        try:
+            state.scan_clients.remove(client)
+        except Exception:
+            pass
+
+
 _usage_last_push = [0.0]
 _usage_pending = [False]
 

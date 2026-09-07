@@ -19,11 +19,13 @@ def _ensure_dir(path):
 def _static_version():
     base = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'static')
     total = 0
-    for name in ('app.js', 'i18n.js', 'app.css'):
-        try:
-            total += int(os.path.getmtime(os.path.join(base, name)))
-        except OSError:
-            pass
+    for root, _dirs, files in os.walk(base):
+        for name in files:
+            if name.endswith(('.js', '.css')):
+                try:
+                    total += int(os.path.getmtime(os.path.join(root, name)))
+                except OSError:
+                    pass
     return total
 
 
@@ -97,6 +99,30 @@ def _series_folder_name(new_name):
     stem = Path(new_name).stem
     m = re.match(r'^(.*?)(?:\s+-\s+(?:S\d{2}E\d{2}|\d+x\d{2})\s+-\s+.*)?$', stem)
     return (m.group(1).strip() if m and m.group(1).strip() else stem)
+
+
+def _refresh_scan_snapshot():
+    """Met à jour le snapshot de scan pour que le watcher ne traite pas le
+    changement comme un nouveau fichier externe."""
+    from . import watcher
+    try:
+        with state.scan_watch_lock:
+            state.scan_last_snapshot = watcher._scan_snapshot()
+    except Exception:
+        pass
+
+
+def _migrate_file_cache(old_p, new_p):
+    """Migre l'entrée de cache de recherche de l'ancien vers le nouveau chemin."""
+    try:
+        if os.path.exists(new_p):
+            fsize = os.path.getsize(new_p)
+            fmtime = int(os.path.getmtime(new_p))
+            old_fkey = hashlib.md5(f"{os.path.abspath(old_p)}|{os.path.getsize(old_p) if os.path.exists(old_p) else 0}|{int(os.path.getmtime(old_p)) if os.path.exists(old_p) else 0}".encode('utf-8')).hexdigest()
+            new_fkey = hashlib.md5(f"{os.path.abspath(new_p)}|{fsize}|{fmtime}".encode('utf-8')).hexdigest()
+            db.file_cache_migrate(old_fkey, new_fkey, os.path.abspath(new_p), fsize, fmtime, os.path.basename(old_p))
+    except Exception:
+        pass
 
 
 def _make_progress(file_size=0, finished=False, error=None, phase='copying', **extra):

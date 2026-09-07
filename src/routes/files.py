@@ -7,38 +7,13 @@ from pathlib import Path
 
 from flask import Blueprint, jsonify, request
 
-from .. import db, state
+from .. import state
 from ..auth import login_required
 from ..history import load_history, save_history, append_history
-from ..utils import _move_path, _run_file_op, _ensure_dir, _series_folder_name
-from .. import watcher
+from ..utils import _move_path, _run_file_op, _ensure_dir, _series_folder_name, _refresh_scan_snapshot, _migrate_file_cache
 
 logger = logging.getLogger(__name__)
 bp = Blueprint('files', __name__)
-
-
-def _refresh_scan_snapshot():
-    """Met à jour le snapshot de scan pour que le watcher ne traite pas le
-    changement comme un nouveau fichier externe."""
-    try:
-        with state.scan_watch_lock:
-            state.scan_last_snapshot = watcher._scan_snapshot()
-    except Exception:
-        pass
-
-
-def _migrate_file_cache(old_p, new_p):
-    """Migre l'entrée de cache de recherche de l'ancien vers le nouveau chemin."""
-    try:
-        if os.path.exists(new_p):
-            fsize = os.path.getsize(new_p)
-            fmtime = int(os.path.getmtime(new_p))
-            import hashlib
-            old_fkey = hashlib.md5(f"{os.path.abspath(old_p)}|{os.path.getsize(old_p) if os.path.exists(old_p) else 0}|{int(os.path.getmtime(old_p)) if os.path.exists(old_p) else 0}".encode('utf-8')).hexdigest()
-            new_fkey = hashlib.md5(f"{os.path.abspath(new_p)}|{fsize}|{fmtime}".encode('utf-8')).hexdigest()
-            db.file_cache_migrate(old_fkey, new_fkey, os.path.abspath(new_p), fsize, fmtime, os.path.basename(old_p))
-    except Exception:
-        pass
 
 
 @bp.route('/api/rename', methods=['POST'])
