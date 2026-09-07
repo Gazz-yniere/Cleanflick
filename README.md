@@ -50,7 +50,7 @@
 - **Manual search** with full TVDB results selection (confirmed choices are remembered)
 - **Rename All / Move All** batch processing
 - **Real-time move progress** with speed, ETA, a `verifying` phase, and file-gone verification
-- **Library tab** — browse the output tree, missing-episode badges, send-back to source, folder rename/delete
+- **Library tab** — browse the output tree, missing-episode badges, send-back to source, folder rename/delete, full series-folder rename from manual search, filter sidebar (genre, age, size, rating, date, missing) and episode "present/total" counters
 - **Folder picker** for media paths
 - **Password protection** (optional)
 - **6 languages** interface (FR, EN, ES, DE, IT, PT) with language switch
@@ -74,8 +74,10 @@ CleanFlick turns messy download folders into a clean, organized media library. T
 ### 2. Library
 
 - Browses the **output** folders (`movie_output_path`, `tv_output_path`) as a tree.
-- Highlights **missing episodes** (badges on season folders).
+- Highlights **missing episodes** (badges on season folders) and shows a **present/total episode counter** on series folders.
+- **Filter sidebar**: genre facets, age/size/rating/date ranges (dual sliders) and a "Missing" filter, plus sorting.
 - Lets you **rename a folder**, **delete a folder**, or **send a file/folder back** to the source folder.
+- A manual search on a series folder triggers a **full series-folder rename** (files + folder, synchronous, per the configured TV format) while TVDB/OMDb enrichment continues in the background.
 
 ### 3. History
 
@@ -136,7 +138,7 @@ pip install -r requirements-dev.txt
 python -m pytest tests -q
 ```
 
-The suite covers the scanner (title/year/episode parsing), the pure-Python duration parser (MP4/MKV/AVI), the SQLite layer (`db.py`), the TVDB API handlers (mocked, no network) and the Flask routes (isolated app instance with a temp database).
+The suite covers the scanner (title/year/episode parsing), the pure-Python duration parser (MP4/MKV/AVI), the SQLite layer (`db.py`), the TVDB API handlers (mocked, no network), the Flask routes (isolated app instance with a temp database), the library episode detection (including multi-episode files) and the filename generation module.
 
 Linting uses [ruff](https://docs.astral.sh/ruff/):
 
@@ -167,7 +169,9 @@ Copy `config.example.json` to `config.json` and fill in your settings:
   "movie_output_path": "/movies",
   "tv_output_path": "/tv_shows",
   "movie_format": "{n} ({y})",
-  "tv_format": "{n} - {s00e00} - {t}"
+  "tv_format": "{n} - {s00e00} - {t}",
+  "lib_fast_scan": true,
+  "show_s00_specials": false
 }
 ```
 
@@ -180,6 +184,8 @@ Copy `config.example.json` to `config.json` and fill in your settings:
 | `tv_output_path` | Destination for renamed TV shows | `/tv_shows` |
 | `movie_format` | Naming format for movies | `{n} ({y})` |
 | `tv_format` | Naming format for TV shows | `{n} - {s00e00} - {t}` |
+| `lib_fast_scan` | Fast library scan (non-recursive folder sizes) | `true` |
+| `show_s00_specials` | Include special episodes (season 0) in missing episodes and episode counters | `false` |
 
 > **Note:** Both keys can also be entered directly in the **Settings → Config** tab of the UI. The "test" button next to each input checks connectivity before saving.
 
@@ -254,6 +260,7 @@ CleanFlick/
 │   ├── auth.py               # Authentification (mot de passe)
 │   ├── history.py            # Historique des opérations (persisté en base)
 │   ├── utils.py              # Déplacement de fichiers, progression, helpers
+│   ├── naming.py             # Génération des noms (port du JS generateFilename)
 │   ├── db.py                 # SQLite (history + caches)
 │   ├── scanner.py            # Scan des fichiers médias (MediaScanner)
 │   ├── mediaduration.py      # Lecture de durée (MP4/MKV/AVI, Python pur)
@@ -291,16 +298,32 @@ CleanFlick/
 │   ├── test_mediaduration.py
 │   ├── test_db.py
 │   ├── test_api_handler.py
-│   └── test_app.py
+│   ├── test_app.py
+│   ├── test_library.py       # Références d'épisodes (multi-épisodes inclus)
+│   └── test_naming.py        # Génération de noms (port JS)
 ├── Dockerfile                # Docker build
 ├── docker-compose.yml        # Docker Compose config
 ├── templates/
 │   ├── index.html            # Main page
 │   └── login.html            # Login page
 ├── static/
-│   ├── app.js                # Frontend logic
-│   ├── i18n.js               # Translations (fr, en, es, de, it, pt)
-│   ├── app.css               # All styles (base, files, config, login)
+│   ├── css/                  # Styles par partie
+│   │   ├── base.css          # Variables, layout, header, nav, boutons, modal
+│   │   ├── files.css         # Grille fichiers, aperçus, actions, transfert
+│   │   ├── library.css       # Bibliothèque : filtres, sliders, arbre
+│   │   ├── history.css       # Historique
+│   │   ├── config.css        # Configuration
+│   │   ├── picker.css        # Sélecteur de dossiers
+│   │   ├── search.css        # Résultats de recherche
+│   │   └── login.css         # Page de connexion
+│   ├── js/                   # Logique frontend par partie
+│   │   ├── i18n.js           # Translations (fr, en, es, de, it, pt)
+│   │   ├── core/             # utils, format, modal
+│   │   ├── files/            # scan, render, rename, move, search
+│   │   ├── library/          # tree, sort, filters, sliders, enrich, durations, actions
+│   │   ├── history/          # Historique
+│   │   ├── config/           # config, picker
+│   │   └── app.js            # Navigation + init
 │   ├── CleanFlick.png        # Logo
 │   └── CleanFlick.ico        # Favicon
 ```
@@ -359,6 +382,29 @@ environment:
 ---
 
 ## Changelog
+
+### [1.0.10] - 2026-09-07
+
+**Added**
+- Frontend rework — `static/app.js`, `static/app.css` and `static/i18n.js` are split into per-feature files: `static/js/` (`core/`, `files/`, `library/`, `history/`, `config/` + `app.js`) and `static/css/` (8 stylesheets). Purely structural: classic scripts, global functions, no build step
+- `src/naming.py` — server-side port of the JS `generateFilename` / `interpolate` / `seriesFolderName`: library renaming is now computed in Python (translation tokens and numeric formats included)
+- Full series-folder rename (`POST /api/library/rename-folder-series`) — from a manual search on a library folder: files **and** folder renamed synchronously using the configured TV format; TVDB parsing (episode titles), a second rename pass and OMDb enrichment continue in the background, followed by a `library-refresh` SSE event
+- Episode "present / total" counter on library series folders (`ep_present` / `ep_total`; S00 included only when the option is enabled)
+- Multi-episode files — `S01E01-E02`, `S01E01E02`, `S01E01, E02` and `1x02-03` are recognized in the missing-episode detection (one file covers every episode in the range)
+- Library: filter sidebar — genre facets, age/size/rating/date ranges (dual sliders) + a "Missing" filter, sorting moved into the sidebar
+- `show_s00_specials` option (Config) — include special episodes (season 0) in missing episodes and episode counters
+- Tests — `tests/test_naming.py` (filename generation) and `tests/test_library.py` (episode refs, multi-episode); 3 route tests added to `tests/test_app.py`
+
+**Changed**
+- Static cache-bust — `_static_version()` now walks every `.js`/`.css` under `static/` instead of a fixed list of 3 files
+- `scripts/check_js.py` — checks brace/paren balance of all `static/js/**/*.js` instead of only `static/app.js`
+- `present_episodes()` memoized by folder mtime (`_EP_CACHE`) — re-scanning a series folder costs a single `scandir`
+- Shared helpers `_refresh_scan_snapshot()` and `_migrate_file_cache()` moved from `src/routes/files.py` to `src/utils.py` (reused by the library routes)
+- README — `static/` tree updated for the js/css split
+
+**Fixed**
+- Multi-episode files under-counted — missing-episode detection only recognized the first episode of an `S01E01-E02` file (the rest wrongly showed as missing)
+- Incomplete episode marker — the per-filename episode index in the library ignored multi-episode ranges
 
 ### [1.0.9] - 2026-09-01
 

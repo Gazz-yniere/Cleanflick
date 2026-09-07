@@ -6,7 +6,13 @@
     <title>CleanFlick</title>
     <link rel="icon" type="image/x-icon" href="{{ url_for('static', filename='CleanFlick.ico') }}">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@mdi/font@7.4.47/css/materialdesignicons.min.css">
-    <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}?v={{ cache_bust }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/base.css') }}?v={{ cache_bust }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/files.css') }}?v={{ cache_bust }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/library.css') }}?v={{ cache_bust }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/history.css') }}?v={{ cache_bust }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/config.css') }}?v={{ cache_bust }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/picker.css') }}?v={{ cache_bust }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/search.css') }}?v={{ cache_bust }}">
 </head>
 <body>
 <div class="container">
@@ -56,20 +62,67 @@
 
         <!-- ===== LIBRAIRIE ===== -->
         <div id="library" class="section">
-            <div class="filter-bar">
-                <button class="btn btn-primary" onclick="refreshLibrary()" data-i18n="btn_refresh_library"><i class="mdi mdi-refresh"></i></button>
-                <span class="lib-sort">
+            <div class="lib-layout">
+                <aside class="lib-sidebar">
+                    <button class="btn btn-primary" onclick="refreshLibrary()" data-i18n="btn_refresh_library"><i class="mdi mdi-refresh"></i></button>
+
+                    <div class="lib-side-title" data-i18n="lib_side_filters">Filtres</div>
                     <button class="filter-btn active" id="lib-filter" onclick="cycleLibFilter()"><i class="mdi mdi-filter-variant"></i><span data-i18n="filter_all">Tous</span></button>
+                    <span class="lib-filter-wrap">
+                        <button class="filter-btn" id="lib-filter-genre" onclick="toggleLibFilterPanel('genre')"><i class="mdi mdi-tag-multiple-outline"></i><span data-i18n="lib_filter_genre">Genre</span></button>
+                        <div class="lib-filter-panel" id="lib-genre-panel">
+                            <button class="lib-filter-all" onclick="libFacetSelectAll('genre', false)" data-i18n="lib_filter_all">Tous</button>
+                            <div class="lib-filter-list" id="lib-genre-list"></div>
+                        </div>
+                    </span>
+
+                    <div class="lib-side-slider">
+                        <div class="lib-side-slider-head">
+                            <span class="lib-side-slider-label"><i class="mdi mdi-account-group-outline"></i> <span data-i18n="lib_filter_age">Tranche d'âge</span></span>
+                            <button class="lib-side-reset" onclick="libAgeReset()" title="Tous"><i class="mdi mdi-filter-remove"></i></button>
+                        </div>
+                        <div class="dual-slider" id="lib-age-slider"></div>
+                    </div>
+
+                    <div class="lib-side-slider">
+                        <div class="lib-side-slider-head">
+                            <span class="lib-side-slider-label"><i class="mdi mdi-database"></i> <span data-i18n="lib_filter_size">Taille</span></span>
+                            <button class="lib-side-reset" onclick="libSizeReset()" title="Tous"><i class="mdi mdi-filter-remove"></i></button>
+                        </div>
+                        <div class="dual-slider" id="lib-size-slider"></div>
+                    </div>
+
+                    <div class="lib-side-slider">
+                        <div class="lib-side-slider-head">
+                            <span class="lib-side-slider-label"><i class="mdi mdi-star"></i> <span data-i18n="lib_filter_rating">Note</span></span>
+                            <button class="lib-side-reset" onclick="libRatingReset()" title="Tous"><i class="mdi mdi-filter-remove"></i></button>
+                        </div>
+                        <div class="dual-slider" id="lib-rating-slider"></div>
+                    </div>
+
+                    <div class="lib-side-slider">
+                        <div class="lib-side-slider-head">
+                            <span class="lib-side-slider-label"><i class="mdi mdi-calendar-range"></i> <span data-i18n="lib_filter_date">Date</span></span>
+                            <button class="lib-side-reset" onclick="libDateReset()" title="Tous"><i class="mdi mdi-filter-remove"></i></button>
+                        </div>
+                        <div class="dual-slider" id="lib-date-slider"></div>
+                    </div>
+
+                    <button class="filter-btn" id="lib-filter-missing" onclick="toggleLibMissingFilter()"><i class="mdi mdi-alert-circle-outline"></i><span data-i18n="lib_filter_missing">Manquants</span></button>
+
+                    <div class="lib-side-title" data-i18n="lib_sort_title">Trier par</div>
                     <button class="filter-btn active" id="lib-sort-name" onclick="setLibSort('name')"><i class="mdi mdi-sort-ascending"></i><span data-i18n="lib_sort_name">Alphabétique</span></button>
                     <button class="filter-btn" id="lib-sort-size" onclick="setLibSort('size')"><i class="mdi mdi-sort"></i><span data-i18n="lib_sort_size">Taille</span></button>
                     <button class="filter-btn" id="lib-sort-rating" onclick="setLibSort('rating')"><i class="mdi mdi-star"></i><span data-i18n="lib_sort_rating">Note</span></button>
-                </span>
-            </div>
-            <div id="library-tree"></div>
-            <div class="lib-legend">
-                <span class="lib-badge lib-badge--ok"><i class="mdi mdi-check-circle"></i></span> <span data-i18n="lib_valid"></span>
-                &nbsp;
-                <span class="lib-badge lib-badge--warn"><i class="mdi mdi-alert"></i></span> <span data-i18n="lib_invalid"></span>
+                </aside>
+                <div class="lib-main">
+                    <div id="library-tree"></div>
+                    <div class="lib-legend">
+                        <span class="lib-badge lib-badge--ok"><i class="mdi mdi-check-circle"></i></span> <span data-i18n="lib_valid"></span>
+                        &nbsp;
+                        <span class="lib-badge lib-badge--warn"><i class="mdi mdi-alert"></i></span> <span data-i18n="lib_invalid"></span>
+                    </div>
+                </div>
             </div>
         </div>
 
@@ -166,6 +219,15 @@
                             <span class="cfg-toggle-text">
                                 <span data-i18n="cfg_lib_fast_scan"></span>
                                 <span class="hint" data-i18n="cfg_lib_fast_scan_hint"></span>
+                            </span>
+                        </label>
+                    </div>
+                    <div class="form-field cfg-toggle-row">
+                        <label class="cfg-toggle" for="show_s00_specials">
+                            <input type="checkbox" id="show_s00_specials">
+                            <span class="cfg-toggle-text">
+                                <span data-i18n="cfg_show_s00"></span>
+                                <span class="hint" data-i18n="cfg_show_s00_hint"></span>
                             </span>
                         </label>
                     </div>
@@ -300,7 +362,7 @@
 
     <footer class="app-footer">
         <span data-i18n="footer_text"></span>
-        <span class="footer-meta">· <a href="https://github.com/Gazz-yniere/Cleanflick" target="_blank">GitHub</a> · v1.0.9</span>
+        <span class="footer-meta">· <a href="https://github.com/Gazz-yniere/Cleanflick" target="_blank">GitHub</a> · v1.0.10</span>
     </footer>
 </div>
 
@@ -394,7 +456,25 @@
     </div>
 </div>
 
-<script src="{{ url_for('static', filename='i18n.js') }}?v={{ cache_bust }}"></script>
-<script src="{{ url_for('static', filename='app.js') }}?v={{ cache_bust }}"></script>
+<script src="{{ url_for('static', filename='js/i18n.js') }}?v={{ cache_bust }}"></script>
+<script src="{{ url_for('static', filename='js/core/utils.js') }}?v={{ cache_bust }}"></script>
+<script src="{{ url_for('static', filename='js/core/format.js') }}?v={{ cache_bust }}"></script>
+<script src="{{ url_for('static', filename='js/core/modal.js') }}?v={{ cache_bust }}"></script>
+<script src="{{ url_for('static', filename='js/files/scan.js') }}?v={{ cache_bust }}"></script>
+<script src="{{ url_for('static', filename='js/files/render.js') }}?v={{ cache_bust }}"></script>
+<script src="{{ url_for('static', filename='js/files/rename.js') }}?v={{ cache_bust }}"></script>
+<script src="{{ url_for('static', filename='js/files/move.js') }}?v={{ cache_bust }}"></script>
+<script src="{{ url_for('static', filename='js/files/search.js') }}?v={{ cache_bust }}"></script>
+<script src="{{ url_for('static', filename='js/library/library.js') }}?v={{ cache_bust }}"></script>
+<script src="{{ url_for('static', filename='js/library/lib-sort.js') }}?v={{ cache_bust }}"></script>
+<script src="{{ url_for('static', filename='js/library/lib-filters.js') }}?v={{ cache_bust }}"></script>
+<script src="{{ url_for('static', filename='js/library/lib-sliders.js') }}?v={{ cache_bust }}"></script>
+<script src="{{ url_for('static', filename='js/library/lib-enrich.js') }}?v={{ cache_bust }}"></script>
+<script src="{{ url_for('static', filename='js/library/lib-durations.js') }}?v={{ cache_bust }}"></script>
+<script src="{{ url_for('static', filename='js/library/lib-actions.js') }}?v={{ cache_bust }}"></script>
+<script src="{{ url_for('static', filename='js/history/history.js') }}?v={{ cache_bust }}"></script>
+<script src="{{ url_for('static', filename='js/config/config.js') }}?v={{ cache_bust }}"></script>
+<script src="{{ url_for('static', filename='js/config/picker.js') }}?v={{ cache_bust }}"></script>
+<script src="{{ url_for('static', filename='js/app.js') }}?v={{ cache_bust }}"></script>
 </body>
 </html>

@@ -1,5 +1,28 @@
 # Changelog
 
+## [1.0.10] - 2026-09-07
+
+### Added
+- **Frontend rework** — `static/app.js` (2539 lines), `static/app.css` and `static/i18n.js` are split into per-feature files: `static/js/` (`core/`, `files/`, `library/`, `history/`, `config/` + `app.js`) and `static/css/` (8 stylesheets). Purely structural: classic scripts, global functions, no build step.
+- **`src/naming.py`** — server-side port of the JS `generateFilename` / `interpolate` / `seriesFolderName`: library renaming is now computed in Python, translation tokens (`{n:fr}`) and numeric formats included.
+- **Full series-folder rename** (`POST /api/library/rename-folder-series`) — from a manual search on a library folder: files **and** folder are renamed synchronously per the configured TV format; TVDB parsing (episode titles), a second rename pass and OMDb enrichment continue in the background, followed by a `library-refresh` SSE event.
+- **Episode "present / total" counter** on library series folders (`ep_present` / `ep_total`; S00 included only when the option is enabled).
+- **Multi-episode files** — `S01E01-E02`, `S01E01E02`, `S01E01, E02` and `1x02-03` are recognized in the missing-episode detection (one file covers every episode in the range).
+- **Library: filter sidebar** — genre facets, age/size/rating/date ranges (dual sliders) + a "Missing" filter, sorting moved into the sidebar.
+- **`show_s00_specials` option** (Config) — include special episodes (season 0) in missing episodes and episode counters.
+- **Tests** — `tests/test_naming.py` (filename generation) and `tests/test_library.py` (episode refs, multi-episode); 3 route tests added to `tests/test_app.py` (multi-episode missing episodes, synchronous series-folder rename).
+
+### Changed
+- **Static cache-bust** — `_static_version()` walks every `.js`/`.css` under `static/` instead of a fixed list of 3 files.
+- **`scripts/check_js.py`** — checks brace/paren balance of all `static/js/**/*.js` instead of only `static/app.js`.
+- **`present_episodes()` memoized** by folder mtime (`_EP_CACHE`) — re-scanning a series folder costs a single `scandir`.
+- **Shared helpers** — `_refresh_scan_snapshot()` and `_migrate_file_cache()` moved from `src/routes/files.py` to `src/utils.py` (reused by the library routes).
+- **README** — `static/` tree updated for the js/css split.
+
+### Fixed
+- **Multi-episode files under-counted** — missing-episode detection only recognized the first episode of an `S01E01-E02` file (the rest wrongly showed as missing).
+- **Incomplete episode marker** — the per-filename episode index in the library ignored multi-episode ranges.
+
 ## [1.0.9] - 2026-09-01
 
 ### Added

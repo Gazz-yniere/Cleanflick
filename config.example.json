@@ -7,5 +7,6 @@
     "movie_format":"{n} ({y})",
     "tv_format":"{n} - {s00e00} - {t}",
     "lib_fast_scan": true,
-    "cache_refresh_days": 0
+    "cache_refresh_days": 0,
+    "show_s00_specials": false
 }
