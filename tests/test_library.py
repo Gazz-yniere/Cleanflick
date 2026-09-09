@@ -30,3 +30,59 @@ def test_present_episodes_multi_episode_file(tmp_path):
     (d / 'Korra - S01E01-E02 - Welcome & Leaf.avi').write_bytes(b'x')
     (d / 'Korra - S01E03 - The Revelation.avi').write_bytes(b'x')
     assert library.present_episodes(str(d)) == {(1, 1), (1, 2), (1, 3)}
+
+
+def test_rename_subtitles_matching_stem(tmp_path):
+    d = tmp_path / 'series'
+    d.mkdir()
+    video = d / 'Show - S01E01.mkv'
+    video.write_bytes(b'x')
+    sub = d / 'Show - S01E01.srt'
+    sub.write_bytes(b'x')
+    out = library.rename_subtitles_for_video(str(video), 'Show - S01E01 - Pilot.mkv')
+    assert len(out) == 1
+    assert (d / 'Show - S01E01 - Pilot.srt').exists()
+    assert not sub.exists()
+
+
+def test_rename_subtitles_orphan_multi_episode(tmp_path):
+    """SRT orphelin (marqueurs multi-épisodes) aligné sur le nouveau nom du vidéo."""
+    d = tmp_path / 'series'
+    d.mkdir()
+    video = d / 'Show - S01E01-E02.mkv'
+    video.write_bytes(b'x')
+    sub = d / 'Show S01E01-E02.srt'
+    sub.write_bytes(b'x')
+    out = library.rename_subtitles_for_video(str(video), 'Show - S01E01-E02 - Pilot & Second.mkv')
+    assert len(out) == 1
+    assert (d / 'Show - S01E01-E02 - Pilot & Second.srt').exists()
+    assert not sub.exists()
+
+
+def test_rename_subtitles_other_episode_untouched(tmp_path):
+    """Le SRT d'un autre épisode du même dossier n'est pas touché."""
+    d = tmp_path / 'series'
+    d.mkdir()
+    video = d / 'Show - S01E01.mkv'
+    video.write_bytes(b'x')
+    sub = d / 'Show - S01E01.srt'
+    sub.write_bytes(b'x')
+    other = d / 'Show - S01E02.srt'
+    other.write_bytes(b'x')
+    out = library.rename_subtitles_for_video(str(video), 'Show - S01E01 - Pilot.mkv')
+    assert len(out) == 1
+    assert (d / 'Show - S01E01 - Pilot.srt').exists()
+    assert other.exists()  # S01E02 inchangé
+
+
+def test_rename_subtitles_movie_no_refs(tmp_path):
+    """Film (pas de marqueur d'épisode) : seul le SRT au même stem suit."""
+    d = tmp_path / 'movies'
+    d.mkdir()
+    video = d / 'Movie 2020.mkv'
+    video.write_bytes(b'x')
+    sub = d / 'Movie 2020.srt'
+    sub.write_bytes(b'x')
+    out = library.rename_subtitles_for_video(str(video), 'Movie (2020).mkv')
+    assert len(out) == 1
+    assert (d / 'Movie (2020).srt').exists()

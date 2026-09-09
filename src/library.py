@@ -1,6 +1,7 @@
 """Bibliothèque : tailles de dossiers, épisodes de séries, présence sur disque."""
 import os
 import re
+import time
 import logging
 from pathlib import Path
 
@@ -11,6 +12,8 @@ logger = logging.getLogger(__name__)
 _FOLDER_DIR_CACHE = {}      # path -> (mtime, size) : taille de dossier (non récursif)
 _EP_CACHE = {}              # path -> (mtime, set) : épisodes (saison, numéro) présents
 VIDEO_EXT = {'.mkv', '.mp4', '.avi', '.mov', '.wmv', '.m4v', '.ts', '.flv', '.webm'}
+SUBTITLE_EXT = {'.srt', '.sub', '.ass', '.ssa', '.vtt', '.idx'}
+_SUB_MARKER = r'[Ss]\d{1,2}[Ee]\d{1,3}(?:[-–—~]\s*[Ee]\d{1,3}|[Ee]\d{1,3})?|\b\d{1,2}x\d{2}(?:[-–—~]\d{2})?'
 
 
 def folder_size(path, recursive=True):
@@ -91,14 +94,52 @@ def folder_size(path, recursive=True):
     return total
 
 
+def folder_size_direct(path):
+    """Taille des fichiers directement contenus dans un dossier.
+
+    Cette variante ne descend jamais dans les sous-dossiers : elle est destinée
+    au premier rendu de l'arbre, où une taille complète serait trop coûteuse.
+    """
+    total = 0
+    try:
+        for entry in os.scandir(path):
+            try:
+                if not entry.is_dir(follow_symlinks=False):
+                    total += entry.stat(follow_symlinks=False).st_size
+            except OSError:
+                pass
+    except OSError:
+        pass
+    return total
+
+
 def tvdb_series_episodes(series_id):
     """Liste complète des épisodes TVDB (toutes saisons), mise en cache 24h."""
     cached = db.series_episodes_get(series_id)
-    if cached and cached.get('episodes'):
-        return cached['episodes']
+    stale = None
+    order = 'default'
     try:
-        res = state.api_handler.get_series_episodes(series_id)
-        raw = [{'s': e.get('s'), 'e': e.get('e'), 'title': e.get('title', '')}
+        meta = (db.series_meta_get(str(series_id)) or {}).get('data') or {}
+        configured = str(meta.get('episode_order') or state.config.get('tvdb_episode_order') or 'auto').lower()
+        types = meta.get('season_types') or []
+        has_netflix = any('netflix' in str(t.get('alternateName') or '').lower()
+                          for t in types if isinstance(t, dict))
+        if configured in ('alternate', 'netflix') or (configured == 'auto' and has_netflix):
+            order = 'alternate'
+    except Exception:
+        pass
+    if cached and cached.get('episodes'):
+        stale = cached['episodes']
+    if cached and cached.get('episodes') and cached.get('order', 'default') == order and len(cached['episodes']) < 500:
+        # Cache obsolète sans airdate (précédent au split manquant/à venir) : on
+        # re-récupère pour que la date de diffusion soit disponible.
+        if any('airdate' not in e for e in cached['episodes']):
+            stale = cached['episodes']
+        else:
+            return cached['episodes']
+    try:
+        res = state.api_handler.get_series_episodes(series_id, season_type=order)
+        raw = [{'s': e.get('s'), 'e': e.get('e'), 'title': e.get('title', ''), 'airdate': e.get('airdate', '')}
                for e in res.get('episodes', []) if e.get('s') is not None and e.get('e') is not None]
         # Déduplication par (saison, episode) : la réponse TVDB peut contenir des doublons.
         episodes = []
@@ -110,11 +151,11 @@ def tvdb_series_episodes(series_id):
             seen.add(key)
             episodes.append(e)
         if episodes:
-            db.series_episodes_set(series_id, {'episodes': episodes})
+            db.series_episodes_set(series_id, {'episodes': episodes, 'order': order})
             return episodes
     except Exception as e:
         logger.warning(f"Missing-episodes TVDB fetch error for {series_id}: {e}")
-    return cached.get('episodes', []) if cached else []
+    return stale or []
 
 
 _EP_REF_PATTERNS = [
@@ -169,6 +210,141 @@ def present_episodes(path):
     if len(_EP_CACHE) > 2000:
         _EP_CACHE.clear()
     return present
+
+
+def _stem_prefix(name):
+    """Partie du stem avant le marqueur d'épisode (ou le stem complet)."""
+    stem = Path(name).stem
+    m = re.search(_SUB_MARKER, stem, re.I)
+    return (stem[:m.start()] if m else stem).strip()
+
+
+def _norm_prefix(name):
+    """Préfixe de série normalisé (séparateurs retirés) pour comparaison :
+    « Show - » et « Show » → « show » ; « Breaking Bad » → « breakingbad »."""
+    p = _stem_prefix(name)
+    p = re.sub(r'[\s\-._]+', '', p).lower()
+    return p
+
+
+def rename_subtitles_for_video(video_path, new_video_name, refs=None, old_name=None):
+    """Renomme les sous-titres d'un fichier vidéo en conservant le même stem.
+
+    Deux cas gérés :
+    1. Sous-titres « propres » : même stem que le nom actuel (ou `old_name`)
+       du vidéo (ex. « Show - S01E01.mkv » + « Show - S01E01.srt ») →
+       renommés en parallèle du vidéo.
+    2. Sous-titres orphelins : leur nom contient les mêmes marqueurs
+       d'épisode que le vidéo (SxxExx / NxNN, multi-épisodes inclus) et le
+       même préfixe de série ; le nouveau stem du vidéo est alors imposé au
+       sous-titre (ex. « Show S01E01-E02.srt » + « Show - S01E01-E02.mkv »).
+
+    `old_name` : nom précédent du vidéo (si déjà renommé) — sinon déduit du
+    chemin. `refs` : liste de (saison, épisode) du vidéo, pour le cas 2.
+    Renvoie la liste des paires (ancien_chemin, nouveau_chemin)."""
+    video_path = os.path.abspath(video_path)
+    d = os.path.dirname(video_path)
+    base = old_name or os.path.basename(video_path)
+    new_video_name = new_video_name or base
+    new_stem = Path(new_video_name).stem
+    old_stem_l = Path(base).stem.lower()
+    old_prefix = _norm_prefix(base)
+    if not refs:
+        refs = episode_refs(base)
+    renames = []
+    try:
+        entries = list(os.scandir(d))
+    except OSError:
+        return renames
+    for entry in entries:
+        if not entry.is_file(follow_symlinks=False):
+            continue
+        ext = Path(entry.name).suffix.lower()
+        if ext not in SUBTITLE_EXT:
+            continue
+        sub_stem_l = Path(entry.name).stem.lower()
+        # Cas 1 : même stem que l'ancien nom du vidéo.
+        if sub_stem_l == old_stem_l:
+            target = os.path.join(d, new_stem + ext)
+            if os.path.abspath(entry.path) == target:
+                continue
+            try:
+                os.replace(entry.path, target)
+                renames.append((entry.path, target))
+            except OSError:
+                pass
+            continue
+        # Cas 2 : le sous-titre porte exactement les mêmes marqueurs
+        # d'épisode que le vidéo et le même préfixe de série → on lui
+        # impose le nouveau stem.
+        if not refs:
+            continue
+        refs_sub = episode_refs(entry.name)
+        if not refs_sub or set(refs_sub) != set(refs):
+            continue
+        sub_prefix = _norm_prefix(entry.name)
+        if sub_prefix and old_prefix and sub_prefix != old_prefix:
+            continue
+        target = os.path.join(d, new_stem + ext)
+        if os.path.abspath(entry.path) == target:
+            continue
+        try:
+            os.replace(entry.path, target)
+            renames.append((entry.path, target))
+        except OSError:
+            pass
+    return renames
+
+
+def catchup_subtitles_for_folder(folder, videos):
+    """Rattrapage folder-wide des sous-titres (scan récursif du dossier série).
+
+    Un dossier de série = une seule série : chaque sous-titre portant des
+    marqueurs d'épisode est renommé pour porter le stem du vidéo correspondant
+    (même stem), quel que soit le sous-dossier (SRT à la racine, vidéo dans
+    « Season 1/ », etc.). Idempotent : un SRT déjà au bon nom est ignoré.
+
+    `videos` : liste de (nom_final_video, refs) — refs = [(s, e), ...].
+    Renvoie la liste des paires (ancien_chemin, nouveau_chemin)."""
+    by_refs = {}
+    for name, refs in videos:
+        if not refs:
+            continue
+        by_refs.setdefault(frozenset(refs), Path(name).stem)
+    renames = []
+    for root, dirs, files in os.walk(folder):
+        dirs[:] = [x for x in dirs if not x.startswith('.')]
+        for fname in files:
+            ext = Path(fname).suffix.lower()
+            if ext not in SUBTITLE_EXT:
+                continue
+            refs_sub = episode_refs(fname)
+            if not refs_sub:
+                continue
+            new_stem = by_refs.get(frozenset(refs_sub))
+            if not new_stem:
+                continue
+            sub_path = os.path.join(root, fname)
+            target = os.path.join(root, new_stem + ext)
+            if os.path.abspath(sub_path) == os.path.abspath(target):
+                continue
+            try:
+                os.replace(sub_path, target)
+                renames.append((sub_path, target))
+            except OSError:
+                pass
+    return renames
+
+
+def episode_is_upcoming(episode):
+    """Un épisode absent du disque est « à venir » s'il n'a pas encore été
+    diffusé : date de diffusion absente (TBA) ou postérieure à aujourd'hui.
+    Dès que la date est passée (airdate <= aujourd'hui), il devient manquant."""
+    airdate = str(episode.get('airdate') or '').strip()
+    if not airdate:
+        return True
+    today = time.strftime('%Y-%m-%d')
+    return airdate[:10] > today
 
 
 def series_episodes_cached(series_id):

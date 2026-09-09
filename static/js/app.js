@@ -49,7 +49,9 @@ document.addEventListener('DOMContentLoaded', () => {
                         scanFiles();
                     } else if (data.event === 'library-refresh') {
                         // Renommage de dossier série terminé (parsing TVDB en
-                        // arrière-plan achevé) : rafraîchissement incrémental.
+                        // arrière-plan achevé) : les fichiers ont pu être renommés
+                        // une 2e fois → le cache d'arborescence est périmé.
+                        if (typeof clearLibTreeCache === 'function') clearLibTreeCache();
                         const c = document.getElementById('library-tree');
                         if (c && c.children.length) refreshLibrary();
                     } else if (data.event === 'usage-refresh') {

@@ -1,5 +1,41 @@
 # Changelog
 
+## [1.0.11] - 2026-09-09
+
+### Added
+- **Subtitles follow video renames** — `.srt` / `.sub` / `.ass` / `.ssa` / `.vtt` / `.idx` files are renamed alongside their video (same stem, including multi-episode labels), with a folder-wide catch-up pass for subtitles living in other subfolders of the series folder (e.g. SRT at the root, videos in `Season 1/`).
+- **TVDB episode order selection** — after a manual search on a series folder, the available TVDB episode orders (official / alternate / Netflix) are listed when the series has more than one; `GET`/`POST /api/library/tvdb-orders/<id>`. New `tvdb_episode_order` config option (`auto` by default: Netflix order is picked automatically when the series offers one).
+- **Upcoming episodes** — episodes not yet aired (TBA or future air date) are split out of the missing list: yellow badge + "upcoming" rows in the library, excluded from the series "present/total" counter.
+- **TVDB web link** — "open in TVDB" button on series folders, resolved via the canonical TVDB slug (new `tvdb_slug` field, `GET /api/library/tvdb-link/<id>`).
+- **Instant library reload (F5)** — the explored tree is cached in `localStorage` (1 h TTL, size-bounded with eviction of the largest folders, debounced saves); persisted folders render immediately and are re-validated in the background. Targeted invalidation on rename/move/delete.
+- **`original_title` naming token** — `{n}`-family tokens now also resolve `original_title`; translation codes accept 2- or 3-letter forms (`{n:en}` = `{n:eng}`, TVDB returns ISO 639-2/T codes).
+- **Multi-episode filename generation** — `multi_episode_label()` / `multi_episode_label_sxe()` produce `S01E01-E02` / `1x02-03` labels and episode titles are joined (`Title 1 & Title 2`) for `{s00e00}`, `{sxe}` and `{t}` overrides.
+- **Config** — `cache_refresh_days` and `tvdb_episode_order` added to `DEFAULT_CONFIG` / `config.example.json`.
+- **Tests** — 26 new tests (108 total): subtitle rename/catch-up, multi-episode labels, 2/3-letter translation codes, upcoming episodes, TVDB link/orders routes, OMDb quota retry, generic search cache, fast library render.
+
+### Improved
+- **Server-side media pre-warming** — a background worker (`src/cache.py`) queues every scanned/loaded media file: TVDB search + OMDb enrichment + duration parsing run off the HTTP request; series episodes and IMDb resolution are pre-fetched from series folder names.
+- **OMDb quota retry** — when the daily quota locks OMDb for 24 h, a flag schedules one automatic re-pass over the whole library after the lock lifts; OMDb errors are also cached (negative entries) to stop hammering a failing API.
+- **Long series episodes** — TVDB episode paging no longer stops at 20 pages (Pokémon etc.); it follows `totalPages` / `next` links up to a safety cap of 100.
+- **TVDB translations** — fetched from the TVDB translation endpoint when the search payload has none (original language + English).
+- **History batch insert** — `db.add_history_batch()` commits a whole series-folder rename in a single transaction (much faster on network shares).
+- **Fast library render** — `?fast=1` mode: non-recursive folder sizes, name-derived metadata only, durations queued non-blockingly; full enrichment re-validated right after first paint.
+- **Search cache** — `/api/search/auto` now also consults and writes the generic per-title cache (movie and TV), so a manual search reuses earlier results.
+- **Library perf** — per-request memoization of TVDB→IMDb resolution and folder sizes (F5 no longer re-queries TVDB per series), episode-list memo (5 min), `dur_pending` only while the duration is actually queued.
+- **Filters** — filters pre-load collapsed folders so they can evaluate their content; series rating no longer leaks into episode-level filter matches; folders kept visible while loading.
+- **Files tab** — files without a preview yet show a manual-search button instead of a spinner; auto-enqueue only for files without a preview.
+
+### Fixed
+- **OMDb quota not retried** after the 24 h lockout; OMDb "not found" results were not cached.
+- **Series with a Netflix alternate order** got the official episode list (wrong numbering) — now auto-detected from `seasonTypes`.
+- **Episode counters** included not-yet-aired episodes in the total.
+- **Manual search selection** did not become the cached series truth (a previous wrong association could persist) — the confirmed choice now replaces the cached series metadata.
+- **`/api/scan`** triggered an implicit TVDB episode pre-fetch — only local duration work runs in the background now (TVDB needs explicit validation).
+- **History status** re-checked every path on disk per entry — existence is now normalized once per unique path.
+- **TVDB→IMDb resolution failures** were retried on every render (F5 with many series) — short in-memory negative cache added.
+- **Rename result modal** was too narrow for long filenames — wider modal + ellipsized rows.
+- **Language tokens** failed when TVDB returned 3-letter codes (`eng`) while the template used 2-letter (`{n:en}`).
+
 ## [1.0.10] - 2026-09-07
 
 ### Added

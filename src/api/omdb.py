@@ -17,6 +17,7 @@ _OMDB_NEG_CACHE = {}       # imdb_id -> timestamp d'expiration des échecs/répo
 _OMDB_NEG_TTL = 300        # 5 min : évite de marteler OMDb (timeout ~6s) quand il est indisponible
 _OMDB_QUOTA_LOCKOUT_SECS = 86400  # 24 h : suspension OMDb une fois le quota journalier atteint
 _OMDB_QUOTA_KEY = 'omdb_quota_paused_until'  # clé persistée en base (survit aux redémarrages)
+_OMDB_RETRY_KEY = 'omdb_quota_retry_pending'
 
 
 def _omdb_quota_paused_until():
@@ -32,6 +33,22 @@ def _omdb_quota_locked():
     return time.time() < _omdb_quota_paused_until()
 
 
+def quota_retry_due():
+    """Indique qu'un quota passé doit déclencher une nouvelle tentative."""
+    try:
+        return (db.meta_get(_OMDB_RETRY_KEY, '0') == '1'
+                and not _omdb_quota_locked())
+    except Exception:
+        return False
+
+
+def mark_quota_retry_scheduled():
+    try:
+        db.meta_set(_OMDB_RETRY_KEY, '0')
+    except Exception:
+        pass
+
+
 def _omdb_quota_state():
     """État courant du quota pour l'API : {'locked': bool, 'resumes_in_secs': int}."""
     until = _omdb_quota_paused_until()
@@ -45,10 +62,11 @@ def _omdb_mark_quota_reached():
     """Persiste le verrou quota 24 h et log une alerte claire."""
     until = time.time() + _OMDB_QUOTA_LOCKOUT_SECS
     db.meta_set(_OMDB_QUOTA_KEY, str(int(until)))
+    db.meta_set(_OMDB_RETRY_KEY, '1')
     logger.warning("OMDb: quota journalier atteint — requêtes suspendues pendant 24 h")
 
 
-def fetch_omdb_single(imdb_id, title=None, year=None, is_series=False):
+def fetch_omdb_single(imdb_id, title=None, year=None, is_series=False, force=False):
     """Récupère et met en cache l'OMDb d'un seul imdb_id (repli on-demand)."""
     key = (state.config.get('omdb_api_key') or '').strip()
     if not key or not imdb_id:
@@ -56,7 +74,7 @@ def fetch_omdb_single(imdb_id, title=None, year=None, is_series=False):
     if _omdb_quota_locked():
         return None
     imdb = imdb_id.strip().lower()
-    if db.omdb_get(imdb) is not None:
+    if not force and db.omdb_get(imdb) is not None:
         return db.omdb_get(imdb)
     now = time.time()
     if imdb in _OMDB_NEG_CACHE:
@@ -77,6 +95,7 @@ def fetch_omdb_single(imdb_id, title=None, year=None, is_series=False):
             if 'limit' in err or 'quota' in err or 'request rate' in err:
                 _omdb_mark_quota_reached()
             else:
+                db.omdb_set(imdb, data)
                 _OMDB_NEG_CACHE[imdb] = now + _OMDB_NEG_TTL
             return None
         oimdb = (data.get('imdbID') or '').lower()
@@ -141,7 +160,7 @@ def attach_episode_omdb(results, season, episode):
     return results
 
 
-def fetch_omdb_episode(series_imdb, title, year, season, episode):
+def fetch_omdb_episode(series_imdb, title, year, season, episode, force=False):
     """Récupère la note OMDb d'un épisode (titre + année + saison + épisode) et la met en cache."""
     key = (state.config.get('omdb_api_key') or '').strip()
     if not key or not title or not season or not episode:
@@ -149,7 +168,7 @@ def fetch_omdb_episode(series_imdb, title, year, season, episode):
     if _omdb_quota_locked():
         return
     cache_key = f"{series_imdb}:y{year}:s{int(season):02d}e{int(episode):02d}"
-    if db.omdb_episode_get(cache_key) is not None:
+    if not force and db.omdb_episode_get(cache_key) is not None:
         return
     try:
         params = {
@@ -168,6 +187,8 @@ def fetch_omdb_episode(series_imdb, title, year, season, episode):
             logger.info(f"[OMDb épisode] {title} S{int(season):02d}E{int(episode):02d}: {data.get('Error', 'erreur')}")
             if 'limit' in err or 'quota' in err or 'request rate' in err:
                 _omdb_mark_quota_reached()
+            else:
+                db.omdb_episode_set(cache_key, data)
     except Exception as e:
         logger.warning(f"OMDb episode fetch error for {title} S{season}E{episode}: {e}")
 
@@ -189,6 +210,8 @@ def omdb_date(s):
 # Cache mémoire court (évite de relire la BDD à chaque rendu de page).
 _SERIES_META_MEM = {}
 _SERIES_META_MEM_TTL = 600
+_SERIES_IMDB_NEGATIVE = {}
+_SERIES_IMDB_NEG_TTL = 300
 
 
 def _series_imdb_map():
@@ -212,14 +235,18 @@ def series_imdb_cached(tvdb_id):
 def resolve_series_imdb(tvdb_id, title=None, year=None, force=False):
     """Récupère l'ID IMDb d'une série depuis TVDB (1 requête TVDB, cache BDD permanent).
     Les détails TVDB de la série sont aussi mis en cache.
-    Fallback : recherche TVDB par titre si l'ID TVDB est inconnu côté API."""
+    Fallback : recherche TVDB par titre si l'ID TVDB est inconnu côté API.
+    Résolution ratée (API indisponible) : cache négatif mémoire court pour ne pas
+    relancer la requête TVDB à chaque rendu (F5 avec beaucoup de séries)."""
     tvdb_id = str(tvdb_id).strip().lower()
     if not tvdb_id:
         return ''
     if not force:
         cached = db.series_meta_get(tvdb_id)
-        if cached and cached.get('data'):
+        if cached and cached.get('data') and (cached.get('data') or {}).get('tvdb_slug'):
             return cached.get('imdb_id', '')
+        if tvdb_id in _SERIES_IMDB_NEGATIVE and time.time() - _SERIES_IMDB_NEGATIVE[tvdb_id] < _SERIES_IMDB_NEG_TTL:
+            return ''
     api_handler = state.api_handler
     if not getattr(api_handler, 'tvdb', None):
         return ''
@@ -240,7 +267,10 @@ def resolve_series_imdb(tvdb_id, title=None, year=None, force=False):
             db.series_meta_set(tvdb_id, imdb, details)
             _SERIES_META_MEM[tvdb_id] = imdb
             _SERIES_META_MEM['_t'] = time.time()
-        return imdb
+            return imdb
+        _SERIES_IMDB_NEGATIVE[tvdb_id] = time.time()
+        return ''
     except Exception as e:
         logger.warning(f"Series TVDB→IMDb resolution error for {tvdb_id}: {e}")
+        _SERIES_IMDB_NEGATIVE[tvdb_id] = time.time()
         return ''

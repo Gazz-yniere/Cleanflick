@@ -1,5 +1,8 @@
 /* ── Search results ───────────────────────────────────────────────────────── */
 .search-results { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 10px; margin: 15px 0; }
+.series-order-question { color: var(--c-text2); margin: 0 0 14px; }
+.series-order-list { display: flex; flex-direction: column; gap: 8px; }
+.series-order-choice { width: 100%; justify-content: flex-start; }
 .result-item {
     border: 2px solid var(--c-border); padding: 8px; border-radius: 6px;
     cursor: pointer; text-align: center; transition: all 0.2s; background: var(--c-surface2);

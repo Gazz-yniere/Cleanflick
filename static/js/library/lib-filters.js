@@ -56,9 +56,35 @@ function libMetaMatches(node) {
     return true;
 }
 
+function libAnyFilterActive() {
+    return libFilter !== 'all' || libGenreFilter.size > 0 || libAgeRange !== null
+        || libSizeRange !== null || libRatingRange !== null || libDateRange !== null
+        || libMissingOnly;
+}
+
+// Pré-charge les enfants de tous les dossiers collapsed (sans les déplier) pour
+// que le filtre puisse évaluer leur contenu : le DOM ne contient que les nœuds
+// déjà rendus, or les enfants d'un dossier non ouvert sont chargés à la volée.
+function preloadAllFolders(container) {
+    const walk = (el) => {
+        for (const n of el.children) {
+            if (!n._sort || !n._sort.is_dir) continue;
+            if (n._loaded) continue;
+            const childrenEl = n.querySelector(':scope > .lib-children');
+            const row = n.querySelector(':scope > .lib-row');
+            if (!childrenEl || !row || !n._entry) continue;
+            n._loaded = true;
+            loadLibChildren(n._entry, childrenEl, row, 0, LIB_PAGE_SIZE, true);
+        }
+    };
+    walk(container);
+    container.querySelectorAll('.lib-children').forEach(c => walk(c));
+}
+
 function applyLibFilter() {
     const container = document.getElementById('library-tree');
     if (!container) return;
+    if (libAnyFilterActive()) preloadAllFolders(container);
     const facetsActive = libGenreFilter.size > 0 || libAgeRange !== null;
     function rangeOk(n) {
         // Taille : filtrage des fichiers uniquement (les dossiers suivent leurs enfants).
@@ -90,9 +116,19 @@ function applyLibFilter() {
                 n._valid === false;
             // Une ligne d'épisode manquant est par nature un « manquant » : on ne
             // l'exclut pas du filtre (elle ne porte pas de _missingCount).
+            // Les lignes « à venir » (jaunes) n'ont ni _missingCount ni classe
+            // --missing : elles sont donc masquées quand le filtre est actif.
             const isMissingRow = !!n.querySelector(':scope > .lib-row.lib-row--missing');
             const missingOk = !libMissingOnly || isMissingRow || (n._missingCount !== undefined && n._missingCount > 0);
-            const visible = isRootLevel || ((selfMatches && metaOk && rangeOk(n) && missingOk) || childVisible);
+            // Dossier en cours de chargement : on ne peut pas encore évaluer ses
+            // enfants (non présents dans le DOM) → on le garde visible le temps
+            // du chargement, puis le filtre est ré-appliqué (scheduleApplyLibFilter).
+            // Pour une série, la note appartient au dossier série. Une note
+            // d'épisode ne doit donc pas faire apparaître la série dans le filtre.
+            const isSeriesNode = !!(n._sort && n._sort.is_dir && n._tvdb);
+            const childCanMatch = !(libRatingRange && isSeriesNode);
+            const visible = isRootLevel || n._loading || ((selfMatches && metaOk && rangeOk(n) && missingOk)
+                || (childCanMatch && childVisible));
             n.style.display = visible ? '' : 'none';
             if (visible) anyVisible = true;
         });

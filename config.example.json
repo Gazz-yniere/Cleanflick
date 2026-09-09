@@ -8,5 +8,6 @@
     "tv_format":"{n} - {s00e00} - {t}",
     "lib_fast_scan": true,
     "cache_refresh_days": 0,
+    "tvdb_episode_order": "auto",
     "show_s00_specials": false
 }

@@ -82,10 +82,26 @@ function selectResult(el) {
     const result = window._searchResults[parseInt(el.getAttribute('data-ridx'))];
     const folderPath = window._manualSearchFolderPath;
     if (folderPath) {
-        window._manualSearchFolderPath = null;
-        window._manualSearchFromLibrary = false;
-        closeModal('manualSearchModal');
-        libRenameFolder(folderPath, result);
+        postJSON(`/api/library/tvdb-orders/${encodeURIComponent(result.id)}`)
+            .then(data => {
+                const orders = data.orders || [];
+                if (orders.length <= 1) {
+                    const order = orders[0]?.value || 'official';
+                    const selectedPath = window._manualSearchFolderPath;
+                    window._manualSearchFolderPath = null;
+                    window._manualSearchFromLibrary = false;
+                    closeModal('manualSearchModal');
+                    libRenameFolder(selectedPath, result, order);
+                    return;
+                }
+                window._pendingSeriesChoice = { folderPath, result, orders };
+                document.getElementById('manualSearchContent').innerHTML = `
+                    <p class="series-order-question">Choisissez l'ordre des épisodes pour le renommage :</p>
+                    <div class="series-order-list">${orders.map((o, i) =>
+                        `<button class="btn btn-secondary series-order-choice" data-order-index="${i}" onclick="chooseSeriesOrder(this)">${esc(o.label)}</button>`
+                    ).join('')}</div>`;
+            })
+            .catch(e => { alert(`Erreur TVDB: ${e.message}`); });
         return;
     }
     const filePath = window._manualSearchFilePath;
@@ -111,6 +127,19 @@ function selectResult(el) {
     }).catch(e => { resultsDiv.innerHTML = `<div class="message error">Erreur: ${esc(e.message)}</div>`; });
 }
 
+function chooseSeriesOrder(button) {
+    const pending = window._pendingSeriesChoice;
+    if (!pending) return;
+    const order = pending.orders[parseInt(button.dataset.orderIndex, 10)];
+    if (!order) return;
+    const { folderPath, result } = pending;
+    window._pendingSeriesChoice = null;
+    window._manualSearchFolderPath = null;
+    window._manualSearchFromLibrary = false;
+    closeModal('manualSearchModal');
+    libRenameFolder(folderPath, result, order.value);
+}
+
 function libApplyRename(filePath) {
     const file = allFiles.find(f => f.path === filePath);
     if (!file || !file.filename) { refreshLibrary(); return; }
@@ -121,6 +150,8 @@ function libApplyRename(filePath) {
     postJSON('/api/rename', { path: file.path, new_name: newName })
         .then(data => {
             if (!data.success) { alert(`✗ ${tr('err_rename')}\n${data.message}`); refreshLibrary(); return; }
+            // Le nom du fichier a changé : l'entrée cache de son dossier est périmée.
+            if (typeof invalidateLibTreePath === 'function') invalidateLibTreePath(dirnameLibPath(file.path));
             refreshLibrary();
         })
         .catch(e => { alert(`✗ ${tr('err_rename')}\n${e.message}`); refreshLibrary(); });

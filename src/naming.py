@@ -7,13 +7,17 @@ import re
 
 from . import state
 
-# Miroir de LANG_MAP côté JS (i18n des tokens {t:fra} etc.)
+# Miroir de LANG_MAP côté JS (i18n des tokens {t:fra} etc.).
+# TVDB renvoie les traductions avec des codes ISO 639-2/T à 3 lettres
+# (eng, fra, deu...) : ce dictionnaire permet d'accepter les codes à 2 lettres.
 _LANG_MAP = {
-    'fr': 'fra', 'de': 'deu', 'es': 'spa', 'it': 'ita', 'pt': 'por', 'ru': 'rus',
-    'ja': 'jpn', 'ko': 'kor', 'zh': 'zho', 'ar': 'ara', 'pl': 'pol', 'nl': 'nld',
-    'sv': 'swe', 'no': 'nor', 'da': 'dan', 'fi': 'fin', 'tr': 'tur', 'cs': 'ces',
-    'hu': 'hun', 'he': 'heb', 'ro': 'ron', 'uk': 'ukr',
+    'en': 'eng', 'fr': 'fra', 'de': 'deu', 'es': 'spa', 'it': 'ita', 'pt': 'por',
+    'ru': 'rus', 'ja': 'jpn', 'ko': 'kor', 'zh': 'zho', 'ar': 'ara', 'pl': 'pol',
+    'nl': 'nld', 'sv': 'swe', 'no': 'nor', 'da': 'dan', 'fi': 'fin', 'tr': 'tur',
+    'cs': 'ces', 'hu': 'hun', 'he': 'heb', 'ro': 'ron', 'uk': 'ukr',
+    'el': 'ell', 'et': 'est', 'hr': 'hrv', 'lt': 'lit', 'sr': 'srp',
 }
+_LANG_MAP_INV = {v: k for k, v in _LANG_MAP.items()}
 _TRANS_NAMES = ('n', 'title', 'original_title', 't', 'episode_title')
 
 
@@ -32,6 +36,21 @@ def _pad(value, width):
     return str(n).zfill(width)
 
 
+def _translate(translations, code, fallback):
+    """Résolution d'un code de langue : code direct, puis 2→3 lettres, puis
+    3→2 lettres (TVDB renvoie des codes à 3 lettres, ex. « eng »)."""
+    code = code.lower()
+    if code in translations:
+        return translations[code]
+    mapped = _LANG_MAP.get(code)
+    if mapped and mapped in translations:
+        return translations[mapped]
+    unmapped = _LANG_MAP_INV.get(code)
+    if unmapped and unmapped in translations:
+        return translations[unmapped]
+    return fallback or ''
+
+
 def interpolate(template, vars_):
     """Port exact de `interpolate()` (app.js) : tokens {name} et {name:fmt}
     (fmt = langue 2-3 lettres pour n/title/original_title/t/episode_title,
@@ -44,7 +63,7 @@ def interpolate(template, vars_):
         if fmt:
             code = fmt[1:].lower()
             if re.fullmatch(r'[a-zA-Z]{2,3}', code) and name in _TRANS_NAMES:
-                return translations.get(code) or translations.get(_LANG_MAP.get(code)) or val or ''
+                return _translate(translations, code, val)
         if val is None or str(val).strip() == '' or str(val) == 'None':
             return ''
         s = str(val).strip()
@@ -61,13 +80,19 @@ def interpolate(template, vars_):
 
 
 def _vars_for(file, details):
-    s = file.get('season') or 1
-    e = file.get('episode') or 1
+    s = file.get('season')
+    if s is None:
+        s = 1
+    e = file.get('episode')
+    if e is None:
+        e = 1
     cleaned_title = clean_title(details.get('title'))
+    cleaned_original = clean_title(details.get('original_title'))
     cleaned_ep = clean_title(details.get('episode_title') or details.get('t'))
     year = details.get('year') or ''
     return {
         'n': cleaned_title, 'title': cleaned_title,
+        'original_title': cleaned_original,
         'ny': f"{cleaned_title} ({year})" if cleaned_title and year else cleaned_title,
         'y': year, 'year': year,
         'd': details.get('airdate') or details.get('release_date') or '',
@@ -92,9 +117,35 @@ def _vars_for(file, details):
     }
 
 
-def generate_filename(filename, media_type, season, episode, details):
+def multi_episode_label(season, episodes):
+    """Étiquette SxxExx[-Exx] pour un fichier multi-épisodes (même saison).
+    Plage continue → « S01E01-E02 » ; sinon liste chaque épisode."""
+    eps = sorted(episodes)
+    if len(eps) == 1:
+        return f"S{season:02d}E{eps[0]:02d}"
+    start, end = eps[0], eps[-1]
+    if end - start == len(eps) - 1:
+        return f"S{season:02d}E{start:02d}-E{end:02d}"
+    return f"S{season:02d}" + '-'.join(f"E{e:02d}" for e in eps)
+
+
+def multi_episode_label_sxe(season, episodes):
+    """Étiquette NxNN[-NN] (format alternatif) pour un multi-épisodes."""
+    eps = sorted(episodes)
+    if len(eps) == 1:
+        return f"{season}x{eps[0]:02d}"
+    start, end = eps[0], eps[-1]
+    if end - start == len(eps) - 1:
+        return f"{season}x{start:02d}-{end:02d}"
+    return f"{season}x" + '-'.join(f"{e:02d}" for e in eps)
+
+
+def generate_filename(filename, media_type, season, episode, details,
+                      episode_label=None, sxe_label=None, episode_title=None):
     """Port exact de `generateFilename()` (app.js) : nom final (extension comprise).
-    Revenant au nom d'origine si le format produit une chaîne vide."""
+    Revenant au nom d'origine si le format produit une chaîne vide.
+    `episode_label` / `sxe_label` / `episode_title` surchargent les tokens
+    {s00e00} / {sxe} / {t} (fichiers multi-épisodes)."""
     if not filename:
         return ''
     dot = filename.rfind('.')
@@ -104,7 +155,15 @@ def generate_filename(filename, media_type, season, episode, details):
     if not fmt:
         fmt = '{n} ({y})' if media_type == 'movie' else '{n} - {s00e00} - {t}'
     file = {'season': season, 'episode': episode}
-    result = interpolate(fmt, _vars_for(file, details))
+    vars_ = _vars_for(file, details)
+    if episode_label is not None:
+        vars_['s00e00'] = episode_label
+    if sxe_label is not None:
+        vars_['sxe'] = sxe_label
+    if episode_title is not None:
+        vars_['t'] = episode_title
+        vars_['episode_title'] = episode_title
+    result = interpolate(fmt, vars_)
     result = result.replace(':', ' -')
     result = re.sub(r'[<>"\\/\|?*]', '', result)
     result = re.sub(r' - -', ' -', result, count=1)

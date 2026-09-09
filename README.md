@@ -50,7 +50,7 @@
 - **Manual search** with full TVDB results selection (confirmed choices are remembered)
 - **Rename All / Move All** batch processing
 - **Real-time move progress** with speed, ETA, a `verifying` phase, and file-gone verification
-- **Library tab** — browse the output tree, missing-episode badges, send-back to source, folder rename/delete, full series-folder rename from manual search, filter sidebar (genre, age, size, rating, date, missing) and episode "present/total" counters
+- **Library tab** — browse the output tree (instant F5 via a local tree cache), missing **and upcoming** episode badges, send-back to source, folder rename/delete, full series-folder rename from manual search (episode order selection, subtitles follow the video), TVDB web link, filter sidebar (genre, age, size, rating, date, missing) and episode "present/total" counters
 - **Folder picker** for media paths
 - **Password protection** (optional)
 - **6 languages** interface (FR, EN, ES, DE, IT, PT) with language switch
@@ -73,11 +73,12 @@ CleanFlick turns messy download folders into a clean, organized media library. T
 
 ### 2. Library
 
-- Browses the **output** folders (`movie_output_path`, `tv_output_path`) as a tree.
-- Highlights **missing episodes** (badges on season folders) and shows a **present/total episode counter** on series folders.
+- Browses the **output** folders (`movie_output_path`, `tv_output_path`) as a tree. The explored tree is cached locally so **F5 is near-instant**; entries are re-validated in the background.
+- Highlights **missing episodes** (red) and **upcoming episodes** (yellow, not yet aired) with badges, and shows a **present/total episode counter** on series folders.
 - **Filter sidebar**: genre facets, age/size/rating/date ranges (dual sliders) and a "Missing" filter, plus sorting.
 - Lets you **rename a folder**, **delete a folder**, or **send a file/folder back** to the source folder.
-- A manual search on a series folder triggers a **full series-folder rename** (files + folder, synchronous, per the configured TV format) while TVDB/OMDb enrichment continues in the background.
+- A manual search on a series folder triggers a **full series-folder rename** (files + folder, synchronous, per the configured TV format) while TVDB/OMDb enrichment continues in the background. If the series offers several TVDB episode orders (official / alternate / Netflix), you are asked to pick one; **subtitles** (`.srt`, `.ass`, ...) are renamed alongside their video.
+- Each series folder has an **open-in-TVDB** link (canonical TVDB slug).
 
 ### 3. History
 
@@ -171,6 +172,8 @@ Copy `config.example.json` to `config.json` and fill in your settings:
   "movie_format": "{n} ({y})",
   "tv_format": "{n} - {s00e00} - {t}",
   "lib_fast_scan": true,
+  "cache_refresh_days": 0,
+  "tvdb_episode_order": "auto",
   "show_s00_specials": false
 }
 ```
@@ -185,6 +188,8 @@ Copy `config.example.json` to `config.json` and fill in your settings:
 | `movie_format` | Naming format for movies | `{n} ({y})` |
 | `tv_format` | Naming format for TV shows | `{n} - {s00e00} - {t}` |
 | `lib_fast_scan` | Fast library scan (non-recursive folder sizes) | `true` |
+| `cache_refresh_days` | Auto-refresh of cached API data in the background (0 = disabled) | `0` |
+| `tvdb_episode_order` | TVDB episode order: `auto`, `official`, `alternate` or `netflix` (per-series choice from manual search wins) | `auto` |
 | `show_s00_specials` | Include special episodes (season 0) in missing episodes and episode counters | `false` |
 
 > **Note:** Both keys can also be entered directly in the **Settings → Config** tab of the UI. The "test" button next to each input checks connectivity before saving.
@@ -211,6 +216,7 @@ Copy `config.example.json` to `config.json` and fill in your settings:
 | `{n:fr}` | French title | `Matrix` |
 | `{n:de}` | German title | `Matrix` |
 | `{n:ja}` | Japanese title | `マトリックス` |
+| `{n:en}` | English title (2- or 3-letter codes, TVDB translations) | `The Matrix` |
 
 ### TV Show Variables
 
@@ -229,6 +235,7 @@ Copy `config.example.json` to `config.json` and fill in your settings:
 | `{tvdbid}` | TVDB ID | `81189` |
 | `{network}` | Network | `AMC` |
 | `{n:fr}` | French title | `Breaking Bad` |
+| `{n:en}` | English title (2- or 3-letter codes, TVDB translations) | `Breaking Bad` |
 
 ### Format Examples
 
@@ -382,6 +389,33 @@ environment:
 ---
 
 ## Changelog
+
+### [1.0.11] - 2026-09-09
+
+**Added**
+- Subtitles (`.srt`, `.sub`, `.ass`, `.ssa`, `.vtt`, `.idx`) follow video renames, with a folder-wide catch-up pass for subtitles in other subfolders of the series folder
+- TVDB episode order selection after manual search (official / alternate / Netflix) + `tvdb_episode_order` config option (`auto` picks the Netflix order when offered)
+- Upcoming episodes (not yet aired) split from missing: yellow badge + rows in the library, excluded from the present/total counter
+- "Open in TVDB" link on series folders (canonical TVDB slug)
+- Instant library reload (F5): explored tree cached in `localStorage` (1 h, size-bounded), background re-validation, targeted invalidation
+- `original_title` naming token; translation codes accept 2- or 3-letter forms (`{n:en}` = `{n:eng}`)
+- Multi-episode filename generation (`S01E01-E02` / `1x02-03` labels, joined episode titles)
+- `cache_refresh_days` and `tvdb_episode_order` in `DEFAULT_CONFIG` / `config.example.json`
+- 26 new tests (108 total)
+
+**Improved**
+- Background media pre-warming: TVDB search + OMDb enrichment + durations run off the HTTP request
+- OMDb quota: automatic re-pass after the 24 h lockout, negative results cached
+- TVDB episode paging no longer capped at 20 pages (long series); translations fetched from the TVDB endpoint when missing
+- History batch insert (single transaction per series rename); fast library render (`?fast=1`) with background re-validation
+- `/api/search/auto` reuses the generic per-title cache; per-request memoization of TVDB→IMDb resolution and folder sizes
+- Filters pre-load collapsed folders; series rating no longer leaks into episode-level matches
+
+**Fixed**
+- OMDb quota never retried after the 24 h lockout; Netflix-order series got the official episode list
+- Episode counters included not-yet-aired episodes; manual search selection did not replace a wrong cached series association
+- `/api/scan` triggered an implicit TVDB pre-fetch; TVDB→IMDb failures retried on every render
+- Language tokens failed with TVDB 3-letter codes; rename result modal too narrow for long filenames
 
 ### [1.0.10] - 2026-09-07
 

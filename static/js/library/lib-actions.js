@@ -22,7 +22,13 @@ function findLibRow(filePath) {
 
 function removeLibFileRow(filePath) {
     const row = findLibRow(filePath);
-    if (row) row.closest('.lib-node')?.remove();
+    if (row) {
+        // Le fichier a quitté le dossier : l'entrée cache de ce dossier est périmée.
+        const node = row.closest('.lib-node');
+        const parent = node && node.parentElement && node.parentElement.closest('.lib-node');
+        if (parent) invalidateLibTreePath(parent._path);
+        node?.remove();
+    }
 }
 
 function markLibRowTransferring(filePath, jobId) {
@@ -99,6 +105,10 @@ function confirmDeleteFolder(folderPath) {
         postJSON('/api/library/delete-folder', { path: folderPath })
             .then(data => {
                 if (!data.success) { alert(`✗ ${data.message}`); return; }
+                // Le dossier disparaît : on invalide son entrée cache et celle
+                // de son parent (la liste des frères a changé).
+                invalidateLibTreePath(folderPath);
+                invalidateLibTreePath(dirnameLibPath(folderPath));
                 loadLibrary();
             })
             .catch(e => alert(`✗ ${e.message}`));
@@ -122,7 +132,7 @@ function seriesFolderName(fileName) {
     return (m && m[1] && m[1].trim()) ? m[1].trim() : stem;
 }
 
-function libRenameFolder(folderPath, result) {
+function libRenameFolder(folderPath, result, episodeOrder) {
     const folderBase = folderPath.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || '';
     // Le renommage (fichiers + dossier) est synchrone côté serveur ; le parsing
     // TVDB (titres d'épisodes, épisodes manquants, enrichissement OMDb) se
@@ -134,9 +144,17 @@ function libRenameFolder(folderPath, result) {
         year: result.year || '',
         imdb: result.imdb_id || '',
         tmdb: result.tmdb_id || '',
+        tvdb_slug: result.tvdb_slug || '',
+        poster: result.poster || '',
+        genres: result.genres || '',
+        certification: result.certification || '',
+        episode_order: episodeOrder || '',
         translations: result.translations || {},
     }).then(data => {
         if (!data.success) { alert(`✗ ${data.message}`); return; }
+        // Le renommage touche le dossier et tous ses fichiers : le cache
+        // d'arborescence est périmé, on le vide (il se reconstruit au fil).
+        clearLibTreeCache();
         refreshLibrary();
         showLibRenameResult(folderBase, data.renames || [], null, data.folder);
     }).catch(e => alert(`✗ ${e.message}`));
@@ -156,9 +174,9 @@ function showLibRenameResult(folderBase, renames, skipped, folderNote) {
     if (renames.length) {
         html += `<div class="lib-rename-list">${renames.map(r =>
             `<div class="lib-rename-item">
-                <div class="lib-rename-from">${esc(r.from)}</div>
-                <div class="lib-rename-sep"><i class="mdi mdi-arrow-down"></i></div>
-                <div class="lib-rename-to">${esc(r.to)}</div>
+                <span class="lib-rename-from" title="${esc(r.from)}">${esc(r.from)}</span>
+                <span class="lib-rename-sep"><i class="mdi mdi-arrow-right"></i></span>
+                <span class="lib-rename-to" title="${esc(r.to)}">${esc(r.to)}</span>
             </div>`).join('')}</div>`;
     }
     if (!renames.length && !folderNote) {
@@ -191,42 +209,62 @@ function libManualSearch(filePath) {
     openManualSearchModal(cleanedTitle, { filePath, fromLibrary: true });
 }
 
-// ── Épisodes manquants ───────────────────────────────────────────────────────
-function loadLibMissing(path, badgeEl, childrenEl) {
+// ── Épisodes manquants / à venir ─────────────────────────────────────────────
+// « missing »   : diffusés mais absents du disque (rouge)
+// « upcoming »  : non diffusés — TBA ou date de sortie future (jaune)
+function loadLibMissing(path, missingBadgeEl, upcomingBadgeEl, childrenEl) {
     fetch(`/api/library/missing?path=${encodeURIComponent(path)}`)
         .then(r => r.json())
         .then(d => {
-            const node = badgeEl && badgeEl.closest('.lib-node');
-            if (node) node._missingCount = d.count || 0;
-            if (badgeEl) {
-                if (d.count > 0) {
-                    badgeEl.textContent = d.count;
-                    badgeEl.title = `${d.count} ${tr('lib_missing_episodes')}`;
+            // Cache TVDB pas encore prêt (premier affichage, parsing en
+            // arrière-plan) : on re-polle quelques secondes plus tard.
+            if (!d.available && missingBadgeEl) {
+                const tries = (missingBadgeEl._pollTries || 0) + 1;
+                missingBadgeEl._pollTries = tries;
+                if (tries <= 3) setTimeout(() => loadLibMissing(path, missingBadgeEl, upcomingBadgeEl, childrenEl), 3000);
+            }
+            const node = missingBadgeEl && missingBadgeEl.closest('.lib-node');
+            const missingCount = d.missing_count || 0;
+            const upcomingCount = d.upcoming_count || 0;
+            if (node) node._missingCount = missingCount;
+            if (missingBadgeEl) {
+                if (missingCount > 0) {
+                    missingBadgeEl.textContent = missingCount;
+                    missingBadgeEl.title = `${missingCount} ${tr('lib_missing_episodes')}`;
                 } else {
-                    badgeEl.textContent = '';
+                    missingBadgeEl.textContent = '';
+                }
+            }
+            if (upcomingBadgeEl) {
+                if (upcomingCount > 0) {
+                    upcomingBadgeEl.textContent = upcomingCount;
+                    upcomingBadgeEl.title = `${upcomingCount} ${tr('lib_upcoming_episodes')}`;
+                } else {
+                    upcomingBadgeEl.textContent = '';
                 }
             }
             if (libMissingOnly) applyLibFilter();
-            if (childrenEl && d.missing && d.missing.length) {
-                // Nettoyage : supprimer les anciens nœuds "manquants" avant d'en ajouter,
-                // sinon l'actualisation dupliquerait chaque épisode manquant.
-                [...childrenEl.querySelectorAll(':scope > .lib-node > .lib-row.lib-row--missing')].forEach(n => n.remove());
-                d.missing.forEach(m => {
-                    const node = document.createElement('div');
-                    node.className = 'lib-node';
+            if (childrenEl) {
+                // Nettoyage : supprimer les anciens nœuds manquants/à venir avant
+                // d'en ajouter, sinon l'actualisation dupliquerait chaque épisode.
+                [...childrenEl.querySelectorAll(':scope > .lib-node > .lib-row.lib-row--missing, :scope > .lib-node > .lib-row.lib-row--upcoming')].forEach(n => n.remove());
+                const insertEpRow = (m, cls, icon, dateHtml) => {
+                    const epNode = document.createElement('div');
+                    epNode.className = 'lib-node';
                     const row = document.createElement('div');
-                    row.className = 'lib-row lib-row--missing';
+                    row.className = `lib-row ${cls}`;
                     row.innerHTML = `
                         <span class="lib-toggle" style="visibility:hidden"><i class="mdi mdi-chevron-right"></i></span>
                         <i class="mdi mdi-file-video lib-icon-file"></i>
                         <span class="lib-name lib-name--file">
-                            <span class="lib-name-main">${esc(m.label)}</span>
+                            <span class="lib-name-main">${esc(m.label || `S${String(m.s || 0).padStart(2, '0')}E${String(m.e || 0).padStart(2, '0')}`)}</span>
                             ${m.title ? `<span class="lib-missing-item">${esc(m.title)}</span>` : ''}
                         </span>
-                        <span class="lib-badge lib-badge--warn"><i class="mdi mdi-alert"></i></span>`;
-                    node.appendChild(row);
+                        ${dateHtml}
+                        <span class="lib-badge"><i class="mdi ${icon}"></i></span>`;
+                    epNode.appendChild(row);
                     const se = (parseInt(m.s, 10) || 0) * 1000 + (parseInt(m.e, 10) || 0);
-                    // Tri : comparer avec le DOM en direct (vrais fichiers + manquants déjà insérés).
+                    // Tri : comparer avec le DOM en direct (vrais fichiers + épisodes déjà insérés).
                     let inserted = false;
                     for (const n of childrenEl.children) {
                         const main = n.querySelector(':scope > .lib-row .lib-name-main');
@@ -234,13 +272,20 @@ function loadLibMissing(path, badgeEl, childrenEl) {
                         const mm = main.textContent.match(/[Ss](\d{1,2})[Ee](\d{1,3})/);
                         if (!mm) continue;
                         const nse = parseInt(mm[1], 10) * 1000 + parseInt(mm[2], 10);
-                        if (nse > se) { childrenEl.insertBefore(node, n); inserted = true; break; }
+                        if (nse > se) { childrenEl.insertBefore(epNode, n); inserted = true; break; }
                     }
-                    if (!inserted) childrenEl.appendChild(node);
-                });
+                    if (!inserted) childrenEl.appendChild(epNode);
+                };
+                (d.missing || []).forEach(m => insertEpRow(m, 'lib-row--missing', 'mdi-alert',
+                    m.airdate ? `<span class="lib-upcoming-date">${esc(m.airdate)}</span>` : ''));
+                (d.upcoming || []).forEach(m => insertEpRow(m, 'lib-row--upcoming', 'mdi-calendar-clock',
+                    m.airdate ? `<span class="lib-upcoming-date">${esc(m.airdate)}</span>` : ''));
             }
         })
-        .catch(() => { if (badgeEl) badgeEl.textContent = ''; });
+        .catch(() => {
+            if (missingBadgeEl) missingBadgeEl.textContent = '';
+            if (upcomingBadgeEl) upcomingBadgeEl.textContent = '';
+        });
 }
 
 function refreshSeriesBadges(container) {
@@ -248,7 +293,9 @@ function refreshSeriesBadges(container) {
     [...container.querySelectorAll(':scope > .lib-node > .lib-row > .lib-missing-badge')].forEach(badge => {
         if (badge._loaded) return;
         badge._loaded = true;
-        loadLibMissing(badge._path, badge, null);
+        const row = badge.closest('.lib-row');
+        const upBadge = row && row.querySelector('.lib-upcoming-badge');
+        loadLibMissing(badge._path, badge, upBadge, null);
     });
 }
 
@@ -262,7 +309,9 @@ function toggleLibMissingFilter() {
             const node = row && row.closest('.lib-node');
             if (!node || node.style.display === 'none') return;
             if (badge._loaded) return; // compteur déjà connu
-            loadLibMissing(badge._path, badge, node.querySelector(':scope > .lib-children'));
+            badge._loaded = true;
+            const upBadge = row && row.querySelector('.lib-upcoming-badge');
+            loadLibMissing(badge._path, badge, upBadge, node.querySelector(':scope > .lib-children'));
         });
     }
     applyLibFilter();

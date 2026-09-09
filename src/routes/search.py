@@ -34,6 +34,22 @@ def api_search_auto():
 
     key = params_cache_key(params)
     cached = db.cache_get(key)
+    # Le worker et les routes spécialisées stockent aussi un cache générique
+    # par titre. Il doit être consulté avant TVDB, même si la clé « auto »
+    # contient des détails différents (nom de fichier, épisode, media_hint).
+    generic_keys = []
+    if params.get('media_hint') == 'movie':
+        generic_keys.append(params_cache_key({'type': 'movie', 'title': params['title'], 'year': params['year']}))
+    elif params.get('media_hint') == 'tv':
+        generic_keys.extend([
+            params_cache_key({'type': 'tv', 'title': params['title'], 'year': params['year']}),
+            params_cache_key({'type': 'tv', 'title': params['title']}),
+        ])
+    if cached is None:
+        for generic_key in generic_keys:
+            cached = db.cache_get(generic_key)
+            if cached is not None:
+                break
     if cached is not None:
         logger.info(f"Search auto: cache hit (params) key={key}")
         out = dict(cached)
@@ -50,6 +66,11 @@ def api_search_auto():
     omdb.attach_omdb(result.get('results', []))
     try:
         db.cache_set(key, result.get('media_type', ''), result.get('results', []))
+        media_type = result.get('media_type', '')
+        if media_type == 'movie':
+            db.cache_set(params_cache_key({'type': 'movie', 'title': params['title'], 'year': params['year']}), media_type, result.get('results', []))
+        elif media_type == 'tv':
+            db.cache_set(params_cache_key({'type': 'tv', 'title': params['title'], 'year': params['year']}), media_type, result.get('results', []))
     except Exception:
         pass
 

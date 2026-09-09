@@ -29,6 +29,28 @@ def test_generate_filename_translated_token():
     assert out == 'Show - S01E01.mkv'
 
 
+def test_interpolate_lang_two_letter_code():
+    # TVDB renvoie des clés à 3 lettres : {n:en} doit résoudre via en→eng.
+    out = naming.interpolate('{n:en}', {'n': 'Show', '_translations': {'eng': 'Show EN', 'fra': 'Spectacle'}})
+    assert out == 'Show EN'
+
+
+def test_interpolate_lang_three_letter_code():
+    out = naming.interpolate('{n:fra}', {'n': 'Show', '_translations': {'fra': 'Spectacle'}})
+    assert out == 'Spectacle'
+
+
+def test_interpolate_lang_fallback_to_default():
+    # Langue absente des traductions : retour au titre par défaut.
+    out = naming.interpolate('{n:de}', {'n': 'Show', '_translations': {'eng': 'Show EN'}})
+    assert out == 'Show'
+
+
+def test_interpolate_original_title_token():
+    out = naming.interpolate('{original_title}', {'original_title': 'Original'})
+    assert out == 'Original'
+
+
 def test_generate_filename_only_s00e00_remains():
     # Format par défaut avec détails vides : seuls les tokens numériques
     # (s00e00) restent ; le séparateur orphelin est conservé (comportement JS).
@@ -42,3 +64,35 @@ def test_series_folder_name_with_ids():
 
 def test_series_folder_name_plain():
     assert naming.series_folder_name('My Show - S01E01 - Pilot.mkv') == 'My Show'
+
+
+def test_multi_episode_label_range():
+    assert naming.multi_episode_label(1, [1, 2]) == 'S01E01-E02'
+    assert naming.multi_episode_label(3, [10, 11, 12]) == 'S03E10-E12'
+
+
+def test_multi_episode_label_single():
+    assert naming.multi_episode_label(1, [5]) == 'S01E05'
+
+
+def test_multi_episode_label_non_contiguous():
+    assert naming.multi_episode_label(1, [1, 3, 5]) == 'S01E01-E03-E05'
+
+
+def test_multi_episode_label_sxe_range():
+    assert naming.multi_episode_label_sxe(1, [1, 2]) == '1x01-02'
+    assert naming.multi_episode_label_sxe(1, [5]) == '1x05'
+
+
+def test_generate_filename_multi_episode():
+    out = naming.generate_filename('x.mkv', 'tv', 1, 1, {
+        'title': 'My Show', 'year': 2019,
+    }, episode_label='S01E01-E02', episode_title='Pilot & Second')
+    assert out == 'My Show - S01E01-E02 - Pilot & Second.mkv'
+
+
+def test_generate_filename_multi_episode_no_title():
+    out = naming.generate_filename('x.mkv', 'tv', 1, 1, {
+        'title': 'My Show',
+    }, episode_label='S01E01-E02')
+    assert out == 'My Show - S01E01-E02.mkv'

@@ -72,7 +72,8 @@ function filterFiles(type) {
 
 function renderPreview(file) {
     const p = filesPreviews[file.path];
-    if (!p || p.loading) return `<div class="loading-cell">◌ ${tr('searching')}</div>`;
+    if (!p) return `<div class="no-preview">${tr('btn_other')}</div>`;
+    if (p.loading) return `<div class="loading-cell">◌ ${tr('searching')}</div>`;
     if (p.error) return `<div class="no-preview">❌ ${esc(p.error)}</div>`;
     if (!p.data) return `<div class="no-preview">${tr('no_result')}</div>`;
     const { source, details } = p.data;
@@ -114,7 +115,8 @@ function previewChips(source, details, isTv, realDur) {
 
 function renderActions(file) {
     const p = filesPreviews[file.path];
-    if (!p || p.loading) return `<div class="btn-group"><button class="btn-small search" disabled><i class="mdi mdi-loading mdi-spin"></i></button></div>`;
+    if (!p) return `<div class="btn-group"><button class="btn-small search" title="${tr('btn_other')}" onclick="manualSearch(decodeURIComponent('${pathKey(file.path)}'))"><i class="mdi mdi-magnify"></i></button></div>`;
+    if (p.loading) return `<div class="btn-group"><button class="btn-small search" disabled><i class="mdi mdi-loading mdi-spin"></i></button></div>`;
     let html = '<div class="btn-group">';
     if (p.data) {
         const newName = generateFilename(file, p.data.details);

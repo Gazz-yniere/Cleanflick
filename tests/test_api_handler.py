@@ -119,3 +119,28 @@ def test_parse_episode():
     assert ep['t'] == 'Pilot'
     assert ep['rating'] == 0.8
     assert ep['d'] == '2020-01-01'
+
+
+def test_series_episodes_follows_next_links():
+    from src.api.tvdb import TVDBAPIHandler
+
+    handler = TVDBAPIHandler.__new__(TVDBAPIHandler)
+    handler.client = type('Client', (), {})()
+    handler.client.request = type('Request', (), {'links': {}})()
+    pages = [
+        {'episodes': [{
+            'id': 1, 'seasonNumber': 1, 'number': 1, 'name': 'One', 'aired': '2020-01-01'
+        }]},
+        {'episodes': [{
+            'id': 2, 'seasonNumber': 1, 'number': 2, 'name': 'Two', 'aired': '2020-01-08'
+        }]},
+    ]
+
+    def get_page(series_id, page=0, season_type='default'):
+        handler.client.request.links = {'next': 'next-page'} if page == 0 else {}
+        return pages[page]
+
+    handler.client.get_series_episodes = get_page
+    result = handler.get_series_episodes(76703)
+
+    assert [episode['e'] for episode in result['episodes']] == [1, 2]

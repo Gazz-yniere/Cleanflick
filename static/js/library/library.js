@@ -10,6 +10,7 @@ let libShowS00 = false;
 const LIB_EXPANDED_KEY = 'cleanflick_lib_expanded';
 const LIB_TAB_KEY = 'cleanflick_active_tab';
 const LIB_PAGE_SIZE = 200;
+const LIB_TREE_CACHE_KEY = 'cleanflick_lib_tree_cache';
 function loadExpandedPaths() {
     try { return new Set(JSON.parse(localStorage.getItem(LIB_EXPANDED_KEY) || '[]')); } catch (e) { return new Set(); }
 }
@@ -17,6 +18,70 @@ function saveExpandedPaths(set) {
     try { localStorage.setItem(LIB_EXPANDED_KEY, JSON.stringify([...set])); } catch (e) {}
 }
 let expandedPaths = loadExpandedPaths();
+
+// ── Cache de l'arborescence (localStorage) : rend le F5 quasi instantané. ────
+// Chaque dossier exploré est mis en cache (path -> [entries]). Au rechargement,
+// les dossiers déjà visités sont rendus immédiatement depuis le cache, puis
+// re-validés en arrière-plan (re-fetch) seulement si le cache est périmé.
+// Le cache est borné : au-delà d'une taille, on éjecte les entrées les plus
+// grosses (dossiers très remplis) plutôt que de tout vider — sinon un F5
+// re-charge tout depuis le serveur. Sauvegarde différée (debounce) : chaque
+// chargement de dossier ne re-serialise pas le cache entier immédiatement.
+const LIB_TREE_CACHE_TTL = 3600 * 1000; // 1 h
+const LIB_TREE_CACHE_MAX = 4_500_000;
+function loadLibTreeCache() {
+    try {
+        const raw = JSON.parse(localStorage.getItem(LIB_TREE_CACHE_KEY) || 'null');
+        return (raw && raw.data) ? raw : { ts: 0, data: {} };
+    } catch (e) { return { ts: 0, data: {} }; }
+}
+let libTreeCache = loadLibTreeCache();
+let _libTreeSaveTimer = null;
+function saveLibTreeCache() {
+    if (_libTreeSaveTimer) return;
+    _libTreeSaveTimer = setTimeout(() => {
+        _libTreeSaveTimer = null;
+        try {
+            let s = JSON.stringify({ ts: Date.now(), data: libTreeCache.data });
+            if (s.length > LIB_TREE_CACHE_MAX) {
+                const sizes = new Map(Object.keys(libTreeCache.data)
+                    .map(k => [k, JSON.stringify(libTreeCache.data[k]).length]));
+                const keys = [...sizes.entries()].sort((a, b) => b[1] - a[1]).map(x => x[0]);
+                for (const k of keys) {
+                    delete libTreeCache.data[k];
+                    s = JSON.stringify({ ts: Date.now(), data: libTreeCache.data });
+                    if (s.length <= LIB_TREE_CACHE_MAX) break;
+                }
+            }
+            localStorage.setItem(LIB_TREE_CACHE_KEY, s);
+        } catch (e) { libTreeCache.data = {}; }
+    }, 400);
+}
+function cacheLibChildren(path, entries) {
+    if (!path || !Array.isArray(entries)) return;
+    libTreeCache.data[path] = entries;
+    saveLibTreeCache();
+}
+function clearLibTreeCache() {
+    libTreeCache.data = {};
+    try { localStorage.removeItem(LIB_TREE_CACHE_KEY); } catch (e) {}
+}
+// Invalide l'entrée d'un dossier (ses enfants ont changé : ajout/suppression/
+// renommage de fichier). Plus léger que de tout vider.
+function invalidateLibTreePath(path) {
+    if (path && libTreeCache.data[path]) {
+        delete libTreeCache.data[path];
+        saveLibTreeCache();
+    }
+}
+function dirnameLibPath(p) {
+    const s = String(p || '').replace(/\\/g, '/');
+    const i = s.lastIndexOf('/');
+    return i > 0 ? s.slice(0, i) : '';
+}
+function libTreeCacheFresh() {
+    return !!libTreeCache.ts && (Date.now() - libTreeCache.ts) < LIB_TREE_CACHE_TTL;
+}
 
 // ── Métadonnées : affichage ──────────────────────────────────────────────────
 function metaText(meta) {
@@ -84,11 +149,23 @@ function epCountHtml(entry) {
     return `<span class="lib-ep-count" title="${esc(label)}">${text}</span>`;
 }
 
+function tvdbSeriesSlug(name) {
+    return String(name || '')
+        .replace(/\s*\[[^\]]*\]/g, '')
+        .replace(/\s*\(\d{4}\)/g, '')
+        .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+        .toLowerCase()
+        .replace(/['’]/g, '')
+        .replace(/&/g, ' and ')
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '');
+}
+
 // ── Chargement ───────────────────────────────────────────────────────────────
 function loadLibrary() {
     const container = document.getElementById('library-tree');
     container.innerHTML = `<div class="loading"><div class="spinner"></div></div>`;
-    return fetch('/api/library')
+    return fetch('/api/library?fast=1')
         .then(r => r.json())
         .then(data => {
             if (!data.entries?.length) {
@@ -101,7 +178,15 @@ function loadLibrary() {
             });
             applyLibFilter();
             collectLibFacets();
-            expandStoredPathsDeep(container);
+            const fromCache = libTreeCacheFresh();
+            // Les dossiers persistés sont re-ouverts (instantanément si hydratés
+            // depuis le cache, sinon via re-fetch). Une fois l'expansion terminée,
+            // on re-valide en arrière-plan si l'affichage venait du cache.
+            expandStoredPathsDeep(container).then(() => {
+                // Le rendu rapide est visible avant les tailles, compteurs et
+                // enrichissements coûteux; ceux-ci sont revalidés ensuite.
+                setTimeout(() => refreshLibrary(), fromCache ? 0 : 150);
+            });
         })
         .catch(e => { container.innerHTML = `<div class="message error">${esc(e.message)}</div>`; });
 }
@@ -149,6 +234,7 @@ function findDirRow(container, path) {
 
 // Expande les dossiers persistés : tous les dossiers d'un même niveau sont
 // ouverts en parallèle (requêtes HTTP simultanées), puis le niveau suivant.
+// Un dossier déjà hydraté depuis le cache (wrap._loaded) s'ouvre sans re-fetch.
 async function expandStoredPathsDeep(container) {
     if (!expandedPaths.size) return;
     const byDepth = new Map();
@@ -162,8 +248,14 @@ async function expandStoredPathsDeep(container) {
         await Promise.all(byDepth.get(d).map(path => new Promise(resolve => {
             const row = findDirRow(container, path);
             if (!row) return resolve();
-            const children = row.parentElement.querySelector(':scope > .lib-children');
+            const wrap = row.parentElement;
+            const children = wrap.querySelector(':scope > .lib-children');
             if (children.style.display === 'block') return resolve();
+            // Déjà hydraté depuis le cache : ouverture instantanée, pas de re-fetch.
+            if (wrap._loaded) {
+                row.click();
+                return resolve();
+            }
             row.click();
             const poll = setInterval(() => {
                 if (!children.querySelector('.lib-loading')) {
@@ -181,6 +273,7 @@ function buildLibNode(entry, depth, autoExpand) {
     const wrap = document.createElement('div');
     wrap.className = 'lib-node';
     wrap.style.paddingLeft = depth > 0 ? '20px' : '0';
+    wrap._depth = depth;
     wrap._sort = { is_dir: !!entry.is_dir, name: entry.name, size: entry.size ?? 0, is_ep: !!(entry.meta && entry.meta.episode), rating: sortRating(entry), year: sortYear(entry) };
     wrap._valid = entry.valid;
     wrap._key = entry.path;
@@ -188,6 +281,7 @@ function buildLibNode(entry, depth, autoExpand) {
     wrap._loaded = false;
     wrap._nextOffset = 0;
     wrap._missingBadge = null;
+    wrap._upcomingBadge = null;
     wrap._imdb = (entry.meta && entry.meta.imdb) ? entry.meta.imdb : '';
     let _tvdbId = (entry.meta && entry.meta.tvdb) ? String(entry.meta.tvdb) : '';
     if (!_tvdbId) {
@@ -196,6 +290,7 @@ function buildLibNode(entry, depth, autoExpand) {
     }
     wrap._tvdb = _tvdbId;
     wrap._meta = entry.meta || null;
+    wrap._entry = entry;
     wrap._durPending = !entry.is_dir && !!entry.dur_pending;
 
     if (entry.is_dir) {
@@ -235,7 +330,18 @@ function buildLibNode(entry, depth, autoExpand) {
             ${epCountHtml(entry)}
             <span class="lib-size">${formatBytes(entry.size)}</span>
             ${entry.child_count !== undefined ? `<span class="lib-count">${entry.child_count}</span>` : ''}`;
+        let tvdbLink = null;
         if (depth > 0 && entry.type === 'tv') {
+            const tvdbId = String(entry.name || '').match(/\[tvdbid-(\d+)\]/i);
+            if (tvdbId) {
+                tvdbLink = document.createElement('a');
+                tvdbLink.className = 'btn-small lib-tvdb-link';
+                tvdbLink.href = `/api/library/tvdb-link/${tvdbId[1]}`;
+                tvdbLink.target = '_blank';
+                tvdbLink.rel = 'noopener noreferrer';
+                tvdbLink.title = 'Ouvrir la série sur TVDB';
+                tvdbLink.innerHTML = '<i class="mdi mdi-open-in-new"></i>';
+            }
             const searchBtn = document.createElement('button');
             searchBtn.className = 'btn-small search';
             searchBtn.title = tr('lib_search_tvdb');
@@ -245,20 +351,48 @@ function buildLibNode(entry, depth, autoExpand) {
         }
         row.appendChild(dirActions);
         if (/\[tvdbid-/.test(entry.name)) {
+            const uBadge = document.createElement('span');
+            uBadge.className = 'lib-upcoming-badge';
+            uBadge._path = entry.path;
+            row.insertBefore(uBadge, dirActions);
             const mBadge = document.createElement('span');
             mBadge.className = 'lib-missing-badge';
             mBadge._path = entry.path;
             row.insertBefore(mBadge, dirActions);
             row._missingBadge = mBadge;
+            row._upcomingBadge = uBadge;
             wrap._missingBadge = mBadge;
+            wrap._upcomingBadge = uBadge;
+            if (tvdbLink) row.insertBefore(tvdbLink, dirActions);
+            // Charger les badges manquants/à venir dès l'affichage du dossier,
+            // sans attendre l'expansion (un seul fetch, badges uniquement).
+            // Différé (timeout 0) : au F5 tous les dossiers sont rendus d'un
+            // coup, on ne veut pas lancer tous les fetch en même temps que les
+            // requêtes d'arborescence.
+            if (!wrap._badgesLoaded) {
+                wrap._badgesLoaded = true;
+                mBadge._loaded = true;
+                uBadge._loaded = true;
+                setTimeout(() => loadLibMissing(entry.path, mBadge, uBadge, null), 0);
+            }
         }
         const children = document.createElement('div');
         children.className = 'lib-children';
         children.style.display = 'none';
-        let loaded = false;
+        // Cache : rend immédiatement les enfants déjà visités (F5 quasi instantané).
+        // On n'hydrate que les dossiers dépliés (persistés) — ou tous si un filtre
+        // est actif (pour que le filtre évalue leur contenu). Le reste reste lazy.
+        const _hydrate = expandedPaths.has(entry.path)
+            || (typeof libAnyFilterActive === 'function' && libAnyFilterActive());
+        const _cached = _hydrate ? libTreeCache.data[entry.path] : null;
+        if (_cached && _cached.length) {
+            sortEntries(_cached).forEach(child => children.appendChild(buildLibNode(child, 1, false)));
+            wrap._loaded = true;
+            wrap._nextOffset = _cached.length;
+        }
 
         const toggle = (e) => {
-            if (e && e.target.closest('.lib-actions, button')) return;
+            if (e && e.target.closest('.lib-actions, button, a')) return;
             const isOpen = children.style.display !== 'none';
             if (isOpen) {
                 children.style.display = 'none';
@@ -266,8 +400,7 @@ function buildLibNode(entry, depth, autoExpand) {
             } else {
                 children.style.display = 'block';
                 row.querySelector('.lib-toggle i').className = 'mdi mdi-chevron-down';
-                if (!loaded) {
-                    loaded = true;
+                if (!wrap._loaded) {
                     wrap._loaded = true;
                     loadLibChildren(entry, children, row, 0, LIB_PAGE_SIZE);
                 }
@@ -318,8 +451,11 @@ function buildLibNode(entry, depth, autoExpand) {
 
 function loadLibChildren(entry, children, row, offset, limit) {
     const wrap = row.parentElement;
+    // Le dossier est en cours de chargement : applyLibFilter le garde visible
+    // tant que ses enfants ne sont pas dans le DOM (le flag est retiré à la fin).
+    wrap._loading = true;
     if (offset === 0) children.innerHTML = `<div class="lib-loading"><span class="lib-spinner"></span></div>`;
-    fetch(`/api/library?path=${encodeURIComponent(entry.path)}&type=${entry.type}&offset=${offset}&limit=${limit}`)
+    fetch(`/api/library?path=${encodeURIComponent(entry.path)}&type=${entry.type}&offset=${offset}&limit=${limit}&fast=1`)
         .then(r => r.json())
         .then(data => {
             if (offset === 0) children.innerHTML = '';
@@ -337,6 +473,19 @@ function loadLibChildren(entry, children, row, offset, limit) {
                 loadLibChildren(entry, children, row, loaded, limit);
                 return;
             }
+            // Cache de l'arborescence : on garde la liste complète des enfants
+            // pour un rendu instantané au prochain F5 (borné, voir saveLibTreeCache).
+            if (offset === 0) {
+                const cached = libTreeCache.data[entry.path];
+                if (cached) {
+                    // Le dossier a été hydraté depuis le cache : on le met à jour
+                    // avec la liste fraîche (même longueur attendue).
+                    libTreeCache.data[entry.path] = data.entries || [];
+                    saveLibTreeCache();
+                } else {
+                    cacheLibChildren(entry.path, data.entries || []);
+                }
+            }
             if (loaded === 0) {
                 const emptyRow = document.createElement('div');
                 emptyRow.className = 'lib-row lib-row--empty';
@@ -350,12 +499,16 @@ function loadLibChildren(entry, children, row, offset, limit) {
                 emptyRow.appendChild(delBtn);
                 children.appendChild(emptyRow);
             }
-            if (/\[tvdbid-/.test(entry.name)) loadLibMissing(entry.path, wrap._missingBadge, children);
+            if (/\[tvdbid-/.test(entry.name)) loadLibMissing(entry.path, wrap._missingBadge, wrap._upcomingBadge, children);
             else refreshSeriesBadges(children);
+            wrap._loading = false;
             scheduleApplyLibFilter();
             scheduleCollectFacets();
         })
-        .catch(() => { if (offset === 0) children.innerHTML = `<div class="lib-loading lib-loading--error">✗</div>`; });
+        .catch(() => {
+            wrap._loading = false;
+            if (offset === 0) children.innerHTML = `<div class="lib-loading lib-loading--error">✗</div>`;
+        });
 }
 
 // ── Reconciliation incrémentale de la bibliothèque ───────────────────────────
@@ -445,7 +598,10 @@ function insertLibNodeSorted(container, node) {
 
 function syncLibFolder(entry, childrenEl, depth, node) {
     const limit = LIB_PAGE_SIZE;
-    const upto = Math.max(0, node._nextOffset || 0);
+    // Re-fetch du dossier complet (toutes les pages) : le refresh doit refléter
+    // l'état actuel (fichiers ajoutés/renommés depuis le dernier chargement),
+    // pas seulement la portion déjà chargée.
+    const upto = Infinity;
     const acc = [];
     let fetched = 0;
     const load = (offset) => {
@@ -466,7 +622,10 @@ function syncLibFolder(entry, childrenEl, depth, node) {
 function finalizeSync(entry, childrenEl, depth, node, acc, total) {
     node._nextOffset = Math.min(acc.length, total);
     reconcileContainer(childrenEl, acc, depth);
-    if (/\[tvdbid-/.test(entry.name)) loadLibMissing(entry.path, node._missingBadge, childrenEl);
+    // Le re-fetch a renvoyé la liste complète : on met à jour le cache
+    // d'arborescence pour que le prochain F5 reflète l'état actuel.
+    if (acc.length) cacheLibChildren(entry.path, acc);
+    if (/\[tvdbid-/.test(entry.name)) loadLibMissing(entry.path, node._missingBadge, node._upcomingBadge, childrenEl);
     else refreshSeriesBadges(childrenEl);
     applyLibFilter();
     collectLibFacets();

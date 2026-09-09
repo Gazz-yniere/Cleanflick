@@ -3,7 +3,7 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 .opencode/
-release/
+
 
 *.py[cod]
 *.so
@@ -36,5 +36,6 @@ cleanflick.db
 
 # Archive fichiers non essentiels
 _archive/
+releases/
 
 AGENTS.md

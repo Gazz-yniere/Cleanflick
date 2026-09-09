@@ -175,6 +175,35 @@ def test_api_config_get_post(app_client):
     assert app_client.get('/api/config').get_json()['movie_format'] == '{n} ({y}) [imdbid-{imdb}]'
 
 
+def test_library_fast_render_skips_recursive_tv_work(app_client, tmp_path, monkeypatch):
+    from src import library as library_mod
+    from src.routes import library as library_route
+
+    tv_root = tmp_path / 'out' / 'tv'
+    series = tv_root / 'Example Show (2024) [tvdbid-123]'
+    season = series / 'Season 01'
+    season.mkdir(parents=True)
+    (season / 'Example Show - S01E01.mkv').write_bytes(b'x')
+
+    def fail_recursive(*args, **kwargs):
+        raise AssertionError('recursive size calculation must be deferred')
+
+    monkeypatch.setattr(library_mod, 'folder_size', fail_recursive)
+    monkeypatch.setattr(library_route, '_series_ep_counts', fail_recursive)
+
+    response = app_client.get('/api/library?fast=1')
+
+    assert response.status_code == 200
+    data = response.get_json()
+    assert data['entries'][0]['name'] == 'tv'
+    assert data['entries'][0]['size'] == 0
+
+    response = app_client.get('/api/library', query_string={
+        'path': str(series), 'type': 'tv', 'fast': '1'})
+    assert response.status_code == 200
+    assert response.get_json()['entries'][0]['name'] == 'Season 01'
+
+
 def test_api_search_auto_cache(app_client, monkeypatch):
     from src import state
     fake = {'media_type': 'movie', 'results': [{'id': 1, 'title': 'Fake', 'year': 2020, 'imdb_id': ''}]}
@@ -193,6 +222,71 @@ def test_api_search_auto_cache(app_client, monkeypatch):
     r = app_client.post('/api/search/auto', json={'title': 'Fake', 'year': 2020})
     assert r.get_json()['cache_source'] in ('params', 'file')
     assert len(calls) == 1
+
+
+def test_api_search_auto_uses_generic_movie_cache(app_client, monkeypatch):
+    from src import db, state
+    from src.routes.search import params_cache_key
+
+    db.cache_set(params_cache_key({'type': 'movie', 'title': 'Demolition', 'year': 2015}), 'movie', [
+        {'id': 123, 'title': 'Demolition', 'year': 2015, 'imdb_id': ''},
+    ])
+
+    def fail_search(*args, **kwargs):
+        raise AssertionError('TVDB ne doit pas être appelé quand le cache générique existe')
+
+    monkeypatch.setattr(state.api_handler, 'search_auto', fail_search)
+    response = app_client.post('/api/search/auto', json={
+        'title': 'Demolition', 'year': 2015, 'filename': 'Demolition.2015.mkv',
+        'media_hint': 'movie', 'path': '',
+    })
+
+    assert response.status_code == 200
+    assert response.get_json()['cache_source'] == 'params'
+    assert response.get_json()['results'][0]['title'] == 'Demolition'
+
+
+def test_library_tvdb_link_refreshes_canonical_slug(app_client, monkeypatch):
+    from src import db, state
+
+    class FakeTvdb:
+        def get_series_details(self, series_id):
+            assert series_id == 450686
+            return {'id': series_id, 'imdbid': 'tt32063523',
+                    'title': 'Bet', 'tvdb_slug': 'kakegurui-live-action'}
+
+    state.api_handler.tvdb = FakeTvdb()
+    response = app_client.get('/api/library/tvdb-link/450686')
+
+    assert response.status_code == 302
+    assert response.headers['Location'] == 'https://www.thetvdb.com/series/kakegurui-live-action'
+    cached = db.series_meta_get('450686')
+    assert cached['data']['tvdb_slug'] == 'kakegurui-live-action'
+
+    def fail_tvdb(*args, **kwargs):
+        raise AssertionError('TVDB ne doit pas être rappelé si le slug est en cache')
+
+    state.api_handler.tvdb.get_series_details = fail_tvdb
+    response = app_client.get('/api/library/tvdb-link/450686')
+    assert response.status_code == 302
+    assert response.headers['Location'] == 'https://www.thetvdb.com/series/kakegurui-live-action'
+
+
+def test_library_tvdb_orders_accepts_manual_search_post(app_client, monkeypatch):
+    from src import state
+
+    class FakeTvdb:
+        def get_series_details(self, series_id):
+            return {'id': series_id, 'seasonTypes': [
+                {'type': 'official', 'name': 'Aired Order'},
+                {'type': 'alternate', 'alternateName': 'Netflix Order'},
+            ]}
+
+    state.api_handler.tvdb = FakeTvdb()
+    response = app_client.post('/api/library/tvdb-orders/327417')
+
+    assert response.status_code == 200
+    assert [order['value'] for order in response.get_json()['orders']] == ['official', 'alternate']
 
 
 def test_api_search_movie_force_refresh(app_client, monkeypatch):
@@ -275,7 +369,8 @@ def test_library_missing_multi_episode_file(app_client, monkeypatch):
 
 
 def test_library_missing_single_episode_file(app_client, monkeypatch):
-    """Contrôle : sans plage, l'épisode absent est bien signalé manquant."""
+    """Contrôle : sans plage, l'épisode absent est bien signalé manquant.
+    L'airdate est dans le passé : l'épisode est diffusé mais absent du disque."""
     from src import db
 
     series_dir = "out/tv/Show X [tvdbid-555]"
@@ -284,14 +379,38 @@ def test_library_missing_single_episode_file(app_client, monkeypatch):
         f.write(b'x')
 
     db.series_episodes_set('555', {'episodes': [
-        {'s': 1, 'e': 1, 'title': 'Pilot'},
-        {'s': 1, 'e': 2, 'title': 'Second'},
+        {'s': 1, 'e': 1, 'title': 'Pilot', 'airdate': '2020-01-01'},
+        {'s': 1, 'e': 2, 'title': 'Second', 'airdate': '2020-01-08'},
     ]})
 
     r = app_client.get(f"/api/library/missing?path={series_dir}")
     d = r.get_json()
     assert d['count'] == 1
     assert d['missing'][0]['label'] == 'S01E02'
+    assert d['upcoming_count'] == 0
+
+
+def test_library_upcoming_episode_not_missing(app_client, monkeypatch):
+    """Épisode absent du disque avec une date de diffusion future (ou TBA) :
+    classifié « à venir » (jaune), pas « manquant » (rouge)."""
+    from src import db
+
+    series_dir = "out/tv/Show Y [tvdbid-777]"
+    os.makedirs(series_dir, exist_ok=True)
+
+    db.series_episodes_set('777', {'episodes': [
+        {'s': 1, 'e': 1, 'title': 'Pilot', 'airdate': '2020-01-01'},
+        {'s': 2, 'e': 1, 'title': 'Future', 'airdate': '2999-01-01'},
+        {'s': 2, 'e': 2, 'title': 'TBA', 'airdate': ''},
+    ]})
+
+    r = app_client.get(f"/api/library/missing?path={series_dir}")
+    d = r.get_json()
+    assert d['missing_count'] == 1
+    assert d['missing'][0]['label'] == 'S01E01'
+    assert d['upcoming_count'] == 2
+    labels = {u['label'] for u in d['upcoming']}
+    assert labels == {'S02E01', 'S02E02'}
 
 
 def test_library_episode_inherits_series_poster(app_client):
@@ -414,3 +533,150 @@ def test_library_rename_folder_series_sync(app_client, monkeypatch, tmp_path):
     # Le parsing TVDB s'est exécuté en arrière-plan (cache BDD rempli).
     cached = db.series_episodes_get('81189')
     assert cached and len(cached['episodes']) == 2
+
+
+def _wait_names(folder, pred, timeout=10):
+    deadline = time.time() + timeout
+    names = []
+    while time.time() < deadline:
+        names = sorted(os.listdir(folder))
+        if pred(names):
+            return names
+        time.sleep(0.1)
+    return names
+
+
+def test_rename_folder_series_subtitles_follow(app_client, monkeypatch, tmp_path):
+    """Sous-titres (propre + orphelin) renommés en parallèle du vidéo."""
+    from src import db
+    from src.api import omdb
+
+    monkeypatch.setattr(omdb, '_SERIES_META_MEM', {})
+    monkeypatch.setattr(omdb, 'resolve_series_imdb', lambda *a, **k: 'tt9999999')
+    monkeypatch.setattr(omdb, 'fetch_omdb_single', lambda *a, **k: None)
+    # Cache TVDB pré-rempli : le 1er passage renomme déjà avec les titres.
+    db.series_episodes_set('555', {'episodes': [
+        {'s': 1, 'e': 1, 'title': 'Pilot'},
+        {'s': 1, 'e': 2, 'title': 'Second'},
+        {'s': 1, 'e': 3, 'title': 'Third'}]})
+
+    tv_root = str(tmp_path / 'out' / 'tv')
+    folder = os.path.join(tv_root, 'bad folder')
+    os.makedirs(folder)
+    files = [
+        'Show S01E01.mkv', 'Show S01E01.srt',          # vidéo + SRT propre
+        'Show S01E02-E03.mkv', 'Show S01E02-E03.srt',   # multi-ép + SRT orphelin
+    ]
+    for n in files:
+        (tmp_path / 'out' / 'tv' / 'bad folder' / n).write_bytes(b'x')
+
+    r = app_client.post('/api/library/rename-folder-series', json={
+        'path': folder, 'tvdbid': '555', 'title': 'Show', 'year': 2020,
+    })
+    body = r.get_json()
+    assert body['success'] is True
+    new_folder = body['new_path']
+    to_names = [x['to'] for x in body['renames']]
+    assert 'Show - S01E01 - Pilot.mkv' in to_names
+    assert 'Show - S01E01 - Pilot.srt' in to_names
+    assert 'Show - S01E02-E03 - Second & Third.mkv' in to_names
+    assert 'Show - S01E02-E03 - Second & Third.srt' in to_names
+    names = _wait_names(new_folder, lambda ns:
+        all(x in ns for x in ('Show - S01E01 - Pilot.mkv', 'Show - S01E01 - Pilot.srt',
+                              'Show - S01E02-E03 - Second & Third.mkv',
+                              'Show - S01E02-E03 - Second & Third.srt')))
+    assert len(names) == 4
+
+
+def test_rename_folder_series_s00_specials(app_client, monkeypatch, tmp_path):
+    """S00 : renommé seulement si la série a des épisodes spéciaux en TVDB."""
+    from src import db
+    from src.api import omdb
+
+    monkeypatch.setattr(omdb, '_SERIES_META_MEM', {})
+    monkeypatch.setattr(omdb, 'resolve_series_imdb', lambda *a, **k: 'tt9999999')
+    monkeypatch.setattr(omdb, 'fetch_omdb_single', lambda *a, **k: None)
+    # Série 556 : pas d'épisode S00 dans TVDB.
+    db.series_episodes_set('556', {'episodes': [{'s': 1, 'e': 1, 'title': 'Pilot'}]})
+    # Série 557 : a un épisode S00.
+    db.series_episodes_set('557', {'episodes': [
+        {'s': 0, 'e': 1, 'title': 'Special'}, {'s': 1, 'e': 1, 'title': 'Pilot'}]})
+
+    tv_root = str(tmp_path / 'out' / 'tv')
+    folder = os.path.join(tv_root, 'bad folder')
+    os.makedirs(folder)
+    (tmp_path / 'out' / 'tv' / 'bad folder' / 'Show S00E01.mkv').write_bytes(b'x')
+    (tmp_path / 'out' / 'tv' / 'bad folder' / 'Show S01E01.mkv').write_bytes(b'x')
+
+    r = app_client.post('/api/library/rename-folder-series', json={
+        'path': folder, 'tvdbid': '556', 'title': 'Show', 'year': 2020,
+    })
+    new_folder = r.get_json()['new_path']
+    names = _wait_names(new_folder, lambda ns: any('S01E01 - Pilot.mkv' in n for n in ns))
+    # S00 absent du cache TVDB → inchangé ; S01 renommé.
+    assert 'Show S00E01.mkv' in names
+    assert 'Show - S01E01 - Pilot.mkv' in names
+
+    # Avec un épisode S00 dans TVDB : le S00 est renommé.
+    folder2 = os.path.join(tv_root, 'bad folder 2')
+    os.makedirs(folder2)
+    (tmp_path / 'out' / 'tv' / 'bad folder 2' / 'ShowB S00E01.mkv').write_bytes(b'x')
+    r = app_client.post('/api/library/rename-folder-series', json={
+        'path': folder2, 'tvdbid': '557', 'title': 'ShowB', 'year': 2020,
+    })
+    new_folder2 = r.get_json()['new_path']
+    names2 = _wait_names(new_folder2, lambda ns: any('S00E01 - Special.mkv' in n for n in ns))
+    assert 'ShowB - S00E01 - Special.mkv' in names2
+
+
+def test_rename_subtitles_catchup_pass(app_client, tmp_path):
+    """Passe de rattrapage : vidéo déjà au bon nom, SRT orphelin renommé."""
+    from src import db
+    from src.routes.library import _folder_series_rename
+
+    tv_root = str(tmp_path / 'out' / 'tv')
+    folder = os.path.join(tv_root, 'Show [tvdbid-777]')
+    os.makedirs(folder)
+    (tmp_path / 'out' / 'tv' / 'Show [tvdbid-777]' / 'Show - S01E01.mkv').write_bytes(b'x')
+    (tmp_path / 'out' / 'tv' / 'Show [tvdbid-777]' / 'Show S01E01.srt').write_bytes(b'x')
+    db.series_episodes_set('777', {'episodes': [{'s': 1, 'e': 1, 'title': 'Pilot'}]})
+
+    renames = _folder_series_rename(folder, 'Show', 2020, '777', '', '', {})
+    assert (tmp_path / 'out' / 'tv' / 'Show [tvdbid-777]' / 'Show - S01E01 - Pilot.srt').exists()
+    assert not (tmp_path / 'out' / 'tv' / 'Show [tvdbid-777]' / 'Show S01E01.srt').exists()
+    # Le vidéo (déjà correct) n'est pas renommé, seul le SRT est dans renames.
+    assert any(r['from'] == 'Show S01E01.srt' and r['to'] == 'Show - S01E01 - Pilot.srt'
+               for r in renames)
+
+
+def test_api_rename_subtitles_follow(app_client, tmp_path):
+    """/api/rename renomme aussi le SRT au même stem."""
+    dl = tmp_path / 'downloads'
+    (dl / 'Show S01E01.mkv').write_bytes(b'x')
+    (dl / 'Show S01E01.srt').write_bytes(b'x')
+    r = app_client.post('/api/rename', json={
+        'path': str(dl / 'Show S01E01.mkv'), 'new_name': 'Show - S01E01 - Pilot.mkv'})
+    assert r.status_code == 200
+    assert (dl / 'Show - S01E01 - Pilot.mkv').exists()
+    assert (dl / 'Show - S01E01 - Pilot.srt').exists()
+    assert not (dl / 'Show S01E01.srt').exists()
+
+
+def test_rename_subtitles_catchup_across_subfolders(tmp_path):
+    """Rattrapage folder-wide : SRT à la racine du dossier série, vidéo dans
+    un sous-dossier (Season 1/) — le SRT prend le nom final du vidéo."""
+    from src import db
+    from src.routes.library import _folder_series_rename
+
+    series = tmp_path / 'out' / 'tv' / 'Show [tvdbid-778]'
+    season = series / 'Season 1'
+    season.mkdir(parents=True)
+    (season / 'Show - S01E01.mkv').write_bytes(b'x')
+    (series / 'Show S01E01.srt').write_bytes(b'x')
+    db.series_episodes_set('778', {'episodes': [{'s': 1, 'e': 1, 'title': 'Pilot'}]})
+
+    renames = _folder_series_rename(str(series), 'Show', 2020, '778', '', '', {})
+    assert (series / 'Show - S01E01 - Pilot.srt').exists()
+    assert not (series / 'Show S01E01.srt').exists()
+    assert any(r['from'] == 'Show S01E01.srt' and r['to'] == 'Show - S01E01 - Pilot.srt'
+               for r in renames)

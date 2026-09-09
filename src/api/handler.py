@@ -82,11 +82,12 @@ class APIHandler:
         except ValueError:
             return {'id': tv_id, 'source': source}
 
-    def get_series_episodes(self, series_id: str, season: Optional[int] = None, page: int = 0) -> Dict:
+    def get_series_episodes(self, series_id: str, season: Optional[int] = None, page: int = 0,
+                            season_type: str = 'default') -> Dict:
         tvdb = self._require_tvdb()
         if not tvdb:
             return {'series_id': series_id, 'episodes': [], 'source': 'tvdb'}
         try:
-            return tvdb.get_series_episodes(int(series_id), season, page)
+            return tvdb.get_series_episodes(int(series_id), season, page, season_type)
         except ValueError:
             return {'series_id': series_id, 'episodes': [], 'source': 'tvdb'}

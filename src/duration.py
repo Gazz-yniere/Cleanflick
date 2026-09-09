@@ -19,6 +19,12 @@ _DUR_GIVEUP_MAX = 4        # tours avant de renoncer (spinner levé côté clien
 _DUR_UNKNOWN = -1          # valeur renvoyée quand on renonce : durée non lue
 
 
+def is_pending(path):
+    """Indique si un fichier attend encore son analyse dans le worker."""
+    with _dur_queue_lock:
+        return path in _MEDIA_DUR_PENDING
+
+
 def _parse_duration_cached(path, mt, sz):
     """Parse + persistance de la durée ; une durée illisible (None) est aussi
     mise en cache pour ne pas reparsenter sans fin à chaque refresh."""
@@ -31,7 +37,7 @@ def _parse_duration_cached(path, mt, sz):
     return minutes
 
 
-def get_duration(path):
+def get_duration(path, non_blocking=False):
     """Durée réelle (min) du fichier vidéo, lue en Python pur (Docker-safe),
     mise en cache en mémoire + en base (invalidée si taille/mtime change).
     En mode scan rapide : durée non bloquante (un chargement en arrière-plan
@@ -53,25 +59,34 @@ def get_duration(path):
             return minutes
     except Exception:
         pass
-    if state.config.get('lib_fast_scan'):
+    if non_blocking or state.config.get('lib_fast_scan'):
         _dur_enqueue(path, mt)
         return None
     return _parse_duration_cached(path, mt, sz)
 
 
 def duration_for(path):
-    """Durée pour l'affichage du scan : cache mémoire d'abord, sinon parse direct
-    (non bloquant, sans file) — utilisé par /api/scan."""
+    """Durée pour l'affichage du scan : cache mémoire d'abord, puis cache BDD
+    (invalidé si taille/mtime change), sinon mise en file du parse. Le scan
+    HTTP ne doit jamais attendre l'analyse binaire d'une vidéo."""
     try:
-        mt = int(os.path.getmtime(path))
+        st = os.stat(path)
+        mt, sz = int(st.st_mtime), st.st_size
     except Exception:
         return None
     key = (path, mt)
     if key in _MEDIA_DUR_CACHE:
         return _MEDIA_DUR_CACHE[key]
-    minutes = mediaduration.get_duration_minutes(path)
-    _MEDIA_DUR_CACHE[key] = minutes
-    return minutes
+    try:
+        cached = db.media_dur_get(path)
+        if cached and cached.get('size') == sz and cached.get('mtime') == mt:
+            minutes = cached.get('minutes')
+            _MEDIA_DUR_CACHE[key] = minutes
+            return minutes
+    except Exception:
+        pass
+    _dur_enqueue(path, mt)
+    return None
 
 
 def _dur_enqueue(path, mt):

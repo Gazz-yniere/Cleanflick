@@ -255,6 +255,7 @@
                             <div class="examples-box">
                                 <p><code>{n} - {s00e00} - {t}</code> → <em>Breaking Bad - S01E01 - Pilot.mkv</em></p>
                                 <p><code>{n} ({y}) [tvdbid-{tvdbid}] - {s00e00} - {t}</code> → <em>Breaking Bad (2008) [tvdbid-81189] - S01E01 - Pilot.mkv</em></p>
+                                <p><code>{n:en} ({y}) [tvdbid-{tvdbid}] - {s00e00} - {t:en}</code> → <em>titre forcé en anglais</em></p>
                             </div>
                         </div>
                     </div>
@@ -339,10 +340,11 @@
                     </details>
                     <details class="vars-group">
                         <summary>Traductions</summary>
-                        <div class="hint vars-translations-hint">Supporte les suffixes de langue sur le titre : <code>{n:fr}</code>, <code>{title:de}</code>, <code>{t:es}</code>, <code>{episode_title:ja}</code>.</div>
+                        <div class="hint vars-translations-hint">Supporte les suffixes de langue sur le titre et les titres d'épisodes : <code>{n:en}</code>, <code>{n:fr}</code>, <code>{title:de}</code>, <code>{t:es}</code>, <code>{episode_title:ja}</code>. Les codes à 2 ou 3 lettres sont acceptés (<code>{n:en}</code> = <code>{n:eng}</code>). Les traductions proviennent de TVDB ; si la langue n'existe pas, le titre par défaut est utilisé.</div>
                         <table class="vars-table">
                             <thead><tr><th>Variable</th><th>Description</th><th>Exemple</th></tr></thead>
                             <tbody>
+                                <tr><td><code>{n:en}</code></td><td>Titre en anglais</td><td class="example">Breaking Bad</td></tr>
                                 <tr><td><code>{n:fr}</code></td><td>Titre en français</td><td class="example">La Matrice</td></tr>
                                 <tr><td><code>{n:de}</code></td><td>Titre en allemand</td><td class="example">Die Matrix</td></tr>
                                 <tr><td><code>{n:es}</code></td><td>Titre en espagnol</td><td class="example">Matrix</td></tr>
@@ -362,7 +364,7 @@
 
     <footer class="app-footer">
         <span data-i18n="footer_text"></span>
-        <span class="footer-meta">· <a href="https://github.com/Gazz-yniere/Cleanflick" target="_blank">GitHub</a> · v1.0.10</span>
+        <span class="footer-meta">· <a href="https://github.com/Gazz-yniere/Cleanflick" target="_blank">GitHub</a> · v1.0.11</span>
     </footer>
 </div>
 
@@ -443,7 +445,7 @@
 
 <!-- Modal Résultat Renommage Dossier -->
 <div id="libRenameResultModal" class="modal">
-    <div class="modal-content modal-content--narrow">
+    <div class="modal-content modal-content--rename">
         <div class="modal-header">
             <h2><i class="mdi mdi-folder-move"></i> <span id="libRenameResultTitle"></span></h2>
             <button class="close-btn" onclick="closeModal('libRenameResultModal')">&times;</button>

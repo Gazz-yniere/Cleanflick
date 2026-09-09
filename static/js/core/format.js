@@ -11,7 +11,7 @@ function interpolate(template, vars) {
             const code = fmt.slice(1).toLowerCase();
             const trans = vars._translations || {};
             if (/^[a-zA-Z]{2,3}$/.test(code) && ['n','title','original_title','t','episode_title'].includes(name))
-                return trans[code] || trans[LANG_MAP[code]] || val || '';
+                return translateLang(trans, code, val);
         }
         if (val === undefined || val === null || String(val).trim() === '' || String(val) === 'None') return '';
         const s = String(val).trim();
@@ -31,9 +31,11 @@ function generateFilename(file, details) {
     const fmt = file.media_type === 'movie' ? globalConfig.movie_format : globalConfig.tv_format;
     const s = file.season || 1, e = file.episode || 1;
     const cleanedTitle = cleanTitle(details.title || '');
+    const cleanedOriginal = cleanTitle(details.original_title || '');
     const cleanedEpTitle = cleanTitle(details.episode_title || details.t || '');
     const vars = {
         n: cleanedTitle, title: cleanedTitle,
+        original_title: cleanedOriginal,
         ny: cleanedTitle && details.year ? `${cleanedTitle} (${details.year})` : cleanedTitle,
         y: details.year || '', year: details.year || '',
         d: details.airdate || details.release_date || '',

@@ -171,6 +171,13 @@
     background: #e74c3c; cursor: default;
 }
 .lib-missing-badge:empty { display: none; }
+.lib-upcoming-badge {
+    display: inline-flex; align-items: center; justify-content: center;
+    min-width: 30px; height: 30px; padding: 0 5px; border-radius: 15px; flex-shrink: 0;
+    font-size: 1em; font-weight: 600; color: #2c2408;
+    background: #f1c40f; cursor: default;
+}
+.lib-upcoming-badge:empty { display: none; }
 .lib-row--missing {
     padding-left: 36px;
     border: 1px solid rgba(231, 76, 60, 0.55);
@@ -186,12 +193,49 @@
     font-family: var(--font-mono, monospace);
 }
 .lib-row--missing .lib-icon-file { opacity: 0.5; }
+.lib-row--missing .lib-badge i { color: #f39c12; }
+.lib-row--upcoming .lib-badge i { color: #f1c40f; }
+.lib-row--upcoming {
+    padding-left: 36px;
+    border: 1px solid rgba(241, 196, 15, 0.55);
+    border-radius: 4px;
+    background: rgba(241, 196, 15, 0.08);
+    color: var(--c-text4);
+    opacity: 0.85;
+}
+.lib-row--upcoming:hover { background: rgba(241, 196, 15, 0.16); }
+.lib-row--upcoming .lib-name-main,
+.lib-row--upcoming .lib-missing-item {
+    color: var(--c-text4);
+    font-family: var(--font-mono, monospace);
+}
+.lib-row--upcoming .lib-icon-file { opacity: 0.5; }
+.lib-upcoming-date {
+    font-family: var(--font-mono, monospace);
+    font-size: 1em;
+    font-weight: 600;
+    color: var(--c-text2);
+    margin-left: 10px;
+    flex-shrink: 0;
+}
 .lib-rename-summary { font-size: 1.05em; font-weight: 600; color: var(--c-success); margin-bottom: 10px; }
 .lib-rename-folder { font-size: 1em; padding: 8px 10px; margin-bottom: 10px; border-radius: 6px; background: var(--c-surface2); border: 1px solid var(--c-border); color: var(--c-text2); }
 .lib-rename-folder--error { color: #e74c3c; border-color: rgba(231,76,60,.4); background: rgba(231,76,60,.08); }
 .lib-rename-list { display: flex; flex-direction: column; gap: 6px; }
-.lib-rename-item { display: flex; flex-direction: column; gap: 2px; font-family: var(--font-mono, monospace); font-size: .9em; padding: 6px 8px; border-radius: 4px; background: var(--c-surface2); }
-.lib-rename-sep { color: var(--c-accent); line-height: 1; }
-.lib-rename-from { color: #e74c3c; overflow-wrap: anywhere; word-break: break-all; }
-.lib-rename-to { color: var(--c-success); overflow-wrap: anywhere; word-break: break-all; }
+.lib-rename-item { display: flex; flex-direction: row; align-items: center; gap: 8px; font-family: var(--font-mono, monospace); font-size: .9em; padding: 6px 8px; border-radius: 4px; background: var(--c-surface2); }
+.lib-rename-sep { color: var(--c-accent); line-height: 1; flex-shrink: 0; }
+.lib-rename-from { color: #e74c3c; flex: 1 1 0; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.lib-rename-to { color: var(--c-success); flex: 1 1 0; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .lib-actions { display: flex; gap: 6px; flex-shrink: 0; margin-left: 8px; }
+.lib-row--dir .lib-actions .btn-small {
+    width: 30px; height: 30px; border-radius: 50%;
+}
+.lib-tvdb-link {
+    width: 24px; height: 24px; padding: 0;
+    background: transparent; color: #35bd70; border: 0;
+    border-radius: 0;
+    align-self: center; align-items: center; justify-content: center;
+    line-height: 1;
+}
+.lib-tvdb-link:hover { background: transparent; color: #8af0ae; }
+.lib-tvdb-link i { font-size: 1.7em; line-height: 1; vertical-align: middle; }

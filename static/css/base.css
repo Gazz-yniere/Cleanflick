@@ -136,6 +136,7 @@ nav a.active { border-bottom-color: var(--c-accent); color: var(--c-accent); fon
 .close-btn { font-size: 22px; cursor: pointer; color: var(--c-text4); background: none; border: none; }
 .close-btn:hover { color: var(--c-accent); }
 .modal-content--narrow { max-width: 500px; }
+.modal-content--rename { max-width: 860px; }
 
 /* ── Footer ───────────────────────────────────────────────────────────────── */
 .app-footer {

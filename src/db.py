@@ -134,6 +134,27 @@ def add_history(entry: dict):
     conn.close()
 
 
+def add_history_batch(entries):
+    """Insère plusieurs entrées d'historique en une seule transaction (commit
+    unique) — bien plus rapide qu'un commit par entrée sur un partage réseau."""
+    if not entries:
+        return
+    conn = get_conn()
+    cur = conn.cursor()
+    known = {'id', 'op', 'date', 'from_path', 'from_name', 'to_path', 'to_name'}
+    try:
+        for entry in entries:
+            extra = {k: v for k, v in entry.items() if k not in known}
+            cur.execute('''INSERT OR REPLACE INTO history (id, op, date, from_path, from_name, to_path, to_name, extra)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?)''', (
+                entry.get('id'), entry.get('op'), entry.get('date'), entry.get('from_path'),
+                entry.get('from_name'), entry.get('to_path'), entry.get('to_name'),
+                json.dumps(extra, ensure_ascii=False)))
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def get_history():
     conn = get_conn()
     cur = conn.cursor()
@@ -485,7 +506,8 @@ def series_meta_all():
 
 def refresh_due(table: str, refresh_days: int, now: float = None) -> list:
     """Clés d'une table de cache (search_cache, file_search_cache, details_cache,
-    series_episodes_cache) dont loaded_at est plus vieux que refresh_days.
+    series_episodes_cache, OMDb et métadonnées de séries) dont loaded_at est
+    plus vieux que refresh_days.
     Les entrées sans loaded_at sont exclues. now permet de tester."""
     if not refresh_days or refresh_days <= 0:
         return []
@@ -493,7 +515,9 @@ def refresh_due(table: str, refresh_days: int, now: float = None) -> list:
         now = time.time()
     cutoff = int(now) - int(refresh_days * 86400)
     col = {'search_cache': 'key', 'file_search_cache': 'fkey',
-           'details_cache': 'kind', 'series_episodes_cache': 'series_id'}[table]
+           'details_cache': 'kind', 'series_episodes_cache': 'series_id',
+           'omdb_cache': 'imdb_id', 'omdb_episode_cache': 'key',
+           'series_meta_cache': 'tvdb_id'}[table]
     conn = get_conn()
     cur = conn.cursor()
     try:

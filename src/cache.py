@@ -67,6 +67,152 @@ def params_cache_key(params):
 _refresh_lock = threading.Lock()
 _refresh_running = False
 
+# Préchauffage serveur des médias non encore recherchés. Les clés de file sont
+# les empreintes de fichiers : un même fichier ne peut donc déclencher deux
+# recherches concurrentes après un scan ou l'ouverture de la bibliothèque.
+_MEDIA_QUEUE = {}
+_MEDIA_QUEUE_LOCK = threading.Lock()
+_MEDIA_WORKER = None
+_SERIES_QUEUE = set()
+
+
+def enqueue_media_files(paths, include_cached=False):
+    """Programme les recherches manquantes sans bloquer la requête HTTP."""
+    global _MEDIA_WORKER
+    if not paths:
+        return
+    with _MEDIA_QUEUE_LOCK:
+        for path in paths:
+            fp = file_fingerprint(path)
+            if not fp:
+                continue
+            parent = os.path.dirname(path)
+            for _ in range(4):
+                match = re.search(r'\[tvdbid-([0-9]+)\]', os.path.basename(parent), re.I)
+                if match:
+                    _SERIES_QUEUE.add(match.group(1).lower())
+                    break
+                next_parent = os.path.dirname(parent)
+                if next_parent == parent:
+                    break
+                parent = next_parent
+            if not include_cached and file_cache_lookup(path) is not None:
+                continue
+            media = state.scanner._infer_media_type(os.path.basename(path))
+            title = state.scanner._extract_title(os.path.basename(path), media)
+            year = state.scanner._extract_year(os.path.basename(path))
+            season = episode = None
+            if media == 'tv':
+                probe = type('MediaProbe', (), {'season': None, 'episode': None})()
+                state.scanner._extract_episode_info(os.path.basename(path), probe)
+                season, episode = probe.season, probe.episode
+            _MEDIA_QUEUE[fp['fkey']] = {
+                'path': path, 'media_type': media, 'title': title, 'year': year,
+                'season': season, 'episode': episode,
+            }
+        if (_MEDIA_QUEUE or _SERIES_QUEUE) and (_MEDIA_WORKER is None or not _MEDIA_WORKER.is_alive()):
+            _MEDIA_WORKER = threading.Thread(target=_media_worker_loop, daemon=True)
+            _MEDIA_WORKER.start()
+
+
+def enqueue_media_roots(roots, include_cached=False):
+    """Parcourt les racines hors requête HTTP puis alimente la file média."""
+    roots = [r for r in (roots or []) if r]
+    if not roots:
+        return
+
+    def _walk():
+        paths = []
+        for root in roots:
+            try:
+                for folder, _dirs, files in os.walk(root):
+                    paths.extend(os.path.join(folder, name) for name in files
+                                 if os.path.splitext(name)[1].lower() in {
+                                     '.mkv', '.mp4', '.avi', '.mov', '.wmv', '.m4v', '.ts', '.flv', '.webm'
+                                 })
+            except OSError:
+                continue
+        enqueue_media_files(paths, include_cached=include_cached)
+
+    threading.Thread(target=_walk, daemon=True).start()
+
+
+def _process_media_item(item):
+    path = item['path']
+    file_cached = file_cache_lookup(path)
+    params = {
+        'type': item['media_type'], 'title': item['title'], 'year': item['year'],
+    }
+    key = params_cache_key(params)
+    cached = db.cache_get(key)
+    results = (file_cached or {}).get('results', []) if file_cached else (cached or {}).get('results', [])
+    if not cached and not file_cached:
+        if item['media_type'] == 'tv':
+            results = state.api_handler.search_tv(item['title'], item['year'])
+        else:
+            results = state.api_handler.search_movie(item['title'], item['year'])
+    # Le cache TVDB peut exister avant le cache OMDb (interruption, ancienne
+    # version) : l'enrichissement doit quand même être repris sans nouvelle
+    # recherche TVDB.
+    omdb.fetch_omdb_ratings(results[:1])
+    if item['media_type'] == 'tv' and item.get('season') and item.get('episode') and results:
+        top = results[0]
+        omdb.fetch_omdb_episode(top.get('imdb_id', ''), top.get('title', item['title']),
+                                top.get('year', item['year']), item['season'], item['episode'])
+    if item['media_type'] == 'tv' and results:
+        tvdb_id = (results[0].get('id_tvdb') or results[0].get('id') or '')
+        if tvdb_id:
+            _SERIES_QUEUE.add(str(tvdb_id).lower())
+    if not cached and not file_cached:
+        db.cache_set(key, item['media_type'], results)
+    file_cache_store(path, item['media_type'], results)
+    try:
+        from . import duration
+        duration.get_duration(path, non_blocking=True)
+    except Exception:
+        pass
+
+
+def _media_worker_loop():
+    while True:
+        with _MEDIA_QUEUE_LOCK:
+            fkey, item = next(iter(_MEDIA_QUEUE.items()), (None, None))
+            if fkey:
+                _MEDIA_QUEUE.pop(fkey, None)
+                series_id = None
+            else:
+                series_id = next(iter(_SERIES_QUEUE), None)
+                if series_id:
+                    _SERIES_QUEUE.remove(series_id)
+        if not item:
+            if not series_id:
+                return
+            try:
+                from . import library
+                cached_episodes = db.series_episodes_get(series_id)
+                episodes = (cached_episodes or {}).get('episodes') or []
+                if not episodes or len(episodes) >= 500:
+                    library.tvdb_series_episodes(series_id)
+                imdb = omdb.series_imdb_cached(series_id) or omdb.resolve_series_imdb(series_id)
+                if imdb and db.omdb_get(imdb) is None:
+                    omdb.fetch_omdb_single(imdb, is_series=True)
+            except Exception as e:
+                logger.warning(f"Series metadata preload failed for {series_id}: {e}")
+            continue
+        try:
+            _process_media_item(item)
+        except Exception as e:
+            logger.warning(f"Media metadata preload failed for {item.get('path')}: {e}")
+
+
+def _schedule_omdb_quota_retry():
+    if not omdb.quota_retry_due():
+        return
+    roots = [state.config.get('_input_path'), state.config.get('_movie_output_path'),
+             state.config.get('_tv_output_path')]
+    omdb.mark_quota_retry_scheduled()
+    enqueue_media_roots(roots, include_cached=True)
+
 
 def _refresh_days():
     try:
@@ -198,24 +344,69 @@ def _refresh_series_episodes(series_id):
     tvdb_series_episodes(series_id)
 
 
+def _refresh_omdb(imdb_id):
+    try:
+        imdb = str(imdb_id).strip().lower()
+        if imdb:
+            omdb.fetch_omdb_single(imdb, force=True)
+    except Exception as e:
+        logger.warning(f"Cache refresh OMDb failed for {imdb_id}: {e}")
+
+
+def _refresh_omdb_episode(cache_key):
+    match = re.match(r'^([^:]+):y([^:]+):s(\d+)e(\d+)$', str(cache_key or '').lower())
+    if not match:
+        return
+    imdb, year, season, episode = match.groups()
+    try:
+        data = db.omdb_episode_get(cache_key) or {}
+        title = data.get('Series') or data.get('Title') or ''
+        if title:
+            omdb.fetch_omdb_episode(imdb, title, year, int(season), int(episode), force=True)
+    except Exception as e:
+        logger.warning(f"Cache refresh OMDb episode failed for {cache_key}: {e}")
+
+
+def _refresh_series_meta(tvdb_id):
+    try:
+        imdb = omdb.resolve_series_imdb(tvdb_id, force=True)
+        if imdb:
+            omdb.fetch_omdb_single(imdb, is_series=True, force=True)
+    except Exception as e:
+        logger.warning(f"Cache refresh series metadata failed for {tvdb_id}: {e}")
+
+
 def start_cache_refresh_worker():
+    global _refresh_running
+    with _refresh_lock:
+        if _refresh_running:
+            return
+        _refresh_running = True
+
     def _cache_refresh_worker():
         while True:
             days = _refresh_days()
             if days > 0:
                 try:
-                    for key in db.refresh_due('search_cache', days):
+                    for key in db.refresh_due('search_cache', days)[:25]:
                         _refresh_search_key(key)
-                    for fkey in db.refresh_due('file_search_cache', days):
+                    for fkey in db.refresh_due('file_search_cache', days)[:25]:
                         _refresh_file_cache(fkey)
-                    for cid in db.refresh_due('details_cache', days):
+                    for cid in db.refresh_due('details_cache', days)[:25]:
                         kind, _, cid2 = cid.partition(':')
                         if cid2:
                             _refresh_details(kind, cid2)
-                    for sid in db.refresh_due('series_episodes_cache', days):
+                    for sid in db.refresh_due('series_episodes_cache', days)[:25]:
                         _refresh_series_episodes(sid)
+                    for imdb in db.refresh_due('omdb_cache', days)[:25]:
+                        _refresh_omdb(imdb)
+                    for key in db.refresh_due('omdb_episode_cache', days)[:25]:
+                        _refresh_omdb_episode(key)
+                    for tvdb_id in db.refresh_due('series_meta_cache', days)[:25]:
+                        _refresh_series_meta(tvdb_id)
                 except Exception as e:
                     logger.warning(f"Cache refresh worker error: {e}")
+            _schedule_omdb_quota_retry()
             time.sleep(300)
 
     threading.Thread(target=_cache_refresh_worker, daemon=True).start()

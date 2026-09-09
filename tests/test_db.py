@@ -120,6 +120,16 @@ def test_meta_roundtrip(tmp_db):
     assert db.meta_get('k') == '123'
 
 
+def test_omdb_quota_retry_flag(tmp_db, monkeypatch):
+    from src.api import omdb
+
+    monkeypatch.setattr(omdb, '_omdb_quota_paused_until', lambda: 0)
+    db.meta_set('omdb_quota_retry_pending', '1')
+    assert omdb.quota_retry_due() is True
+    omdb.mark_quota_retry_scheduled()
+    assert omdb.quota_retry_due() is False
+
+
 def test_media_duration_cache(tmp_db):
     assert db.media_dur_get('/a/x.mkv') is None
     db.media_dur_set('/a/x.mkv', 62, 100, 1234)
@@ -139,11 +149,17 @@ def test_refresh_due(tmp_db):
     db.file_cache_set('f1', '/a/x.mkv', 1, 1, 'movie', [{'id': 1}])
     db.details_set('movie', '42', {'title': 'M'})
     db.series_episodes_set('81189', {'episodes': [1]})
+    db.omdb_set('tt0000001', {'imdbRating': '7.0', 'Title': 'M'})
+    db.omdb_episode_set('tt0000001:y2020:s01e01', {'imdbRating': '8.0', 'Title': 'E'})
+    db.series_meta_set('81189', 'tt0000001', {'title': 'S'})
     # entrée récente → jamais due, quelle que soit la valeur
     assert db.refresh_due('search_cache', 7) == []
     assert db.refresh_due('file_search_cache', 7) == []
     assert db.refresh_due('details_cache', 7) == []
     assert db.refresh_due('series_episodes_cache', 7) == []
+    assert db.refresh_due('omdb_cache', 7) == []
+    assert db.refresh_due('omdb_episode_cache', 7) == []
+    assert db.refresh_due('series_meta_cache', 7) == []
     # 0 jours → jamais
     assert db.refresh_due('search_cache', 0) == []
     # now fixé au futur → tout est dû
@@ -152,3 +168,6 @@ def test_refresh_due(tmp_db):
     assert db.refresh_due('file_search_cache', 7, now=future) == ['f1']
     assert db.refresh_due('details_cache', 7, now=future) == ['movie:42']
     assert db.refresh_due('series_episodes_cache', 7, now=future) == ['81189']
+    assert db.refresh_due('omdb_cache', 7, now=future) == ['tt0000001']
+    assert db.refresh_due('omdb_episode_cache', 7, now=future) == ['tt0000001:y2020:s01e01']
+    assert db.refresh_due('series_meta_cache', 7, now=future) == ['81189']

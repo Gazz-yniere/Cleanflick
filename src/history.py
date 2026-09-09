@@ -31,3 +31,10 @@ def append_history(entry):
         db.add_history(entry)
     except Exception as e:
         logger.error(f"Error appending history to DB: {e}")
+
+
+def append_history_batch(entries):
+    try:
+        db.add_history_batch(entries)
+    except Exception as e:
+        logger.error(f"Error appending history batch to DB: {e}")

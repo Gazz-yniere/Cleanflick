@@ -60,8 +60,11 @@ class TVDBAPIHandler:
         remote_ids = result.get('remote_ids', [])
         imdb = next((r['id'] for r in remote_ids if r.get('sourceName') == 'IMDB'), '')
         tmdb = next((r['id'] for r in remote_ids if 'TheMovieDB' in r.get('sourceName', '')), '')
+        slug = (result.get('slug') or result.get('seriesSlug') or result.get('series_slug')
+                or result.get('url', '').rstrip('/').split('/')[-1])
         return {
             'id': tvdb_id, 'id_tvdb': str(tvdb_id),
+            'tvdb_slug': slug,
             'imdb_id': imdb, 'tmdb_id': tmdb,
             'title': result.get('name', ''), 'year': year,
             'date': air_time,
@@ -78,7 +81,7 @@ class TVDBAPIHandler:
             filtered = []
             data = self.client.search(title, type="series") or []
             db.usage_bump('tvdb')
-            for r in data[:10]:
+            for r in data[:50]:
                 try:
                     item = self._parse_search_result(r, 'series')
                     results.append(item)
@@ -168,6 +171,37 @@ class TVDBAPIHandler:
             return {'media_type': 'tv', 'results': series}
         return {'media_type': 'tv' if is_tv else 'movie', 'results': []}
 
+    def _translation_for(self, translations: Dict[str, str], lang: str) -> str:
+        """Titre traduit pour une langue (code 2 ou 3 lettres) depuis un dict
+        de traductions clé en code 3 lettres."""
+        if not translations or not lang:
+            return ''
+        from ..naming import _LANG_MAP
+        lang = str(lang).lower()
+        code = _LANG_MAP.get(lang, lang)
+        return translations.get(code) or translations.get(lang) or ''
+
+    def _fetch_translations(self, media_method: str, media_id: int, original_language: str) -> Dict[str, str]:
+        """Récupère les titres traduits (langue originale + anglais) via l'endpoint
+        de traduction TVDB, quand la recherche n'a pas fourni de « translations ».
+        Renvoie un dict {code_3lettres: titre}."""
+        out: Dict[str, str] = {}
+        langs = [lang for lang in (original_language or '', 'en') if lang]
+        # L'endpoint TVDB attend des codes ISO 639-2/T à 3 lettres.
+        from ..naming import _LANG_MAP
+        for lang in dict.fromkeys(langs):
+            code = _LANG_MAP.get(lang, lang)
+            if len(code) != 3:
+                continue
+            try:
+                res = getattr(self.client, media_method)(media_id, code)
+                name = (res or {}).get('name', '')
+                if name:
+                    out[code] = name
+            except Exception as e:
+                logger.debug(f"TVDB translation fetch ({media_method} {media_id} {code}) : {e}")
+        return out
+
     # ── Details ──────────────────────────────────────────────────────────────
 
     def get_series_details(self, series_id: int, search_data: Dict = None) -> Dict:
@@ -179,6 +213,8 @@ class TVDBAPIHandler:
             imdb = imdb or sd.get('imdb_id', '')
             tmdb = tmdb or sd.get('tmdb_id', '')
             translations = sd.get('translations', {})
+            if not translations:
+                translations = self._fetch_translations('get_series_translation', series_id, s.get('originalLanguage', ''))
 
             first_aired = s.get('firstAired') or s.get('first_air_date') or s.get('first_air_time', '')
             year = first_aired[:4] if first_aired else s.get('year', '')
@@ -206,11 +242,14 @@ class TVDBAPIHandler:
             real_seasons = [x for x in (s.get('seasons') or []) if x.get('type', {}).get('type') == 'official']
             season_count = len(real_seasons) or len(s.get('seasons') or [])
 
+            slug = (s.get('slug') or s.get('seriesSlug') or s.get('series_slug')
+                    or s.get('url', '').rstrip('/').split('/')[-1])
             details = {
                 'id': series_id, 'tvdbid': str(series_id),
+                'tvdb_slug': slug,
                 'imdbid': imdb, 'imdb': imdb, 'tmdbid': tmdb, 'tmdb': tmdb,
                 'title': s.get('name', ''), 'n': s.get('name', ''),
-                'original_title': translations.get(s.get('originalLanguage', 'en'), '') or s.get('name', ''),
+                'original_title': self._translation_for(translations, s.get('originalLanguage', 'en')) or s.get('name', ''),
                 'translations': translations,
                 'year': str(year) if year else '', 'y': str(year) if year else '',
                 'startdate': first_aired,
@@ -221,6 +260,7 @@ class TVDBAPIHandler:
                 'network': network,
                 'status': s.get('status', {}).get('name', '') if isinstance(s.get('status'), dict) else '',
                 'season_count': season_count, 'sc': season_count,
+                'season_types': s.get('seasonTypes') or [],
                 'score': s.get('score'), 'rating': None,
                 'director': ', '.join(creators),
                 'actors': actors, 'actor': actors[0] if actors else '',
@@ -243,6 +283,8 @@ class TVDBAPIHandler:
             imdb = imdb or sd.get('imdb_id', '')
             tmdb = tmdb or sd.get('tmdb_id', '')
             translations = sd.get('translations', {})
+            if not translations:
+                translations = self._fetch_translations('get_movie_translation', movie_id, m.get('originalLanguage', ''))
 
             year = m.get('year')
             releases = m.get('releases', [])
@@ -268,7 +310,7 @@ class TVDBAPIHandler:
                 'imdbid': imdb, 'imdb': imdb, 'tmdbid': tmdb, 'tmdb': tmdb,
                 'wikidataid': wikidata,
                 'title': m.get('name', ''), 'n': m.get('name', ''),
-                'original_title': translations.get(m.get('originalLanguage', 'en'), '') or m.get('name', ''),
+                'original_title': self._translation_for(translations, m.get('originalLanguage', 'en')) or m.get('name', ''),
                 'translations': translations,
                 'year': str(year) if year else '', 'y': str(year) if year else '',
                 'release_date': release_date, 'd': release_date,
@@ -290,13 +332,18 @@ class TVDBAPIHandler:
             logger.error(f"Movie details error: {e}")
             return {'id': movie_id, 'tvdbid': str(movie_id), 'title': '', 'year': '', 'source': 'tvdb'}
 
-    def get_series_episodes(self, series_id: int, season: Optional[int] = None, page: int = 0) -> Dict:
+    def get_series_episodes(self, series_id: int, season: Optional[int] = None, page: int = 0,
+                            season_type: str = 'default') -> Dict:
         try:
             all_episodes = []
             current_page = page
             total_pages = 1
-            while current_page <= 20:
-                result = self.client.get_series_episodes(series_id, page=current_page)
+            seen_next = set()
+            # Ne pas limiter arbitrairement les séries longues (Pokémon, etc.)
+            # à 20 pages : TVDB fournit le nombre réel de pages dans la réponse.
+            # Le plafond protège seulement une réponse API incohérente.
+            while current_page < 100:
+                result = self.client.get_series_episodes(series_id, season_type=season_type, page=current_page)
                 db.usage_bump('tvdb')
                 found_season = False
                 for ep in result.get('episodes', []):
@@ -309,9 +356,17 @@ class TVDBAPIHandler:
                             return {'series_id': series_id, 'episodes': all_episodes, 'source': 'tvdb'}
                     else:
                         all_episodes.append(self._parse_episode(ep))
-                total_pages = result.get('totalPages', 1)
-                if current_page >= total_pages - 1:
+                total_pages = result.get('totalPages') or result.get('total_pages')
+                links = getattr(getattr(self.client, 'request', None), 'links', None) or {}
+                next_link = links.get('next') if isinstance(links, dict) else None
+                if total_pages is not None:
+                    has_next = current_page < int(total_pages) - 1
+                else:
+                    has_next = bool(next_link) and next_link not in seen_next
+                if not has_next:
                     break
+                if next_link:
+                    seen_next.add(next_link)
                 current_page += 1
             logger.info(f"[TVDB] épisodes série id={series_id} : {len(all_episodes)} épisode(s) récupéré(s)")
             return {'series_id': series_id, 'episodes': all_episodes, 'source': 'tvdb'}

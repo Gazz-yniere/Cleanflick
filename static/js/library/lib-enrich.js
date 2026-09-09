@@ -55,7 +55,8 @@ function collectUncachedImdb(entries) {
                 const mtv = String(e.name || '').match(/\[tvdbid-(\d+)\]/i);
                 if (mtv) tv = mtv[1];
             }
-            if (!m.rating && tv) tvdbIds.push(tv);
+            // Pas de résolution TVDB implicite : le dossier doit être validé
+            // explicitement via la recherche manuelle.
             continue;
         }
         if (m.episode) continue; // épisodes : enrichis via leur série
@@ -153,6 +154,7 @@ function applyEpisodeEnrichResults(results) {
 function applyEnrichedMeta(node, en) {
     const m = node._meta || {};
     if (en.imdb) { m.imdb = en.imdb; node._imdb = en.imdb; }
+    if (en.tvdb_slug) m.tvdb_slug = en.tvdb_slug;
     if (en.rating) m.rating = en.rating;
     if (en.date) m.date = en.date;
     if (en.genres) m.genres = en.genres;

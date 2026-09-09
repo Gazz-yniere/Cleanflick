@@ -6,12 +6,22 @@ function tr(key) {
 }
 
 // ── Lang map (mirrors Python) ─────────────────────────────────────────────────
+// TVDB renvoie les traductions avec des codes ISO 639-2/T à 3 lettres (eng, fra...).
 const LANG_MAP = {
-    fr:'fra', de:'deu', es:'spa', it:'ita', pt:'por', ru:'rus',
+    en:'eng', fr:'fra', de:'deu', es:'spa', it:'ita', pt:'por', ru:'rus',
     ja:'jpn', ko:'kor', zh:'zho', ar:'ara', pl:'pol', nl:'nld',
     sv:'swe', no:'nor', da:'dan', fi:'fin', tr:'tur', cs:'ces',
-    hu:'hun', he:'heb', ro:'ron', uk:'ukr'
+    hu:'hun', he:'heb', ro:'ron', uk:'ukr', el:'ell', et:'est', hr:'hrv', lt:'lit', sr:'srp'
 };
+const LANG_MAP_INV = Object.fromEntries(Object.entries(LANG_MAP).map(([k, v]) => [v, k]));
+
+function translateLang(trans, code, fallback) {
+    code = String(code || '').toLowerCase();
+    if (trans[code]) return trans[code];
+    if (LANG_MAP[code] && trans[LANG_MAP[code]]) return trans[LANG_MAP[code]];
+    if (LANG_MAP_INV[code] && trans[LANG_MAP_INV[code]]) return trans[LANG_MAP_INV[code]];
+    return fallback || '';
+}
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }

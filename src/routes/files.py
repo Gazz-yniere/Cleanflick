@@ -8,6 +8,7 @@ from pathlib import Path
 from flask import Blueprint, jsonify, request
 
 from .. import state
+from .. import library
 from ..auth import login_required
 from ..history import load_history, save_history, append_history
 from ..utils import _move_path, _run_file_op, _ensure_dir, _series_folder_name, _refresh_scan_snapshot, _migrate_file_cache
@@ -31,6 +32,15 @@ def api_rename():
             'from_path': str(old_path), 'from_name': old_path.name,
             'to_path': str(new_path), 'to_name': new_name,
         })
+        # Les sous-titres du fichier suivent le renommage (même stem).
+        for old_sub, new_sub in library.rename_subtitles_for_video(
+                str(new_path), new_name, old_name=old_path.name):
+            append_history({
+                'id': str(uuid.uuid4()), 'op': 'rename',
+                'date': time.strftime('%Y-%m-%d %H:%M:%S'),
+                'from_path': old_sub, 'from_name': os.path.basename(old_sub),
+                'to_path': new_sub, 'to_name': os.path.basename(new_sub),
+            })
         _refresh_scan_snapshot()
         _migrate_file_cache(str(old_path), str(new_path))
         return jsonify({"success": True, "new_path": str(new_path), "new_name": new_name})
@@ -152,6 +162,14 @@ def api_history():
         for candidate in history
         if candidate.get('op') == 'revert' and candidate.get('revert_of')
     }
+    # Le statut reste calculé côté serveur, mais les chemins sont normalisés
+    # une seule fois pour limiter les accès disque quand l'historique est long.
+    existence = {}
+    for e in history:
+        for key in ('to_path', 'from_path'):
+            path = e.get(key, '')
+            if path not in existence:
+                existence[path] = os.path.exists(path)
     for e in history:
         is_reverted = e.get('id') in reverted_ids
         e['is_reverted'] = is_reverted
@@ -162,8 +180,8 @@ def api_history():
             e['can_revert'] = False
             e['revert_status'] = 'reverted'
         else:
-            to_exists   = os.path.exists(e.get('to_path', ''))
-            from_exists = os.path.exists(e.get('from_path', ''))
+            to_exists   = existence.get(e.get('to_path', ''), False)
+            from_exists = existence.get(e.get('from_path', ''), False)
             if not to_exists:
                 e['can_revert'] = False
                 e['revert_status'] = 'missing'

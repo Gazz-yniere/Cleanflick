@@ -25,7 +25,8 @@ function scanFiles() {
             allFiles = data || [];
             renderTable();
 
-            // Enqueue only files that don't already have a preview (new files)
+            // L'onglet Fichiers prépare automatiquement les aperçus et noms
+            // proposés; le renommage reste une action explicite de l'utilisateur.
             allFiles.forEach(file => {
                 if (!filesPreviews[file.path]) enqueuePreview(file);
             });

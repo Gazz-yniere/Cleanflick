@@ -1,12 +1,9 @@
 """Routes de scan : liste des fichiers détectés + flux SSE de rafraîchissement."""
-import threading
-
 from flask import Blueprint, Response, jsonify
 
 from .. import state
 from ..auth import login_required
 from .. import duration
-from .. import library
 
 bp = Blueprint('scan', __name__)
 
@@ -27,7 +24,8 @@ def api_scan():
         except Exception:
             item['duration'] = None
         out.append(item)
-    threading.Thread(target=library.ensure_library_series_episodes, daemon=True).start()
+    # Une recherche TVDB/OMDb nécessite une validation explicite de l'utilisateur.
+    # Seul le calcul local des durées peut continuer en arrière-plan.
     return jsonify(out)
 
 
