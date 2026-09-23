@@ -18,7 +18,10 @@ _LANG_MAP = {
     'el': 'ell', 'et': 'est', 'hr': 'hrv', 'lt': 'lit', 'sr': 'srp',
 }
 _LANG_MAP_INV = {v: k for k, v in _LANG_MAP.items()}
-_TRANS_NAMES = ('n', 'title', 'original_title', 't', 'episode_title')
+# Tokens traduits via la map de traductions de la SÉRIE ({code: nom de série}).
+# t/episode_title sont volontairement exclus : un {t:lang} doit retomber sur le
+# titre d'épisode (langue originale), jamais sur le nom de série.
+_TRANS_NAMES = ('n', 'title', 'original_title')
 
 
 def clean_title(title):
@@ -52,9 +55,11 @@ def _translate(translations, code, fallback):
 
 
 def interpolate(template, vars_):
-    """Port exact de `interpolate()` (app.js) : tokens {name} et {name:fmt}
-    (fmt = langue 2-3 lettres pour n/title/original_title/t/episode_title,
-    sinon formatage numérique 0Nd/d). Valeurs vides -> chaîne vide."""
+    """Port exact de `interpolate()` (app.js) : tokens {name} et {name:fmt}.
+    fmt = langue 2-3 lettres uniquement pour n/title/original_title (map de
+    traductions de la série) ; pour t/episode_title un fmt de langue retombe
+    sur le titre d'épisode (jamais le nom de série). Sinon formatage numérique
+    0Nd/d. Valeurs vides -> chaîne vide."""
     translations = vars_.get('_translations') or {}
 
     def _repl(m):

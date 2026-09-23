@@ -1,5 +1,6 @@
 // ── Library : état global ────────────────────────────────────────────────────
 let libFilter = 'all';
+let libSearchQuery = '';
 let libGenreFilter = new Set();
 let libAgeRange = null;      // [iMin, iMax] indices AGE_BUCKETS, ou null
 let libSizeRange = null;     // [minOctets, maxOctets], ou null
@@ -118,7 +119,10 @@ function metaChips(meta, opts = {}) {
             else if (meta.runtime) chips.push(`<span class="chip chip-runtime">${esc(meta.runtime)}</span>`);
         }
         if (meta.certification) chips.push(`<span class="chip chip-cert">${esc(meta.certification)}</span>`);
-        if (meta.genres) chips.push(`<span class="chip chip-genre">${esc(meta.genres)}</span>`);
+        if (meta.genres) String(meta.genres).split(',').forEach(g => {
+            const v = g.trim();
+            if (v) chips.push(`<span class="chip chip-genre">${esc(v)}</span>`);
+        });
     } else if (opts.dur_pending) {
         chips.push(`<span class="chip chip-runtime chip-duration-pending"><span class="lib-spinner lib-spinner--chip"></span> min</span>`);
     }
@@ -161,6 +165,16 @@ function tvdbSeriesSlug(name) {
         .replace(/^-+|-+$/g, '');
 }
 
+// ── Titre d'affichage standardisé ────────────────────────────────────────────
+// Nom de base du dossier (avant « (… »/« [… ») : « Pokemon - (Pokemon) [tvdbid-21025] »
+// -> « Pokemon ». Repli : meta.title, puis le nom brut nettoyé.
+function libDisplayTitle(name, metaTitle) {
+    const s = String(name || '').trim();
+    const m = s.match(/^(.*?)\s*[\(\[]/);
+    const base = (m ? m[1] : s).replace(/[-–]\s*$/, '').replace(/\s{2,}/g, ' ').trim();
+    return base || (metaTitle ? String(metaTitle).trim() : '') || s;
+}
+
 // ── Chargement ───────────────────────────────────────────────────────────────
 function loadLibrary() {
     const container = document.getElementById('library-tree');
@@ -178,6 +192,7 @@ function loadLibrary() {
             });
             applyLibFilter();
             collectLibFacets();
+            if (typeof collectGridEnrich === 'function' && libView === 'grid') collectGridEnrich();
             const fromCache = libTreeCacheFresh();
             // Les dossiers persistés sont re-ouverts (instantanément si hydratés
             // depuis le cache, sinon via re-fetch). Une fois l'expansion terminée,
@@ -194,6 +209,9 @@ function loadLibrary() {
 function refreshLibrary() {
     const container = document.getElementById('library-tree');
     if (!container) return;
+    if (typeof loadLibGrid === 'function' && typeof libView !== 'undefined' && libView === 'grid') {
+        loadLibGrid(true);
+    }
     const domExpanded = getExpandedPaths(container);
     if (domExpanded.length) {
         expandedPaths = new Set(domExpanded);
@@ -428,20 +446,12 @@ function buildLibNode(entry, depth, autoExpand) {
             <span class="lib-badge ${badgeClass}"><i class="mdi ${badgeIcon}"></i></span>`;
         const actions = document.createElement('div');
         actions.className = 'lib-actions';
-        if (!entry.valid) {
-            const searchBtn = document.createElement('button');
-            searchBtn.className = 'btn-small search';
-            searchBtn.title = tr('lib_search_tvdb');
-            searchBtn.innerHTML = '<i class="mdi mdi-magnify"></i>';
-            searchBtn.addEventListener('click', () => libManualSearch(entry.path));
-            actions.appendChild(searchBtn);
-        }
-        const sendBtn = document.createElement('button');
-        sendBtn.className = 'btn-small revert';
-        sendBtn.title = tr('lib_send_back');
-        sendBtn.innerHTML = '<i class="mdi mdi-undo"></i>';
-        sendBtn.addEventListener('click', () => libSendBack(entry.path));
-        actions.appendChild(sendBtn);
+        const searchBtn = document.createElement('button');
+        searchBtn.className = 'btn-small search';
+        searchBtn.title = tr('lib_search_tvdb');
+        searchBtn.innerHTML = '<i class="mdi mdi-magnify"></i>';
+        searchBtn.addEventListener('click', () => libManualSearch(entry.path));
+        actions.appendChild(searchBtn);
         row.appendChild(actions);
         wrap.appendChild(row);
         if (entry.dur_pending) registerPendingDuration(entry.path, wrap);
@@ -558,6 +568,23 @@ function updateLibNode(node, entry) {
         node._meta = entry.meta;
         if (entry.meta.imdb) node._imdb = entry.meta.imdb;
         if (entry.meta.tvdb) node._tvdb = String(entry.meta.tvdb);
+        // Le poster arrive en différé (refresh non-fast) : on remplace l'icône
+        // par l'image si le nœud a été rendu d'abord sans meta.
+        const poster = entry.meta.poster;
+        if (poster && poster !== 'N/A') {
+            const row = node.querySelector(':scope > .lib-row');
+            const lead = row && row.querySelector(':scope > .lib-lead');
+            if (lead && lead.tagName === 'I') {
+                const img = document.createElement('img');
+                img.className = 'lib-poster lib-lead';
+                img.src = poster;
+                img.alt = '';
+                img.loading = 'lazy';
+                img.referrerPolicy = 'no-referrer';
+                img.addEventListener('error', () => { img.style.display = 'none'; });
+                lead.replaceWith(img);
+            }
+        }
     }
     // La durée arrive plus tard : ré-enregistre le nœud s'il a été recréé
     // entre-temps (réconciliation) et perd sa référence dans _pendingDurations.

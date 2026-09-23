@@ -10,14 +10,14 @@ def _mk_handler(movies=None, series=None):
     h.client = None
     h._movies = movies or []
     h._series = series or []
-    h.search_movie = lambda title, year=None: [
+    h.search_movie = lambda title, year=None, imdb_id=None: TVDBAPIHandler._reorder_by_imdb([
         r for r in h._movies
         if not year or not r.get('year') or abs(r['year'] - year) <= 1
-    ]
-    h.search_series = lambda title, year=None: [
+    ], imdb_id)
+    h.search_series = lambda title, year=None, imdb_id=None: TVDBAPIHandler._reorder_by_imdb([
         r for r in h._series
         if not year or not r.get('year') or abs(r['year'] - year) <= 1
-    ]
+    ], imdb_id)
     return h
 
 
@@ -85,6 +85,38 @@ def test_search_auto_empty_results():
     assert res == {'media_type': 'tv', 'results': []}
     res2 = h.search_auto('Nope', 1999)
     assert res2 == {'media_type': 'movie', 'results': []}
+
+
+def test_imdb_from_name():
+    assert TVDBAPIHandler.imdb_from_name('Pilote (2022) [imdb-tt14718126] - (Pilote).mkv') == 'tt14718126'
+    assert TVDBAPIHandler.imdb_from_name('Show [imdbid-tt12345678].mkv') == 'tt12345678'
+    assert TVDBAPIHandler.imdb_from_name('Show (2020) [tvdbid-123].mkv') == ''
+    assert TVDBAPIHandler.imdb_from_name('') == ''
+
+
+def test_reorder_by_imdb():
+    results = [
+        {'imdb_id': 'tt0079719', 'id': 'a'},
+        {'imdb_id': 'tt14718126', 'id': 'b'},
+        {'imdb_id': '', 'id': 'c'},
+    ]
+    out = TVDBAPIHandler._reorder_by_imdb(results, 'tt14718126')
+    assert [r['id'] for r in out] == ['b', 'a', 'c']
+    assert TVDBAPIHandler._reorder_by_imdb(results, 'tt999') == results
+    assert TVDBAPIHandler._reorder_by_imdb(results, '') == results
+    assert TVDBAPIHandler._reorder_by_imdb([], 'tt1') == []
+
+
+def test_search_auto_reorders_by_imdb_in_filename():
+    h = _mk_handler(
+        movies=[
+            {'title': 'Pilote', 'year': 1980, 'id': 'm1', 'imdb_id': 'tt0079719'},
+            {'title': 'Pilote', 'year': 2022, 'id': 'm2', 'imdb_id': 'tt14718126'},
+        ],
+    )
+    res = h.search_auto('Pilote', None, filename='Pilote [imdb-tt14718126].mkv')
+    assert res['media_type'] == 'movie'
+    assert res['results'][0]['imdb_id'] == 'tt14718126'
 
 
 def test_api_handler_without_key():

@@ -30,7 +30,88 @@ def test_health_endpoint(app_client):
     assert r.get_json() == {'status': 'ok'}
 
 
+def test_cache_purge_removes_orphans(app_client, tmp_path, monkeypatch):
+    from src import db, state
+    import time as _time
+
+    # Racines de test avec un dossier série vivant + un chemin mort en cache.
+    movie_root = tmp_path / 'out' / 'movies'
+    (movie_root / 'Show (2020) [tvdbid-111]').mkdir(parents=True)
+    state.config['_movie_output_path'] = str(movie_root)
+    state.config['_tv_output_path'] = str(tmp_path / 'out' / 'tv')
+
+    db.file_cache_set('dead', r'C:\nonexistent\file.mkv', 1, 1, 'movie', [])
+    db.series_meta_set('111', 'tt111', {'id': '111'})
+    db.series_meta_set('222', 'tt222', {'id': '222'})
+
+    r = app_client.post('/api/cache/purge', json={'force': True})
+    assert r.status_code == 200
+    assert r.get_json()['status'] == 'started'
+
+    deadline = _time.time() + 10
+    while _time.time() < deadline and db.meta_get('last_cache_purge', 0) in (None, '', 0):
+        _time.sleep(0.1)
+    assert db.meta_get('last_cache_purge', 0) not in (None, '', 0), 'purge pas terminée'
+
+    assert db.file_cache_get('dead') is None
+    assert db.series_meta_get('111') is not None
+    assert db.series_meta_get('222') is None
+
+
+def test_ensure_series_omdb_dedupes(tmp_db, monkeypatch):
+    from src import db
+    from src.api import omdb
+
+    calls = []
+
+    def fake_fetch(imdb, title=None, year=None, is_series=False, force=False):
+        calls.append(imdb)
+        db.omdb_set(imdb, {'imdbRating': '8.0', 'Title': 'X'})
+        return db.omdb_get(imdb)
+
+    monkeypatch.setattr(omdb, 'fetch_omdb_single', fake_fetch)
+    monkeypatch.setattr(omdb, 'resolve_series_imdb',
+                        lambda tvdb_id, title=None, year=None, force=False: 'tt999' if tvdb_id == '111' else '')
+
+    assert omdb.ensure_series_omdb('111') == 'tt999'
+    assert db.omdb_get('tt999') is not None
+    before = len(calls)
+    for _ in range(4):
+        omdb.ensure_series_omdb('111')
+    assert len(calls) == before, 'fetch OMDb relancé alors que le cache existe'
+    assert omdb.ensure_series_omdb('999') == ''
+
+
+def test_omdb_fetch_title_mismatch_not_stored(tmp_db, monkeypatch, caplog):
+    """Garde : si OMDb (recherche par titre) répond pour un autre imdbID, la
+    réponse n'est JAMAIS stockée sous notre IMDb (empêche un poster/infos d'un
+    autre média de contaminer le cache)."""
+    import requests
+    from src import db, state
+    from src.api import omdb
+
+    state.config = {'omdb_api_key': 'k'}
+
+    fake_resp = {'Response': 'True', 'Title': 'Autre', 'imdbID': 'tt999', 'Poster': 'http://x/a.jpg'}
+
+    class FakeResp:
+        def json(self):
+            return fake_resp
+
+    monkeypatch.setattr(requests, 'get', lambda *a, **k: FakeResp())
+    # Pas de négative en mémoire, pas de cache.
+    assert omdb._OMDB_NEG_CACHE.pop('tt111', None) is None
+
+    with caplog.at_level('WARNING'):
+        res = omdb.fetch_omdb_single('tt111', 'Mon Titre', 2020)
+
+    assert res is None
+    assert db.omdb_get('tt111') is None, 'la réponse d\'un autre titre doit rester hors cache'
+    assert db.omdb_get('tt999') is None, 'ne pas créer d\'entrée pour l\'autre titre'
+
+
 def test_api_scan_empty_folder(app_client):
+
     r = app_client.get('/api/scan')
     assert r.status_code == 200
     assert r.get_json() == []
@@ -204,6 +285,138 @@ def test_library_fast_render_skips_recursive_tv_work(app_client, tmp_path, monke
     assert response.get_json()['entries'][0]['name'] == 'Season 01'
 
 
+def test_library_movie_file_meta_not_matched_in_cache(app_client, tmp_path):
+    """Bibliothèque : un fichier [imdb-ttX] dont le cache ne contient que des
+    homonymes TVDB → la meta vient du nom + OMDb, PAS du 1er résultat (poster/
+    infos d'un autre titre)."""
+    from src import db
+    from src.api import omdb
+
+    movies = tmp_path / 'out' / 'movies'
+    movies.mkdir(parents=True)
+    fname = 'Pilote (2022) [imdb-tt222].mkv'
+    (movies / fname).write_bytes(b'x')
+    # Cache de recherche pollué : le 1er résultat est un autre titre.
+    db.file_cache_set('fkey1', str(movies / fname), 1, 0, 'movie', [
+        {'id': 1, 'title': 'Autre Film', 'year': 2010, 'imdb_id': 'tt111', 'poster': 'http://x/wrong.jpg'},
+    ])
+    # OMDb connaît le vrai film.
+    od = {'Response': 'True', 'Title': 'The Pilot', 'Year': '2022', 'imdbID': 'tt222',
+          'Genre': 'Action', 'Runtime': '75 min', 'imdbRating': '6.0',
+          'Released': '10 May 2022', 'Poster': 'http://x/pilot.jpg'}
+    db.omdb_set('tt222', od)
+
+    r = app_client.get('/api/library', query_string={
+        'path': str(movies), 'type': 'movie', 'fast': '1'})
+    meta = r.get_json()['entries'][0]['meta']
+    assert meta['imdb'] == 'tt222'
+    assert meta['title'] == 'Pilote', 'titre attendu depuis le nom, pas "Autre Film"'
+    assert meta['year'] == '2022'
+    assert meta['poster'] == 'http://x/pilot.jpg', 'poster OMDb du vrai film'
+    assert meta['poster'] != 'http://x/wrong.jpg'
+    assert meta['genres'] == 'Action'
+
+
+def test_library_flat_endpoint(app_client, tmp_path):
+    """Vue grille : /api/library/flat renvoie 1 item par film + 1 par série,
+    avec meta (titre/année/IMDb) et compteur d'épisodes (caches BDD)."""
+    from src import db
+
+    movies = tmp_path / 'out' / 'movies'
+    (movies / 'sub').mkdir(parents=True)
+    (movies / 'Film A (2021) [imdb-tt100].mkv').write_bytes(b'x')
+    (movies / 'sub' / 'Film B (2019) [imdb-tt200].mkv').write_bytes(b'x')
+    (movies / 'notes.txt').write_bytes(b'non')
+
+    series = tmp_path / 'out' / 'tv' / 'Serie X (2020) [tvdbid-555]'
+    season = series / 'Season 01'
+    season.mkdir(parents=True)
+    (season / 'Serie X - S01E01 - Ep.mkv').write_bytes(b'x')
+    (season / 'Serie X - S01E02 - Ep.mkv').write_bytes(b'x')
+
+    db.omdb_set('tt100', {'Title': 'Film A', 'Year': '2021', 'imdbID': 'tt100',
+                          'Genre': 'Action', 'Poster': 'http://x/a.jpg'})
+    db.series_meta_set('555', 'tt300', {'id': '555', 'title': 'Serie X', 'year': '2020',
+                                        'poster': 'http://x/s.jpg', 'tvdb_slug': 'serie-x'})
+    db.series_episodes_set('555', {'episodes': [
+        {'s': 1, 'e': 1, 'airdate': '2020-01-05'},
+        {'s': 1, 'e': 2, 'airdate': '2020-01-12'},
+    ], 'order': 'official'})
+
+    r = app_client.get('/api/library/flat')
+    assert r.status_code == 200
+    data = r.get_json()
+    items = data['items']
+    assert data['total'] == 3, '2 films + 1 série (txt exclu, pas de doublon dossier)'
+
+    films = [i for i in items if i['type'] == 'movie']
+    series_items = [i for i in items if i['type'] == 'series']
+    assert len(films) == 2 and len(series_items) == 1
+
+    fa = next(i for i in films if 'Film A' in i['name'])
+    assert fa['valid'] is True
+    assert fa['meta']['imdb'] == 'tt100'
+    assert fa['meta']['title'] == 'Film A'
+    assert fa['meta']['poster'] == 'http://x/a.jpg'
+
+    fb = next(i for i in films if 'Film B' in i['name'])
+    assert fb['valid'] is True, 'nom conforme au format → valide'
+
+    sx = series_items[0]
+    assert sx['meta']['title'] == 'Serie X'
+    assert sx['meta']['tvdb'] == '555'
+    assert sx['meta']['poster'] == 'http://x/s.jpg'
+    assert sx['ep_present'] == 2 and sx['ep_total'] == 2
+
+
+def test_api_library_series_detail(app_client, tmp_path, monkeypatch):
+    """Détail série (vue grille) : saisons (posters TVDB) + épisodes avec leur
+    état présent / manquant / à venir."""
+    from src import db, state
+    from src.routes import library as lib_routes
+
+    lib_routes._SERIES_EP_MEM.clear()
+
+    series = tmp_path / 'out' / 'tv' / 'Serie X (2020) [tvdbid-888]'
+    s1 = series / 'Season 01'
+    s1.mkdir(parents=True)
+    (s1 / 'Serie X - S01E01 - Ep.mkv').write_bytes(b'x')
+    (s1 / 'Serie X - S01E02 - Ep.mkv').write_bytes(b'x')
+
+    db.series_meta_set('888', 'tt300', {'id': '888', 'title': 'Serie X', 'year': '2020'})
+    db.series_episodes_set('888', {'episodes': [
+        {'s': 1, 'e': 1, 'airdate': '2020-01-05'},
+        {'s': 1, 'e': 2, 'airdate': '2020-01-12'},
+        {'s': 1, 'e': 3, 'airdate': '2020-01-19'},        # manquant
+        {'s': 2, 'e': 1, 'airdate': '2099-01-01'},         # à venir
+    ], 'order': 'official'})
+    db.series_seasons_set('888', {'seasons': [
+        {'number': 1, 'id': 10, 'poster': 'http://x/s1.jpg', 'year': '2020'},
+        {'number': 2, 'id': 20, 'poster': '', 'year': '2021'},
+    ]})
+    monkeypatch.setattr(state.api_handler, 'get_series_seasons',
+                        lambda sid: db.series_seasons_get(sid) or {'seasons': []})
+
+    r = app_client.get('/api/library/series/888')
+    assert r.status_code == 200
+    data = r.get_json()
+    assert data['tvdb_id'] == '888'
+    assert data['meta']['title'] == 'Serie X'
+    assert data['episodes_available'] is True
+
+    s1 = next(s for s in data['seasons'] if s['number'] == 1)
+    assert s1['poster'] == 'http://x/s1.jpg'
+    assert s1['total'] == 3 and s1['present'] == 2 and s1['missing'] == 1 and s1['upcoming'] == 0
+    states = {e['e']: e['state'] for e in s1['episodes']}
+    assert states == {1: 'present', 2: 'present', 3: 'missing'}
+
+    s2 = next(s for s in data['seasons'] if s['number'] == 2)
+    assert s2['total'] == 1 and s2['upcoming'] == 1
+    assert s2['episodes'][0]['state'] == 'upcoming'
+    files01 = s1['episodes'][0]['files']
+    assert files01 and files01[0]['name'].endswith('.mkv')
+
+
 def test_api_search_auto_cache(app_client, monkeypatch):
     from src import state
     fake = {'media_type': 'movie', 'results': [{'id': 1, 'title': 'Fake', 'year': 2020, 'imdb_id': ''}]}
@@ -293,7 +506,7 @@ def test_api_search_movie_force_refresh(app_client, monkeypatch):
     from src import state
     calls = []
 
-    def fake_search(title, year=None):
+    def fake_search(title, year=None, imdb_id=None):
         calls.append(title)
         return [{'id': 2, 'title': 'Fresh', 'year': 2020, 'imdb_id': ''}]
 
@@ -308,10 +521,88 @@ def test_api_search_movie_force_refresh(app_client, monkeypatch):
 def test_api_search_tv(app_client, monkeypatch):
     from src import state
     monkeypatch.setattr(state.api_handler, 'search_tv',
-                        lambda title, year=None: [{'id': 3, 'title': 'Show', 'year': 2020, 'imdb_id': ''}])
+                        lambda title, year=None, imdb_id=None: [{'id': 3, 'title': 'Show', 'year': 2020, 'imdb_id': ''}])
     r = app_client.post('/api/search/tv', json={'title': 'Show', 'season': 1, 'episode': 1})
     assert r.status_code == 200
     assert r.get_json()['results'][0]['title'] == 'Show'
+
+
+def test_search_movie_imdb_not_in_tvdb_omdb_stub(app_client, monkeypatch, tmp_path):
+    """Le film n'existe pas sur TVDB : le seul résultat servi est un stub OMDb
+    (infos du bon IMDb), sans poster et avec not_found — jamais les infos d'un
+    autre titre."""
+    from src import state
+    from src.api import omdb
+
+    monkeypatch.setattr(state.api_handler, 'search_movie',
+                        lambda title, year=None, imdb_id=None: [
+                            {'id': 1, 'title': 'Autre Film', 'year': 2010, 'imdb_id': 'tt111',
+                             'poster': 'http://x/wrong.jpg'}])
+    od = {'Response': 'True', 'Title': 'Pilote', 'Year': '2022', 'imdbID': 'tt222',
+          'Genre': 'Documentary, Sport', 'Runtime': '75 min', 'imdbRating': '6.0',
+          'Rated': 'TV-14', 'Released': '01 Jan 2022', 'Poster': 'N/A'}
+    monkeypatch.setattr(omdb, 'fetch_omdb_single', lambda *a, **k: od)
+
+    f = tmp_path / 'Pilote (2022) [imdb-tt222].mkv'
+    f.write_bytes(b'x')
+    r = app_client.post('/api/search/movie', json={
+        'title': 'Pilote', 'year': 2022, 'path': str(f), 'force_refresh': True,
+    })
+    body = r.get_json()
+    assert len(body['results']) == 1
+    got = body['results'][0]
+    assert got['not_found'] is True
+    assert got['imdb_id'] == 'tt222'
+    assert got['title'] == 'Pilote'
+    assert got['year'] == 2022
+    assert got['poster'] == ''
+    assert got['omdb']['imdbRating'] == '6.0'
+
+
+def test_search_movie_imdb_match_kept(app_client, monkeypatch, tmp_path):
+    """Le résultat TVDB porte l'IMDb du fichier : il est servi tel quel
+    (poster conservé, pas de not_found)."""
+    from src import state
+    from src.api import omdb
+
+    monkeypatch.setattr(state.api_handler, 'search_movie',
+                        lambda title, year=None, imdb_id=None: [
+                            {'id': 1, 'title': 'Autre', 'year': 2010, 'imdb_id': 'tt111', 'poster': 'http://x/a.jpg'},
+                            {'id': 2, 'title': 'Pilote', 'year': 2022, 'imdb_id': 'tt222', 'poster': 'http://x/p.jpg'}])
+    monkeypatch.setattr(omdb, 'fetch_omdb_single', lambda *a, **k: None)
+
+    f = tmp_path / 'Pilote (2022) [imdb-tt222].mkv'
+    f.write_bytes(b'x')
+    r = app_client.post('/api/search/movie', json={
+        'title': 'Pilote', 'year': 2022, 'path': str(f), 'force_refresh': True,
+    })
+    body = r.get_json()
+    top = body['results'][0]
+    assert top['imdb_id'] == 'tt222'
+    assert top['poster'] == 'http://x/p.jpg'
+    assert 'not_found' not in top
+
+
+def test_search_tv_not_found_empty_when_no_omdb(app_client, monkeypatch, tmp_path):
+    """Série absente de TVDB et inconnue d'OMDb : aucune info d'un autre
+    média n'est servie (liste vide)."""
+    from src import state
+    from src.api import omdb
+
+    monkeypatch.setattr(state.api_handler, 'search_tv',
+                        lambda title, year=None, imdb_id=None: [
+                            {'id': 9, 'title': 'Autre Serie', 'year': 2015, 'imdb_id': 'tt999',
+                             'poster': 'http://x/wrong.jpg'}])
+    monkeypatch.setattr(omdb, 'fetch_omdb_single', lambda *a, **k: None)
+
+    f = tmp_path / 'Mon Show [imdb-tt222] S01E01.mkv'
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_bytes(b'x')
+    r = app_client.post('/api/search/tv', json={
+        'title': 'Mon Show', 'season': 1, 'episode': 1,
+        'path': str(f), 'force_refresh': True,
+    })
+    assert r.get_json()['results'] == []
 
 
 def test_api_details_cache(app_client, monkeypatch):
@@ -533,6 +824,80 @@ def test_library_rename_folder_series_sync(app_client, monkeypatch, tmp_path):
     # Le parsing TVDB s'est exécuté en arrière-plan (cache BDD rempli).
     cached = db.series_episodes_get('81189')
     assert cached and len(cached['episodes']) == 2
+
+
+def test_rename_folder_series_dry_run_no_side_effect(app_client, monkeypatch, tmp_path):
+    """dry_run=True : la liste des renommages est calculée SANS toucher au disque
+    ni au dossier (aperçu pour la popup de confirmation)."""
+    from src import db
+    from src.api import omdb
+
+    monkeypatch.setattr(omdb, '_SERIES_META_MEM', {})
+    monkeypatch.setattr(omdb, 'resolve_series_imdb', lambda *a, **k: 'tt9999999')
+    monkeypatch.setattr(omdb, 'fetch_omdb_single', lambda *a, **k: None)
+    # Cache TVDB pré-rempli : le dry-run renomme déjà avec les vrais titres.
+    db.series_episodes_set('555', {'episodes': [
+        {'s': 1, 'e': 1, 'title': 'Pilot'},
+        {'s': 1, 'e': 2, 'title': 'Second'}]})
+
+    tv_root = str(tmp_path / 'out' / 'tv')
+    folder = os.path.join(tv_root, 'bad folder')
+    os.makedirs(folder)
+    f1 = os.path.join(folder, 'Show S01E01.mkv')
+    f2 = os.path.join(folder, 'Show S01E02.mkv')
+    for p in (f1, f2):
+        with open(p, 'wb') as f:
+            f.write(b'x')
+
+    r = app_client.post('/api/library/rename-folder-series', json={
+        'path': folder, 'tvdbid': '555', 'title': 'Show', 'year': 2020,
+        'dry_run': True,
+    })
+    body = r.get_json()
+    assert body['success'] is True
+    assert body['dry_run'] is True
+    assert 'background' not in body
+    # Les renommages sont calculés (aperçu) mais pas exécutés.
+    to_names = [x['to'] for x in body['renames']]
+    assert 'Show - S01E01 - Pilot.mkv' in to_names
+    assert 'Show - S01E02 - Second.mkv' in to_names
+    # Aucun fichier déplacé : les noms d'origine sont intacts.
+    assert os.path.isfile(f1), 'le fichier S01E01 aurait dû rester en place'
+    assert os.path.isfile(f2), 'le fichier S01E02 aurait dû rester en place'
+    assert not os.path.exists(os.path.join(folder, 'Show - S01E01 - Pilot.mkv'))
+    # Le dossier n'a pas été renommé non plus.
+    assert os.path.isdir(folder)
+
+
+def test_rename_folder_series_dry_run_no_changes(app_client, monkeypatch, tmp_path):
+    """dry_run sur un dossier déjà conforme : aucun renames, pas de renommage
+    de dossier → le front n'affiche que la popup OK/Annuler (pas Renommer)."""
+    from src import db
+    from src.api import omdb
+
+    monkeypatch.setattr(omdb, '_SERIES_META_MEM', {})
+    monkeypatch.setattr(omdb, 'resolve_series_imdb', lambda *a, **k: 'tt9999999')
+    monkeypatch.setattr(omdb, 'fetch_omdb_single', lambda *a, **k: None)
+    db.series_episodes_set('555', {'episodes': [
+        {'s': 1, 'e': 1, 'title': 'Pilot'},
+        {'s': 1, 'e': 2, 'title': 'Second'}]})
+
+    tv_root = str(tmp_path / 'out' / 'tv')
+    folder = os.path.join(tv_root, 'Show')  # déjà au bon nom (format par défaut)
+    os.makedirs(folder)
+    for n in ('Show - S01E01 - Pilot.mkv', 'Show - S01E02 - Second.mkv'):
+        with open(os.path.join(folder, n), 'wb') as f:
+            f.write(b'x')
+
+    r = app_client.post('/api/library/rename-folder-series', json={
+        'path': folder, 'tvdbid': '555', 'title': 'Show', 'year': 2020,
+        'dry_run': True,
+    })
+    body = r.get_json()
+    assert body['success'] is True
+    assert body['dry_run'] is True
+    assert body['renames'] == []
+    assert body['folder'] is None
 
 
 def _wait_names(folder, pred, timeout=10):

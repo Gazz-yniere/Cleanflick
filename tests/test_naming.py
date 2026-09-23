@@ -1,5 +1,5 @@
 """Tests du module de génération de noms (port du JS generateFilename)."""
-from src import naming
+from src import naming, state
 
 
 def test_generate_filename_default_tv_format():
@@ -49,6 +49,35 @@ def test_interpolate_lang_fallback_to_default():
 def test_interpolate_original_title_token():
     out = naming.interpolate('{original_title}', {'original_title': 'Original'})
     assert out == 'Original'
+
+
+def test_interpolate_episode_title_lang_falls_back_to_episode_title():
+    # Regression : {t:en} doit retourner le titre d'épisode (langue originale),
+    # JAMAIS le nom de série présent dans la map de traductions de la série.
+    out = naming.interpolate('{t:en}', {
+        't': 'Rouge : la Passion',
+        '_translations': {'eng': 'Sonic X'},
+    })
+    assert out == 'Rouge : la Passion'
+
+
+def test_interpolate_episode_title_token_no_lang():
+    out = naming.interpolate('{t}', {'t': 'Rouge : la Passion', '_translations': {'eng': 'Sonic X'}})
+    assert out == 'Rouge : la Passion'
+
+
+def test_generate_filename_user_tv_format_uses_episode_title(monkeypatch):
+    # Format réel de l'utilisateur : {n:en} ({y}) [tvdbid-{tvdbid}] - {s00e00} - {t:en}
+    prev = state.config
+    monkeypatch.setattr(state, 'config', {
+        'tv_format': '{n:en} ({y}) [tvdbid-{tvdbid}] - {s00e00} - {t:en}'
+    })
+    out = naming.generate_filename('Sonic X.avi', 'tv', 1, 1, {
+        'title': 'Sonic X', 'year': 2003, 'tvdbid': '72459',
+        'translations': {'eng': 'Sonic X'},
+        'episode_title': 'Rouge : la Passion',
+    })
+    assert out == 'Sonic X (2003) [tvdbid-72459] - S01E01 - Rouge la Passion.avi'
 
 
 def test_generate_filename_only_s00e00_remains():

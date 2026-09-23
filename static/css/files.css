@@ -33,6 +33,7 @@
     transition: all 0.2s; font-size: 1em; display: inline-flex; align-items: center;
     gap: 6px; height: 36px;
 }
+.filter-btn i { font-size: 1.2em; align-content: center; }
 .filter-btn.active          { background: var(--c-accent); color: white; border-color: var(--c-accent); }
 .filter-btn:hover:not(.active) { border-color: var(--c-accent); color: var(--c-accent); }
 
@@ -148,6 +149,24 @@
     border: 1px solid var(--c-border2);
 }
 
+/* ── Aperçu poster au survol ─────────────────────────────────────────────── */
+.files-poster-preview {
+    position: fixed; z-index: 1000; width: 240px;
+    background: var(--c-surface); border: 1px solid var(--c-border);
+    border-radius: var(--radius); box-shadow: var(--shadow);
+    padding: 6px; pointer-events: none;
+    animation: filesPosterFade 0.12s ease-out;
+}
+@keyframes filesPosterFade { from { opacity: 0; } to { opacity: 1; } }
+.files-poster-preview img {
+    width: 100%; aspect-ratio: 2 / 3; object-fit: cover;
+    border-radius: 4px; background: var(--c-surface2); display: block;
+}
+.files-poster-preview-meta { margin-top: 6px; display: flex; flex-direction: column; gap: 3px; }
+.files-poster-preview-title { font-size: 0.95em; font-weight: 600; color: var(--c-bright); line-height: 1.3; }
+.files-poster-preview-year { color: #9e9e9e; font-weight: normal; }
+.files-poster-preview-chips { display: flex; flex-wrap: wrap; gap: 3px 8px; font-size: 0.85em; }
+
 /* ── Transferring state ───────────────────────────────────────────────────── */
 .file-row.transferring {
     position: relative;
@@ -188,7 +207,7 @@
 
 .transfer-progress-line {
     display: flex; align-items: center; gap: 14px;
-    width: 100%; max-width: 560px;
+    width: 100%; max-width: 510px;
 }
 .transfer-progress-line .progress-bar-container {
     flex: 1 1 auto; height: 26px;

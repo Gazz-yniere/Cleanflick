@@ -12,6 +12,64 @@ logger = logging.getLogger(__name__)
 bp = Blueprint('search', __name__)
 
 
+def _imdb_from_path(file_path):
+    """Extrait l'ID IMDb d'un nom de fichier : « ... [imdb-tt12345678] ... »."""
+    import os
+    from ..api.tvdb import TVDBAPIHandler
+    return TVDBAPIHandler.imdb_from_name(os.path.basename(str(file_path or '')))
+
+
+def _results_have_imdb(results, imdb_id):
+    return bool(imdb_id) and any(
+        str(r.get('imdb_id') or '').strip().lower() == imdb_id for r in (results or []))
+
+
+def _match_imdb(results, imdb_id):
+    """Le premier résultat dont l'ID IMDb correspond, ou None."""
+    imdb = str(imdb_id or '').strip().lower()
+    if not imdb:
+        return None
+    for r in results or []:
+        if str(r.get('imdb_id') or '').strip().lower() == imdb:
+            return r
+    return None
+
+
+def _omdb_stub(file_imdb, media_type, title, year):
+    """Stub de résultat bâti uniquement depuis OMDb (le média n'existe pas sur
+    TVDB) : infos de base, pas de poster, drapeau not_found. None si OMDb ne
+    le connaît pas non plus."""
+    od = omdb.fetch_omdb_single(file_imdb, title, year, is_series=(media_type == 'tv'))
+    if not od or od.get('Response') != 'True':
+        return None
+    oyear = str(od.get('Year') or '').strip()[:4]
+    return [{
+        'id': 0, 'id_tvdb': '0',
+        'imdb_id': str(file_imdb).strip().lower(), 'tmdb_id': '',
+        'title': od.get('Title') or title,
+        'year': int(oyear) if oyear.isdigit() else (year or ''),
+        'poster': '', 'omdb': od, 'not_found': True,
+        'type': 'series' if media_type == 'tv' else 'movie',
+        'source': 'omdb',
+    }]
+
+
+def _filter_for_file(results, file_imdb, media_type, title, year):
+    """Si le nom de fichier porte un ID IMDb, seuls les résultats qui
+    correspondent (ou le stub OMDb) sont servis : jamais les infos d'un autre
+    média."""
+    if not file_imdb:
+        return results
+    m = _match_imdb(results, file_imdb)
+    if m is not None:
+        rest = [r for r in results if r is not m]
+        m = dict(m)
+        m.pop('not_found', None)
+        return [m] + rest
+    stub = _omdb_stub(file_imdb, media_type, title, year)
+    return stub if stub else []
+
+
 @bp.route('/api/search/auto', methods=['POST'])
 @login_required
 def api_search_auto():
@@ -23,14 +81,21 @@ def api_search_auto():
     }
     # If client provided a file path, try file-specific cache (fingerprint based)
     file_path = d.get('path') or d.get('file_path')
+    file_imdb = _imdb_from_path(file_path)
+    if not file_imdb:
+        file_imdb = _imdb_from_path(params.get('filename'))
     cached_file = file_cache_lookup(file_path)
-    if cached_file is not None:
+    if cached_file is not None and not (file_imdb and not _results_have_imdb(cached_file.get('results'), file_imdb)):
         logger.info(f"Search auto: cache hit (file) for {file_path}")
         out = dict(cached_file)
         out['cache_source'] = 'file'
         omdb.fetch_omdb_ratings(out.get('results', [])[:3])
         omdb.attach_omdb(out.get('results', []))
+        out['results'] = _filter_for_file(out.get('results', []), file_imdb,
+                                          out.get('media_type') or 'movie', params['title'], params.get('year'))
         return jsonify(out)
+    if cached_file is not None:
+        logger.info(f"Search auto: cache (file) INVALIDÉ pour {file_path} (imdb {file_imdb} absent) → re-recherche")
 
     key = params_cache_key(params)
     cached = db.cache_get(key)
@@ -48,17 +113,21 @@ def api_search_auto():
     if cached is None:
         for generic_key in generic_keys:
             cached = db.cache_get(generic_key)
-            if cached is not None:
+            if cached is not None and (not file_imdb or _results_have_imdb(cached.get('results'), file_imdb)):
                 break
-    if cached is not None:
+            cached = None
+    if cached is not None and (not file_imdb or _results_have_imdb(cached.get('results'), file_imdb)):
         logger.info(f"Search auto: cache hit (params) key={key}")
         out = dict(cached)
         out['cache_source'] = 'params'
         omdb.fetch_omdb_ratings(out.get('results', [])[:3])
         omdb.attach_omdb(out.get('results', []))
+        out['results'] = _filter_for_file(out.get('results', []), file_imdb,
+                                          out.get('media_type') or 'movie', params['title'], params.get('year'))
         return jsonify(out)
 
-    logger.info(f"Search auto: cache miss for title={params['title']} year={params.get('year')}")
+    logger.info(f"Search auto: cache miss title={params['title']} year={params.get('year')} imdb={file_imdb or '-'}"
+                + (f" file={file_path}" if file_path else ''))
     result = state.api_handler.search_auto(params['title'], params['year'], params['filename'], params['season'], params['episode'], params['media_hint'])
     omdb.fetch_omdb_ratings(result.get('results', [])[:3])
     if params.get('season') and params.get('episode'):
@@ -77,8 +146,10 @@ def api_search_auto():
     # Store per-file cache if path was provided and exists
     file_cache_store(file_path, result.get('media_type', ''), result.get('results', []))
     result_with_source = dict(result)
+    result_with_source['results'] = _filter_for_file(result.get('results', []), file_imdb,
+                                                     result.get('media_type') or 'movie', params['title'], params.get('year'))
     result_with_source['cache_source'] = 'tvdb'
-    logger.info(f"Search auto: returning {len(result.get('results', []))} results from TVDB for title={params['title']}")
+    logger.info(f"Search auto: returning {len(result_with_source['results'])} results from TVDB for title={params['title']}")
     return jsonify(result_with_source)
 
 
@@ -90,25 +161,33 @@ def api_search_movie():
     force_refresh = bool(d.get('force_refresh'))
     # file-specific cache support
     file_path = d.get('path') or d.get('file_path')
+    file_imdb = _imdb_from_path(file_path)
+    cached_file = cached = None
     if not force_refresh:
         cached_file = file_cache_lookup(file_path)
-        if cached_file is not None:
+        if cached_file is not None and not (file_imdb and not _results_have_imdb(cached_file.get('results'), file_imdb)):
             logger.info(f"Search movie: cache hit (file) for {file_path}")
             out = {'results': cached_file.get('results', []), 'cache_source': 'file'}
             omdb.fetch_omdb_ratings(out['results'][:3])
             omdb.attach_omdb(out['results'])
+            out['results'] = _filter_for_file(out['results'], file_imdb, 'movie', params['title'], params.get('year'))
             return jsonify(out)
 
     key = params_cache_key({'type': 'movie', **params})
     if not force_refresh:
         cached = db.cache_get(key)
-        if cached is not None:
+        if cached is not None and not (file_imdb and not _results_have_imdb(cached.get('results'), file_imdb)):
             logger.info(f"Search movie: cache hit (params) key={key}")
             out = {'results': cached.get('results', []), 'cache_source': 'params'}
             omdb.fetch_omdb_ratings(out['results'][:3])
             omdb.attach_omdb(out['results'])
+            out['results'] = _filter_for_file(out['results'], file_imdb, 'movie', params['title'], params.get('year'))
             return jsonify(out)
-    res = state.api_handler.search_movie(params['title'], params['year'])
+    if cached_file is not None:
+        logger.info(f"Search movie: cache (file) INVALIDÉ pour {file_path} (imdb {file_imdb} absent) → re-recherche")
+    elif cached is not None:
+        logger.info(f"Search movie: cache (params) INVALIDÉ key={key} (imdb {file_imdb} absent) → re-recherche")
+    res = state.api_handler.search_movie(params['title'], params['year'], file_imdb)
     omdb.fetch_omdb_ratings(res[:3])
     omdb.attach_omdb(res)
     try:
@@ -117,6 +196,7 @@ def api_search_movie():
         pass
 
     file_cache_store(file_path, 'movie', res)
+    res = _filter_for_file(res, file_imdb, 'movie', params['title'], params.get('year'))
     logger.info(f"Search movie: returning {len(res)} results from TVDB for title={params['title']}")
     return jsonify({'results': res, 'cache_source': 'tvdb'})
 
@@ -130,27 +210,35 @@ def api_search_tv():
     episode = d.get('episode')
     force_refresh = bool(d.get('force_refresh'))
     file_path = d.get('path') or d.get('file_path')
+    file_imdb = _imdb_from_path(file_path)
+    cached_file = cached = None
     if not force_refresh:
         cached_file = file_cache_lookup(file_path)
-        if cached_file is not None:
+        if cached_file is not None and not (file_imdb and not _results_have_imdb(cached_file.get('results'), file_imdb)):
             logger.info(f"Search tv: cache hit (file) for {file_path}")
             out = {'results': cached_file.get('results', []), 'cache_source': 'file'}
             omdb.fetch_omdb_ratings(out['results'][:3])
             omdb.attach_omdb(out['results'])
             omdb.attach_episode_omdb(out['results'], season, episode)
+            out['results'] = _filter_for_file(out['results'], file_imdb, 'tv', params['title'], None)
             return jsonify(out)
 
     key = params_cache_key({'type': 'tv', **params})
     if not force_refresh:
         cached = db.cache_get(key)
-        if cached is not None:
+        if cached is not None and not (file_imdb and not _results_have_imdb(cached.get('results'), file_imdb)):
             logger.info(f"Search tv: cache hit (params) key={key}")
             out = {'results': cached.get('results', []), 'cache_source': 'params'}
             omdb.fetch_omdb_ratings(out['results'][:3])
             omdb.attach_omdb(out['results'])
             omdb.attach_episode_omdb(out['results'], season, episode)
+            out['results'] = _filter_for_file(out['results'], file_imdb, 'tv', params['title'], None)
             return jsonify(out)
-    res = state.api_handler.search_tv(params['title'])
+    if cached_file is not None:
+        logger.info(f"Search tv: cache (file) INVALIDÉ pour {file_path} (imdb {file_imdb} absent) → re-recherche")
+    elif cached is not None:
+        logger.info(f"Search tv: cache (params) INVALIDÉ key={key} (imdb {file_imdb} absent) → re-recherche")
+    res = state.api_handler.search_tv(params['title'], imdb_id=file_imdb)
     omdb.fetch_omdb_ratings(res[:3])
     omdb.attach_omdb(res)
     omdb.attach_episode_omdb(res, season, episode)
@@ -160,6 +248,7 @@ def api_search_tv():
         pass
 
     file_cache_store(file_path, 'tv', res)
+    res = _filter_for_file(res, file_imdb, 'tv', params['title'], None)
     logger.info(f"Search tv: returning {len(res)} results from TVDB for title={params['title']}")
     return jsonify({'results': res, 'cache_source': 'tvdb'})
 

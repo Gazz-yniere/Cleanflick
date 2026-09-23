@@ -77,10 +77,19 @@ function renderPreview(file) {
     if (p.error) return `<div class="no-preview">❌ ${esc(p.error)}</div>`;
     if (!p.data) return `<div class="no-preview">${tr('no_result')}</div>`;
     const { source, details } = p.data;
-    const newName = generateFilename(file, details);
+    const notFound = details.not_found || source.not_found;
+    // Film : le format par défaut n'a besoin que de titre/année (dispos OMDb).
+    // Série : le titre d'épisode est inconnu sans TVDB → pas de renommage.
+    const newName = (notFound && file.media_type !== 'movie') ? '' : generateFilename(file, details);
     const poster = source.poster ? `<img src="${esc(source.poster)}" alt="">` : (file.media_type === 'movie' ? '🎬' : '📺');
     const isTv = file.media_type !== 'movie';
     const chips = previewChips(source, details, isTv, file.duration);
+    const notFoundBadge = notFound
+        ? `<div class="search-badge search-badge--notfound" title="${esc(tr('search_not_found'))}"><i class="mdi mdi-alert-circle-outline"></i> ${esc(tr('search_not_found'))}</div>`
+        : '';
+    const secondLine = notFound
+        ? notFoundBadge
+        : `<div class="rename-preview">➜ ${esc(newName)}</div>`;
     return `<div class="preview-wrap">
         <div class="preview-poster">${poster}</div>
         <div class="preview-info">
@@ -88,7 +97,7 @@ function renderPreview(file) {
                 <span class="preview-title">${esc(details.title || '')}</span>${details.year ? ` <span class="preview-year">${esc(String(details.year))}</span>` : ''}
                 ${chips ? `<span class="preview-chips">${chips}</span>` : ''}
             </div>
-            <div class="rename-preview">➜ ${esc(newName)}</div>
+            ${secondLine}
         </div></div>`;
 }
 
@@ -119,10 +128,12 @@ function renderActions(file) {
     if (p.loading) return `<div class="btn-group"><button class="btn-small search" disabled><i class="mdi mdi-loading mdi-spin"></i></button></div>`;
     let html = '<div class="btn-group">';
     if (p.data) {
+        const notFound = p.data.details.not_found || p.data.source.not_found;
+        const canRename = !notFound || file.media_type === 'movie';
         const newName = generateFilename(file, p.data.details);
-        if (newName === file.filename)
+        if (canRename && newName === file.filename)
             html += `<span class="btn-small ok-label" title="${tr('btn_ok')}"><i class="mdi mdi-check"></i></span>`;
-        else
+        else if (canRename && newName)
             html += `<button class="btn-small rename" title="${tr('btn_rename')}" onclick="doRename(decodeURIComponent('${pathKey(file.path)}'))"><i class="mdi mdi-pencil"></i></button>`;
         html += `<button class="btn-small move" title="${tr('btn_move')}" onclick="doMove(decodeURIComponent('${pathKey(file.path)}'))"><i class="mdi mdi-folder-move"></i></button>`;
     }

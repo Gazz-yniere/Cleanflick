@@ -32,7 +32,7 @@
 - [Project Structure](#project-structure)
 - [Docker Volumes](#docker-volumes)
 - [Security](#security)
-- [Changelog](#changelog)
+- [Changelog](CHANGELOG.md)
 - [License](#license)
 
 ---
@@ -50,7 +50,7 @@
 - **Manual search** with full TVDB results selection (confirmed choices are remembered)
 - **Rename All / Move All** batch processing
 - **Real-time move progress** with speed, ETA, a `verifying` phase, and file-gone verification
-- **Library tab** — browse the output tree (instant F5 via a local tree cache), missing **and upcoming** episode badges, send-back to source, folder rename/delete, full series-folder rename from manual search (episode order selection, subtitles follow the video), TVDB web link, filter sidebar (genre, age, size, rating, date, missing) and episode "present/total" counters
+- **Library tab** — tree **and grid** views (toggle), instant F5 via a local tree cache, missing **and upcoming** episode badges, expandable series card (poster + seasons with TVDB posters + episodes with state), per-file manual search, folder rename/delete, full series-folder rename from manual search (episode order selection, subtitles follow the video), TVDB web link, poster hover preview, filter sidebar (search, genre, age, size, rating, date, missing) and episode "present/total" counters
 - **Folder picker** for media paths
 - **Password protection** (optional)
 - **6 languages** interface (FR, EN, ES, DE, IT, PT) with language switch
@@ -73,10 +73,11 @@ CleanFlick turns messy download folders into a clean, organized media library. T
 
 ### 2. Library
 
-- Browses the **output** folders (`movie_output_path`, `tv_output_path`) as a tree. The explored tree is cached locally so **F5 is near-instant**; entries are re-validated in the background.
+- Browses the **output** folders (`movie_output_path`, `tv_output_path`) as a **tree** or a **grid** (toggle in the sidebar). The explored tree is cached locally so **F5 is near-instant**; entries are re-validated in the background.
+- **Grid view**: one card per movie/series with poster, rating and episode counters (red = missing, yellow = upcoming). Clicking a series card **expands it in place** into three columns — poster + info, **seasons with TVDB posters**, and the **episodes** of the selected season (number, rating, title, runtime, air date, size; red/yellow/green state per episode). Season 1 opens by default; one series is expanded at a time.
 - Highlights **missing episodes** (red) and **upcoming episodes** (yellow, not yet aired) with badges, and shows a **present/total episode counter** on series folders.
 - **Filter sidebar**: genre facets, age/size/rating/date ranges (dual sliders) and a "Missing" filter, plus sorting.
-- Lets you **rename a folder**, **delete a folder**, or **send a file/folder back** to the source folder.
+- Lets you **rename a folder** or **delete a folder** (with confirmation).
 - A manual search on a series folder triggers a **full series-folder rename** (files + folder, synchronous, per the configured TV format) while TVDB/OMDb enrichment continues in the background. If the series offers several TVDB episode orders (official / alternate / Netflix), you are asked to pick one; **subtitles** (`.srt`, `.ass`, ...) are renamed alongside their video.
 - Each series folder has an **open-in-TVDB** link (canonical TVDB slug).
 
@@ -275,6 +276,7 @@ CleanFlick/
 │   ├── network.py            # Découverte réseau (SMB, LDAP, postes LAN)
 │   ├── library.py            # Bibliothèque (tailles, épisodes, présence)
 │   ├── cache.py              # Caches de recherche + worker de rafraîchissement
+│   ├── logging_setup.py      # Logging coloré (ANSI/Windows, NO_COLOR)
 │   ├── watcher.py            # Surveillance du dossier d'entrée + SSE
 │   ├── api/
 │   │   ├── tvdb.py           # Client TVDB (recherche, détails, épisodes)
@@ -317,7 +319,7 @@ CleanFlick/
 │   ├── css/                  # Styles par partie
 │   │   ├── base.css          # Variables, layout, header, nav, boutons, modal
 │   │   ├── files.css         # Grille fichiers, aperçus, actions, transfert
-│   │   ├── library.css       # Bibliothèque : filtres, sliders, arbre
+│   │   ├── library.css       # Bibliothèque : filtres, sliders, arbre, grille
 │   │   ├── history.css       # Historique
 │   │   ├── config.css        # Configuration
 │   │   ├── picker.css        # Sélecteur de dossiers
@@ -326,8 +328,8 @@ CleanFlick/
 │   ├── js/                   # Logique frontend par partie
 │   │   ├── i18n.js           # Translations (fr, en, es, de, it, pt)
 │   │   ├── core/             # utils, format, modal
-│   │   ├── files/            # scan, render, rename, move, search
-│   │   ├── library/          # tree, sort, filters, sliders, enrich, durations, actions
+│   │   ├── files/            # scan, render, rename, move, search, preview
+│   │   ├── library/          # tree, sort, filters, sliders, enrich, durations, actions, view (grille), preview
 │   │   ├── history/          # Historique
 │   │   ├── config/           # config, picker
 │   │   └── app.js            # Navigation + init
@@ -385,219 +387,6 @@ environment:
 ```
 
 > ⚠️ Never commit your `SECRET_KEY` to git. If left to the default, sessions will be invalidated on every container restart.
-
----
-
-## Changelog
-
-### [1.0.11] - 2026-09-09
-
-**Added**
-- Subtitles (`.srt`, `.sub`, `.ass`, `.ssa`, `.vtt`, `.idx`) follow video renames, with a folder-wide catch-up pass for subtitles in other subfolders of the series folder
-- TVDB episode order selection after manual search (official / alternate / Netflix) + `tvdb_episode_order` config option (`auto` picks the Netflix order when offered)
-- Upcoming episodes (not yet aired) split from missing: yellow badge + rows in the library, excluded from the present/total counter
-- "Open in TVDB" link on series folders (canonical TVDB slug)
-- Instant library reload (F5): explored tree cached in `localStorage` (1 h, size-bounded), background re-validation, targeted invalidation
-- `original_title` naming token; translation codes accept 2- or 3-letter forms (`{n:en}` = `{n:eng}`)
-- Multi-episode filename generation (`S01E01-E02` / `1x02-03` labels, joined episode titles)
-- `cache_refresh_days` and `tvdb_episode_order` in `DEFAULT_CONFIG` / `config.example.json`
-- 26 new tests (108 total)
-
-**Improved**
-- Background media pre-warming: TVDB search + OMDb enrichment + durations run off the HTTP request
-- OMDb quota: automatic re-pass after the 24 h lockout, negative results cached
-- TVDB episode paging no longer capped at 20 pages (long series); translations fetched from the TVDB endpoint when missing
-- History batch insert (single transaction per series rename); fast library render (`?fast=1`) with background re-validation
-- `/api/search/auto` reuses the generic per-title cache; per-request memoization of TVDB→IMDb resolution and folder sizes
-- Filters pre-load collapsed folders; series rating no longer leaks into episode-level matches
-
-**Fixed**
-- OMDb quota never retried after the 24 h lockout; Netflix-order series got the official episode list
-- Episode counters included not-yet-aired episodes; manual search selection did not replace a wrong cached series association
-- `/api/scan` triggered an implicit TVDB pre-fetch; TVDB→IMDb failures retried on every render
-- Language tokens failed with TVDB 3-letter codes; rename result modal too narrow for long filenames
-
-### [1.0.10] - 2026-09-07
-
-**Added**
-- Frontend rework — `static/app.js`, `static/app.css` and `static/i18n.js` are split into per-feature files: `static/js/` (`core/`, `files/`, `library/`, `history/`, `config/` + `app.js`) and `static/css/` (8 stylesheets). Purely structural: classic scripts, global functions, no build step
-- `src/naming.py` — server-side port of the JS `generateFilename` / `interpolate` / `seriesFolderName`: library renaming is now computed in Python (translation tokens and numeric formats included)
-- Full series-folder rename (`POST /api/library/rename-folder-series`) — from a manual search on a library folder: files **and** folder renamed synchronously using the configured TV format; TVDB parsing (episode titles), a second rename pass and OMDb enrichment continue in the background, followed by a `library-refresh` SSE event
-- Episode "present / total" counter on library series folders (`ep_present` / `ep_total`; S00 included only when the option is enabled)
-- Multi-episode files — `S01E01-E02`, `S01E01E02`, `S01E01, E02` and `1x02-03` are recognized in the missing-episode detection (one file covers every episode in the range)
-- Library: filter sidebar — genre facets, age/size/rating/date ranges (dual sliders) + a "Missing" filter, sorting moved into the sidebar
-- `show_s00_specials` option (Config) — include special episodes (season 0) in missing episodes and episode counters
-- Tests — `tests/test_naming.py` (filename generation) and `tests/test_library.py` (episode refs, multi-episode); 3 route tests added to `tests/test_app.py`
-
-**Changed**
-- Static cache-bust — `_static_version()` now walks every `.js`/`.css` under `static/` instead of a fixed list of 3 files
-- `scripts/check_js.py` — checks brace/paren balance of all `static/js/**/*.js` instead of only `static/app.js`
-- `present_episodes()` memoized by folder mtime (`_EP_CACHE`) — re-scanning a series folder costs a single `scandir`
-- Shared helpers `_refresh_scan_snapshot()` and `_migrate_file_cache()` moved from `src/routes/files.py` to `src/utils.py` (reused by the library routes)
-- README — `static/` tree updated for the js/css split
-
-**Fixed**
-- Multi-episode files under-counted — missing-episode detection only recognized the first episode of an `S01E01-E02` file (the rest wrongly showed as missing)
-- Incomplete episode marker — the per-filename episode index in the library ignored multi-episode ranges
-
-### [1.0.9] - 2026-09-01
-
-**Added**
-- GitHub Actions CI — ruff lint + pytest on push/PR, with an HTML test report and a coverage artifact, plus a per-test check run
-- `/health` endpoint + Docker `HEALTHCHECK` and compose `healthcheck`
-- Library posters — episodes and series folders without a poster now inherit the series poster (from the search or OMDb cache, no API call)
-- CI badge in the README
-
-**Changed**
-- Code reorganized into a `src/` package (business logic + `src/api/` + `src/routes/`); `app.py` only assembles and starts the app
-- Docker image is built (not pushed) on every pull request to validate the Dockerfile
-
-**Fixed**
-- Misplaced `USER` in the Dockerfile (run as a shell command inside a `RUN`), which broke the build
-
-**Removed**
-- `gevent` from production dependencies (the `gthread` worker + stdlib SSE queue fallback is sufficient)
-
-### [1.0.8] - 2026-08-20
-
-**Added**
-- SQLite persistence — history and all caches (search, per-file results, details, OMDb) now live in a single `cleanflick.db` instead of JSON files
-- Caches auto-expire after 7 days and re-fetch from TVDB/OMDb — no manual cache management
-- Manual search now forces a fresh API query (`force_refresh`); confirmed manual selections are remembered per-file
-- Transfer `verifying` phase — destination is verified (100%) before the source is deleted
-- Library tab — output tree browsing, missing-episode badges, sort/filter, send-back to source, folder rename/delete
-
-**Changed**
-- Files table converted from `<table>` to a CSS grid (`1fr 2fr 185px`) — guaranteed 1/3–2/3 column split with a fixed Actions column; the progress column was removed
-- Transfer overlay redesigned to 2 lines — title (icon + label + filename) and a progress bar with speed/ETA beside it
-- Scan/auto-scan uses cache-first-then-API; the Files tab refreshes reliably during and after transfers
-- Library filter buttons harmonized with the Files tab; Rename button now orange (accent)
-- Config API section — TVDB and OMDb keys side by side, with a "test key" button right after each input
-- History buttons — refresh is orange (primary), clear-all is gray (secondary)
-
-**Fixed**
-- OMDb episode cache key mismatch — episode metadata now uses the year-qualified key (with legacy fallback); auto-search uses consistent top-3 episode OMDb that skips non-series results (saves OMDb quota)
-- Files reappearing after a "send back" were not detected — removed the `scan_last_snapshot` resets in the send-back endpoints
-- Files table was not refreshing during transfers — removed the SSE suppression of `scanFiles()` while transfers are active
-
-**Removed**
-- "Vider le cache TVDB" button and `/api/cache/clear` route (caches expire automatically)
-- Dead code: `rename_engine.py`, `db.find_history`, `db.file_cache_delete`, unused JS functions, unused CSS rules, and 20 unused i18n keys
-
-**Refactored**
-- `app.py`: extracted cache helpers (`_file_fingerprint`, `_file_cache_lookup`, `_file_cache_store`, `_params_cache_key`) reused across the 4 search/cache endpoints (keys unchanged)
-- `app.js`: extracted `mergeDetails` and `openManualSearchModal` to remove duplication
-- `files.css`: merged the shared header styles of the files table and grid
-
-### [1.0.6] - 2026-08-12
-
-**Fixed**
-- `revert_of` field was never persisted in history DB — `add_history` was reading `entry.get('extra', {})` instead of saving all non-standard root fields, causing `reverted_ids` to always be empty and showing a false "Fichier introuvable" badge on renamed entries after a revert
-- Revert of a same-folder rename now runs synchronously (`_move_path` + immediate `scan_last_snapshot` update) instead of going through the async `_run_file_op` thread, preventing a race condition where the filesystem watcher would pick up the change before the snapshot was updated, leading to a 400 error on the next rename
-- File row was not reappearing in the table after a revert — `revertEntry()` now calls `scanFiles()` in addition to `loadHistory()` (600 ms delay)
-- History table showed a false "Fichier introuvable" badge on the original rename entry after a successful revert
-
-**Changed**
-- Action buttons in the file table are now icon-only (34×34 px) with `title` tooltips, displayed on a single centered row
-- Revert button in the history table is now icon-only (34×34 px) with a `title` tooltip
-- History entries expose a `revert_status` field (`available` / `reverted` / `missing` / `done`) used by the frontend to render the correct badge or button
-- `allFiles` array is reset to `[]` before each `scanFiles()` fetch to prevent duplicate rows between the previous state and the new scan result
-- Cross-folder reverts remain asynchronous; only same-folder reverts are synchronous
-
-### [1.0.5] - 2026-08-11
-
-**Added**
-- Backend-driven move/copy naming is now anchored on the file currently selected from the source path.
-- A confirmation modal appears when the live file name differs from the generated search suggestion, so the user can confirm or cancel the move before the operation starts.
-- The UI now flags reverted history entries via a server-provided `is_reverted` field instead of trying to infer rollback state from adjacent history rows.
-
-**Changed**
-- The frontend now limits preview loading concurrency and reduces the polling frequency used by move progress updates.
-- Move requests do not rely on a `new_name` proposal in the payload, which keeps transfer targets aligned with the actual file discovered on disk.
-
-**Fixed**
-- History rendering no longer shows a false "Fichier introuvable" marker for a successfully reverted file.
-- The move dialog/progress contract is now consistent with the real file operations and the service-side progress payload.
-
-### [1.0.4] - 2026-06-18
-
-**Added**
-- `hist_change` i18n key for the history table column header — translated in all 6 languages
-
-**Fixed**
-- Rename and Move buttons displayed raw key `btn-rename` instead of translated label
-- Action buttons in file table wrapped to a second line instead of staying on one row
-- File name column overflowed into the poster/preview column on long filenames
-- Folder picker modal contained a stray GitHub footer link in the middle of the UI
-- History tab label, buttons and all history-related strings were not translated in ES, DE, IT, PT
-- Operation type badges and Revert button in history table were not re-rendered on language switch
-- Language switch now correctly re-renders both the file table and the history table
-
-### [1.0.3] - 2026-06-17
-
-**Added**
-- Real-time move progress bar with speed (MB/s) and ETA for cross-drive transfers
-- Smart same-drive detection: instant rename via `shutil.move` with shimmer animation instead of fake byte-level progress
-- File-gone verification after move: polls `/api/scan` until the source file is confirmed absent before removing the row
-- Progress bar fills gradually during verification phase (0% → 95%) then shows ✓ when confirmed
-- Custom confirmation modal for history clear — replaces native `confirm()` dialog, styled to match the app theme
-
-**Changed**
-- History table rows are now half the height (52px) for a more compact view
-- Move progress display now has three distinct phases: `moving` (shimmer), `copying` (real %), `cleaning` (shimmer at 99%)
-- File row stays visible with "✓ Déplacé" for 800ms after confirmation before disappearing
-- i18n: added `hist_confirm_title` key in FR and EN; `hist_confirm_clear` is now a full sentence
-
-**Fixed**
-- Removed double `os.remove()` call in `_run_file_op` (source file was already deleted by `_move_path`)
-- Progress text now always renders on top of the progress bar (`isolation: isolate`)
-
-### [1.0.2] - 2026-06-10
-
-**Changed**
-- Refactored Python backend and JavaScript frontend — no functional changes
-- CSS: introduced CSS custom properties for colors and spacing across all stylesheets
-- HTML: removed all inline `style=""` attributes; fixed `login.html` hardcoded paths
-
-**Fixed**
-- `repair_history.py` was writing `{}` instead of `[]` when resetting history
-- `rename_history.json.example` contained wrong format (`{}` → `[]`)
-
-**Removed**
-- `_archive/` folder (obsolete test scripts)
-
-### [1.0.1] - 2026-04-16
-
-**Fixed**
-- Fixed JSON corruption errors in rename history file — now auto-recovers with backup
-- Titles with colons or hyphens (e.g., "Arrow: The Series") now display correctly
-- Episode titles with colons or hyphens are properly cleaned in filenames
-
-**Changed**
-- Rename history loader now automatically repairs corrupted files
-- Better error reporting in frontend with clearer error messages
-- Title cleaning applied to both backend (Python) and frontend (JavaScript)
-
-**Added**
-- `repair_history.py` script to manually fix corrupted rename history files
-
-### [1.0.0] - 2025-04-01
-
-**Added**
-- TVDB v4 API integration for movies and TV shows
-- Filebot-style naming format
-- Multi-language title support
-- External IDs in filenames (IMDb, TVDB, TMDB)
-- Recursive folder scanning
-- Rename history with revert support
-- Optional password protection
-- French / English interface
-- Manual search with full TVDB results selection
-- Rename All and Move All batch actions
-- Folder picker
-- Docker support
-- MDI icons throughout the UI
-- Dark theme (orange & dark grey)
 
 ---
 

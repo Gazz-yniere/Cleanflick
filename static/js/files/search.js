@@ -63,6 +63,9 @@ function executeManualSearch() {
                 if (od.Genre && od.Genre !== 'N/A') omdbParts.push(od.Genre);
             }
             const omdbLine = omdbParts.length ? `<div class="result-omdb">${omdbParts.map(esc).join(' · ')}</div>` : '';
+            const notFound = r.not_found
+                ? `<div class="search-badge search-badge--notfound" title="${esc(tr('search_not_found'))}"><i class="mdi mdi-alert-circle-outline"></i> ${esc(tr('search_not_found'))}</div>`
+                : '';
             const poster = (r.poster || od.Poster) ? `<img src="${esc(r.poster || od.Poster)}" alt="">` : (mediaType === 'movie' ? '🎬' : '📺');
             html += `<div class="result-item" data-ridx="${i}" onclick="selectResult(this)">
                 <div class="result-poster">${poster}</div>
@@ -70,7 +73,8 @@ function executeManualSearch() {
                     <div class="result-title">${esc(r.title || '')}</div>
                     <div class="result-year">${r.year || 'N/A'}</div>
                     ${omdbLine}
-                    <div class="result-type">TVDB #${r.id}</div>
+                    ${notFound}
+                    <div class="result-type">${r.not_found ? 'IMDb ' + esc(r.imdb_id || '') : 'TVDB #' + r.id}</div>
                 </div></div>`;
         });
         resultsDiv.innerHTML = html + '</div>';
@@ -80,6 +84,12 @@ function executeManualSearch() {
 
 function selectResult(el) {
     const result = window._searchResults[parseInt(el.getAttribute('data-ridx'))];
+    if (result?.not_found) {
+        // Média introuvable sur TVDB (infos issues d'OMDb) : pas de
+        // renommage possible sur les métadonnées d'un autre titre.
+        alert(tr('search_not_found'));
+        return;
+    }
     const folderPath = window._manualSearchFolderPath;
     if (folderPath) {
         postJSON(`/api/library/tvdb-orders/${encodeURIComponent(result.id)}`)

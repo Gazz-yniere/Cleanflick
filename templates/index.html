@@ -58,15 +58,26 @@
                     </div>
                     <div id="files-tbody"></div>
                 </div>
+                <div id="filesPosterPreview" class="files-poster-preview" hidden>
+                    <img id="filesPosterPreviewImg" alt="">
+                    <div id="filesPosterPreviewMeta" class="files-poster-preview-meta"></div>
+                </div>
         </div>
 
         <!-- ===== LIBRAIRIE ===== -->
         <div id="library" class="section">
             <div class="lib-layout">
                 <aside class="lib-sidebar">
-                    <button class="btn btn-primary" onclick="refreshLibrary()" data-i18n="btn_refresh_library"><i class="mdi mdi-refresh"></i></button>
+                    <div class="lib-view-toggle">
+                        <button class="filter-btn active" id="lib-view-tree" onclick="setLibView('tree')" title="Arbre"><i class="mdi mdi-file-tree"></i></button>
+                        <button class="filter-btn" id="lib-view-grid" onclick="setLibView('grid')" title="Grille"><i class="mdi mdi-view-grid"></i></button>
+                    </div>
 
                     <div class="lib-side-title" data-i18n="lib_side_filters">Filtres</div>
+                    <div class="lib-side-search">
+                        <input type="search" id="lib-search" data-i18n-placeholder="lib_filter_search_ph" placeholder="Rechercher un nom…" oninput="libSearchInput(this.value)">
+                        <button class="lib-side-reset" onclick="libSearchReset()" title="Tous"><i class="mdi mdi-filter-remove"></i></button>
+                    </div>
                     <button class="filter-btn active" id="lib-filter" onclick="cycleLibFilter()"><i class="mdi mdi-filter-variant"></i><span data-i18n="filter_all">Tous</span></button>
                     <span class="lib-filter-wrap">
                         <button class="filter-btn" id="lib-filter-genre" onclick="toggleLibFilterPanel('genre')"><i class="mdi mdi-tag-multiple-outline"></i><span data-i18n="lib_filter_genre">Genre</span></button>
@@ -117,6 +128,11 @@
                 </aside>
                 <div class="lib-main">
                     <div id="library-tree"></div>
+                    <div id="library-grid" hidden></div>
+                    <div id="libPosterPreview" class="lib-poster-preview" hidden>
+                        <img id="libPosterPreviewImg" alt="">
+                        <div id="libPosterPreviewMeta" class="lib-poster-preview-meta"></div>
+                    </div>
                     <div class="lib-legend">
                         <span class="lib-badge lib-badge--ok"><i class="mdi mdi-check-circle"></i></span> <span data-i18n="lib_valid"></span>
                         &nbsp;
@@ -364,7 +380,7 @@
 
     <footer class="app-footer">
         <span data-i18n="footer_text"></span>
-        <span class="footer-meta">· <a href="https://github.com/Gazz-yniere/Cleanflick" target="_blank">GitHub</a> · v1.0.11</span>
+        <span class="footer-meta">· <a href="https://github.com/Gazz-yniere/Cleanflick" target="_blank">GitHub</a> · v1.0.12</span>
     </footer>
 </div>
 
@@ -443,17 +459,17 @@
     </div>
 </div>
 
-<!-- Modal Résultat Renommage Dossier -->
-<div id="libRenameResultModal" class="modal">
+<!-- Modal Confirmation Renommage Dossier (aperçu avant exécution) -->
+<div id="libRenameConfirmModal" class="modal">
     <div class="modal-content modal-content--rename">
         <div class="modal-header">
-            <h2><i class="mdi mdi-folder-move"></i> <span id="libRenameResultTitle"></span></h2>
-            <button class="close-btn" onclick="closeModal('libRenameResultModal')">&times;</button>
+            <h2><i class="mdi mdi-folder-move"></i> <span id="libRenameConfirmTitle"></span></h2>
+            <button class="close-btn" onclick="closeModal('libRenameConfirmModal')">&times;</button>
         </div>
-        <div id="libRenameResultBody" style="max-height:60vh;overflow:auto;"></div>
+        <div id="libRenameConfirmBody" style="max-height:60vh;overflow:auto;"></div>
         <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:16px;">
-            <button class="btn btn-secondary" onclick="closeModal('libRenameResultModal')" data-i18n="picker_cancel"></button>
-            <button class="btn btn-primary" onclick="closeModal('libRenameResultModal')">OK</button>
+            <button class="btn btn-secondary" onclick="closeModal('libRenameConfirmModal')" data-i18n="picker_cancel"></button>
+            <button class="btn btn-primary" id="libRenameApplyBtn" onclick="confirmLibRename()" data-i18n="lib_rename_apply"></button>
         </div>
     </div>
 </div>
@@ -464,10 +480,13 @@
 <script src="{{ url_for('static', filename='js/core/modal.js') }}?v={{ cache_bust }}"></script>
 <script src="{{ url_for('static', filename='js/files/scan.js') }}?v={{ cache_bust }}"></script>
 <script src="{{ url_for('static', filename='js/files/render.js') }}?v={{ cache_bust }}"></script>
+<script src="{{ url_for('static', filename='js/files/files-preview.js') }}?v={{ cache_bust }}"></script>
 <script src="{{ url_for('static', filename='js/files/rename.js') }}?v={{ cache_bust }}"></script>
 <script src="{{ url_for('static', filename='js/files/move.js') }}?v={{ cache_bust }}"></script>
 <script src="{{ url_for('static', filename='js/files/search.js') }}?v={{ cache_bust }}"></script>
 <script src="{{ url_for('static', filename='js/library/library.js') }}?v={{ cache_bust }}"></script>
+<script src="{{ url_for('static', filename='js/library/lib-preview.js') }}?v={{ cache_bust }}"></script>
+<script src="{{ url_for('static', filename='js/library/lib-view.js') }}?v={{ cache_bust }}"></script>
 <script src="{{ url_for('static', filename='js/library/lib-sort.js') }}?v={{ cache_bust }}"></script>
 <script src="{{ url_for('static', filename='js/library/lib-filters.js') }}?v={{ cache_bust }}"></script>
 <script src="{{ url_for('static', filename='js/library/lib-sliders.js') }}?v={{ cache_bust }}"></script>

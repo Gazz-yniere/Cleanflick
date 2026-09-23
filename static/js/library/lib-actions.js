@@ -1,102 +1,4 @@
-// ── Actions bibliothèque : send-back, transferts, suppression, recherche ─────
-function libSendBack(filePath) {
-    postJSON('/api/library/send-back', { path: filePath })
-        .then(data => {
-            if (!data.success) { alert(`✗ ${data.message}`); return; }
-            const jobId = data.job_id;
-            if (!jobId) { removeLibFileRow(filePath); return; }
-            activeTransfers[jobId] = { filePath, jobId, pollInterval: null, startTime: Date.now(), progress: null };
-            markLibRowTransferring(filePath, jobId);
-            trackLibMoveProgress(jobId, filePath);
-        })
-        .catch(e => alert(`✗ ${e.message}`));
-}
-
-function findLibRow(filePath) {
-    let found = null;
-    document.querySelectorAll('.lib-row--file').forEach(row => {
-        if (row.dataset.filePath === filePath) found = row;
-    });
-    return found;
-}
-
-function removeLibFileRow(filePath) {
-    const row = findLibRow(filePath);
-    if (row) {
-        // Le fichier a quitté le dossier : l'entrée cache de ce dossier est périmée.
-        const node = row.closest('.lib-node');
-        const parent = node && node.parentElement && node.parentElement.closest('.lib-node');
-        if (parent) invalidateLibTreePath(parent._path);
-        node?.remove();
-    }
-}
-
-function markLibRowTransferring(filePath, jobId) {
-    const row = findLibRow(filePath);
-    if (!row) return;
-    row.classList.add('transferring');
-    row.querySelectorAll('button').forEach(b => b.setAttribute('disabled', ''));
-    let cell = row.querySelector('.transfer-cell');
-    if (!cell) {
-        cell = document.createElement('div');
-        cell.className = 'transfer-cell';
-        row.appendChild(cell);
-    }
-    const file = { path: filePath, filename: basename(filePath) };
-    cell.innerHTML = renderTransferOverlay(file, activeTransfers[jobId]);
-}
-
-function updateLibTransferRow(filePath, jobId) {
-    const row = findLibRow(filePath);
-    const cell = row && row.querySelector('.transfer-cell');
-    if (!cell) return;
-    const transfer = activeTransfers[jobId];
-    if (!transfer) return;
-    const file = { path: filePath, filename: basename(filePath) };
-    cell.innerHTML = renderTransferOverlay(file, transfer);
-}
-
-function unmarkLibRowTransferring(filePath) {
-    const row = findLibRow(filePath);
-    if (!row) return;
-    row.classList.remove('transferring');
-    row.querySelectorAll('button').forEach(b => b.removeAttribute('disabled'));
-    row.querySelector('.transfer-cell')?.remove();
-}
-
-function trackLibMoveProgress(jobId, filePath) {
-    const pollInterval = setInterval(async () => {
-        try {
-            const response = await fetch(`/api/move-progress/${jobId}`);
-            const prog = await response.json();
-            const transfer = activeTransfers[jobId];
-            if (!transfer) { clearInterval(pollInterval); return; }
-
-            if (prog.finished) {
-                clearInterval(pollInterval);
-                delete activeTransfers[jobId];
-                if (prog.error) {
-                    const row = findLibRow(filePath);
-                    const cell = row && row.querySelector('.transfer-cell');
-                    if (cell) cell.innerHTML = `<div class="transfer-overlay transfer-overlay--done transfer-overlay--error">
-                        <div class="transfer-overlay-title"><i class="mdi mdi-alert-circle"></i> ${esc(prog.error || tr('transfer_done'))}</div>
-                    </div>`;
-                    setTimeout(() => unmarkLibRowTransferring(filePath), 2500);
-                    return;
-                }
-                removeLibFileRow(filePath);
-                return;
-            }
-
-            transfer.progress = prog;
-            updateLibTransferRow(filePath, jobId);
-        } catch (e) {
-            console.error('Lib progress poll error:', e);
-        }
-    }, 400);
-    if (activeTransfers[jobId]) activeTransfers[jobId].pollInterval = pollInterval;
-}
-
+// ── Actions bibliothèque : suppression, recherche ────────────────────────────
 function confirmDeleteFolder(folderPath) {
     const name = folderPath.split('/').pop() || folderPath.split('\\').pop();
     document.getElementById('delete-folder-msg').textContent = `"${name}"`;
@@ -134,10 +36,7 @@ function seriesFolderName(fileName) {
 
 function libRenameFolder(folderPath, result, episodeOrder) {
     const folderBase = folderPath.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || '';
-    // Le renommage (fichiers + dossier) est synchrone côté serveur ; le parsing
-    // TVDB (titres d'épisodes, épisodes manquants, enrichissement OMDb) se
-    // poursuit en arrière-plan et déclenche un refresh SSE à la fin.
-    postJSON('/api/library/rename-folder-series', {
+    const payload = {
         path: folderPath,
         tvdbid: String(result.id || ''),
         title: result.title || '',
@@ -150,26 +49,40 @@ function libRenameFolder(folderPath, result, episodeOrder) {
         certification: result.certification || '',
         episode_order: episodeOrder || '',
         translations: result.translations || {},
-    }).then(data => {
-        if (!data.success) { alert(`✗ ${data.message}`); return; }
-        // Le renommage touche le dossier et tous ses fichiers : le cache
-        // d'arborescence est périmé, on le vide (il se reconstruit au fil).
-        clearLibTreeCache();
-        refreshLibrary();
-        showLibRenameResult(folderBase, data.renames || [], null, data.folder);
-    }).catch(e => alert(`✗ ${e.message}`));
+    };
+    // Étape 1 : dry-run serveur (aucun fichier déplacé) pour lister les
+    // modifications prévues dans la popup de confirmation.
+    postJSON('/api/library/rename-folder-series', { ...payload, dry_run: true })
+        .then(data => {
+            if (!data.success) { alert(`✗ ${data.message}`); return; }
+            window._pendingSeriesRename = { payload, folderPath, folderBase,
+                                            renames: data.renames || [], folder: data.folder };
+            const canApply = (data.renames || []).length > 0
+                || !!(data.folder && !data.folder.error);
+            showLibRenameConfirm(folderBase, data.renames || [], data.folder, canApply);
+        })
+        .catch(e => alert(`✗ ${e.message}`));
 }
 
-function showLibRenameResult(folderBase, renames, skipped, folderNote) {
-    const title = document.getElementById('libRenameResultTitle');
-    const body = document.getElementById('libRenameResultBody');
-    title.innerHTML = esc(folderBase);
+function showLibRenameConfirm(folderBase, renames, folderNote, canApply) {
+    const title = document.getElementById('libRenameConfirmTitle');
+    const body = document.getElementById('libRenameConfirmBody');
+    title.textContent = tr('lib_rename_confirm_title') + ' — ' + folderBase;
+    const applyBtn = document.getElementById('libRenameApplyBtn');
+    if (!canApply) {
+        // Rien à faire : popup simple OK/Annuler, pas de bouton Renommer.
+        body.innerHTML = `<div class="lib-rename-summary">${esc(tr('lib_rename_no_changes'))}</div>`;
+        if (applyBtn) applyBtn.style.display = 'none';
+        document.getElementById('libRenameConfirmModal').classList.add('active');
+        return;
+    }
+    if (applyBtn) applyBtn.style.display = '';
     const total = renames.length;
-    let html = `<div class="lib-rename-summary">${total} fichier(s) renommé(s)${skipped ? ` · ${skipped} ignoré(s)` : ''}</div>`;
-    if (folderNote) {
-        html += folderNote.error
-            ? `<div class="lib-rename-folder lib-rename-folder--error">Dossier : <s>${esc(folderNote.from)}</s> → <strong>${esc(folderNote.to)}</strong> (échec, à renommer manuellement)</div>`
-            : `<div class="lib-rename-folder">Dossier renommé : <s>${esc(folderNote.from)}</s> → <strong>${esc(folderNote.to)}</strong></div>`;
+    let html = total
+        ? `<div class="lib-rename-summary">${total} fichier(s) seront renommé(s)</div>`
+        : '';
+    if (folderNote && !folderNote.error) {
+        html += `<div class="lib-rename-folder">Dossier : <s>${esc(folderNote.from)}</s> → <strong>${esc(folderNote.to)}</strong></div>`;
     }
     if (renames.length) {
         html += `<div class="lib-rename-list">${renames.map(r =>
@@ -179,11 +92,26 @@ function showLibRenameResult(folderBase, renames, skipped, folderNote) {
                 <span class="lib-rename-to" title="${esc(r.to)}">${esc(r.to)}</span>
             </div>`).join('')}</div>`;
     }
-    if (!renames.length && !folderNote) {
-        html = `<div class="lib-rename-summary">Aucun fichier renommé.</div>`;
-    }
     body.innerHTML = html;
-    document.getElementById('libRenameResultModal').classList.add('active');
+    document.getElementById('libRenameConfirmModal').classList.add('active');
+}
+
+function confirmLibRename() {
+    const pending = window._pendingSeriesRename;
+    if (!pending) { closeModal('libRenameConfirmModal'); return; }
+    window._pendingSeriesRename = null;
+    closeModal('libRenameConfirmModal');
+    // Exécution réelle (le parsing TVDB + 2e passe se poursuit en arrière-plan
+    // et déclenche un refresh SSE à la fin).
+    postJSON('/api/library/rename-folder-series', pending.payload)
+        .then(data => {
+            if (!data.success) { alert(`✗ ${data.message}`); return; }
+            // Le renommage touche le dossier et tous ses fichiers : le cache
+            // d'arborescence est périmé, on le vide (il se reconstruit au fil).
+            clearLibTreeCache();
+            refreshLibrary();
+        })
+        .catch(e => alert(`✗ ${e.message}`));
 }
 
 function libManualSearch(filePath) {

@@ -66,17 +66,38 @@ class TVDBAPIHandler:
             'id': tvdb_id, 'id_tvdb': str(tvdb_id),
             'tvdb_slug': slug,
             'imdb_id': imdb, 'tmdb_id': tmdb,
+            'remote_ids': remote_ids,
             'title': result.get('name', ''), 'year': year,
             'date': air_time,
-            'score': result.get('score'),
-            'source': 'tvdb', 'type': result.get('type', media_type),
+            'score': result.get('score'), 'source': 'tvdb', 'type': result.get('type', media_type),
             'overview': result.get('overview', ''),
             'poster': result.get('image_url', ''),
             'translations': result.get('translations', {}),
         }
 
-    def search_series(self, title: str, year: Optional[int] = None) -> List[Dict]:
+    @staticmethod
+    def imdb_from_name(name: str) -> str:
+        """Extrait l'ID IMDb d'un nom de fichier : « ... [imdb-tt12345678] ... »."""
+        m = re.search(r'\[imdb(?:id)?-(tt?\d+)\]', str(name or ''), re.I)
+        return m.group(1).lower() if m else ''
+
+    @staticmethod
+    def _reorder_by_imdb(results: List[Dict], imdb_id: str) -> List[Dict]:
+        """Place en tête le résultat dont l'ID IMDb correspond (id extrait du nom
+        de fichier). Si aucun ne correspond, la liste est inchangée."""
+        imdb = str(imdb_id or '').strip().lower()
+        if not imdb or not results:
+            return results
+        idx = next((i for i, r in enumerate(results)
+                    if str(r.get('imdb_id') or '').strip().lower() == imdb), None)
+        if idx is None or idx == 0:
+            return results
+        picked = results[:idx] + results[idx + 1:]
+        return [results[idx]] + picked
+
+    def search_series(self, title: str, year: Optional[int] = None, imdb_id: str = '') -> List[Dict]:
         try:
+            logger.info(f"[TVDB API] → recherche série « {title} » (année {year or '-'}, imdb={imdb_id or '-'})")
             results = []
             filtered = []
             data = self.client.search(title, type="series") or []
@@ -91,19 +112,21 @@ class TVDBAPIHandler:
                 except Exception as e:
                     logger.debug(f"Error parsing series result: {e}")
             picked = filtered or results
-            logger.info(f"[TVDB] recherche série « {title} » (année {year or '-'}) : {len(picked)} résultat(s)")
+            picked = self._reorder_by_imdb(picked, imdb_id)
+            logger.info(f"[TVDB API] ← série « {title} » : {len(picked)} résultat(s)" + (f" → {imdb_id} en tête" if imdb_id and picked and str(picked[0].get('imdb_id') or '').lower() == str(imdb_id).lower() else ''))
             return picked
         except Exception as e:
             logger.error(f"Series search error: {e}")
             return []
 
-    def search_movie(self, title: str, year: Optional[int] = None) -> List[Dict]:
+    def search_movie(self, title: str, year: Optional[int] = None, imdb_id: str = '') -> List[Dict]:
         try:
+            logger.info(f"[TVDB API] → recherche film « {title} » (année {year or '-'}, imdb={imdb_id or '-'})")
             results = []
             filtered = []
             data = self.client.search(title, type="movie") or []
             db.usage_bump('tvdb')
-            for r in data[:10]:
+            for r in data[:50]:
                 try:
                     item = self._parse_search_result(r, 'movie')
                     item['director'] = r.get('director', '')
@@ -115,7 +138,8 @@ class TVDBAPIHandler:
                 except Exception as e:
                     logger.debug(f"Error parsing movie result: {e}")
             picked = filtered or results
-            logger.info(f"[TVDB] recherche film « {title} » (année {year or '-'}) : {len(picked)} résultat(s)")
+            picked = self._reorder_by_imdb(picked, imdb_id)
+            logger.info(f"[TVDB API] ← film « {title} » : {len(picked)} résultat(s)" + (f" → {imdb_id} en tête" if imdb_id and picked and str(picked[0].get('imdb_id') or '').lower() == str(imdb_id).lower() else ''))
             return picked
         except Exception as e:
             logger.error(f"Movie search error: {e}")
@@ -146,8 +170,9 @@ class TVDBAPIHandler:
 
     def search_auto(self, title, year=None, filename='', season=None, episode=None, media_hint='') -> Dict:
         year = self._normalize_year(year)
-        movies = self.search_movie(title, year)
-        series = self.search_series(title, year)
+        imdb_id = self.imdb_from_name(filename)
+        movies = self.search_movie(title, year, imdb_id)
+        series = self.search_series(title, year, imdb_id)
         is_tv = self._looks_like_tv(title, filename, season, episode)
 
         ms = self._score(movies, title, year) + (1 if media_hint == 'movie' else 0)
@@ -194,6 +219,7 @@ class TVDBAPIHandler:
             if len(code) != 3:
                 continue
             try:
+                logger.info(f"[TVDB API] → traduction {media_method} id={media_id} ({code})")
                 res = getattr(self.client, media_method)(media_id, code)
                 name = (res or {}).get('name', '')
                 if name:
@@ -206,6 +232,7 @@ class TVDBAPIHandler:
 
     def get_series_details(self, series_id: int, search_data: Dict = None) -> Dict:
         try:
+            logger.info(f"[TVDB API] → détails série id={series_id}")
             s = self.client.get_series_extended(series_id)
             db.usage_bump('tvdb')
             imdb, tmdb = self._remote_ids(s)
@@ -267,7 +294,7 @@ class TVDBAPIHandler:
                 'poster': self._poster(s, 2),
                 'overview': '', 'source': 'tvdb',
             }
-            logger.info(f"[TVDB] détails série id={series_id} : « {details['title']} » ({details['year']}) → imdb={details.get('imdbid') or '-'}")
+            logger.info(f"[TVDB API] ← série id={series_id} : « {details['title']} » ({details['year']}) → imdb={details.get('imdbid') or '-'}")
             return details
         except Exception as e:
             logger.error(f"Series details error: {e}")
@@ -275,6 +302,7 @@ class TVDBAPIHandler:
 
     def get_movie_details(self, movie_id: int, search_data: Dict = None) -> Dict:
         try:
+            logger.info(f"[TVDB API] → détails film id={movie_id}")
             m = self.client.get_movie_extended(movie_id)
             db.usage_bump('tvdb')
             imdb, tmdb = self._remote_ids(m)
@@ -326,7 +354,7 @@ class TVDBAPIHandler:
                 'overview': '', 'source': 'tvdb',
                 'status': m.get('status', {}).get('name', '') if isinstance(m.get('status'), dict) else '',
             }
-            logger.info(f"Movie: {details['title']} ({details['year']})")
+            logger.info(f"[TVDB API] ← film id={movie_id} : « {details['title']} » ({details['year']}) → imdb={imdb or '-'}")
             return details
         except Exception as e:
             logger.error(f"Movie details error: {e}")
@@ -335,6 +363,7 @@ class TVDBAPIHandler:
     def get_series_episodes(self, series_id: int, season: Optional[int] = None, page: int = 0,
                             season_type: str = 'default') -> Dict:
         try:
+            logger.info(f"[TVDB API] → épisodes série id={series_id}")
             all_episodes = []
             current_page = page
             total_pages = 1
@@ -368,11 +397,49 @@ class TVDBAPIHandler:
                 if next_link:
                     seen_next.add(next_link)
                 current_page += 1
-            logger.info(f"[TVDB] épisodes série id={series_id} : {len(all_episodes)} épisode(s) récupéré(s)")
+            logger.info(f"[TVDB API] ← épisodes série id={series_id} : {len(all_episodes)} épisode(s) récupéré(s)")
             return {'series_id': series_id, 'episodes': all_episodes, 'source': 'tvdb'}
         except Exception as e:
             logger.error(f"Series episodes error: {e}")
             return {'series_id': series_id, 'episodes': [], 'source': 'tvdb'}
+
+    def get_series_seasons(self, series_id: int, max_age: int = 86400) -> Dict:
+        """Liste des saisons officielles d'une série avec leur poster.
+        Cache 24h (BDD) : le premier appel fait 1 get_series_extended +
+        1 get_season_extended par saison sans image ; les suivants coûtent 0 requête."""
+        cached = db.series_seasons_get(str(series_id), max_age)
+        if cached and cached.get('seasons'):
+            return cached
+        try:
+            s = self.client.get_series_extended(series_id)
+            db.usage_bump('tvdb')
+            out = []
+            for x in s.get('seasons') or []:
+                stype = (x.get('type') or {}).get('type', '')
+                if stype and stype != 'official':
+                    continue
+                num = x.get('number')
+                if num is None:
+                    continue
+                sid = x.get('id')
+                poster = x.get('image', '') or ''
+                year = x.get('year', '')
+                if not poster and sid:
+                    try:
+                        se = self.client.get_season_extended(sid)
+                        db.usage_bump('tvdb')
+                        poster = se.get('image', '') or ''
+                        year = se.get('year', '') or year
+                    except Exception:
+                        pass
+                out.append({'number': int(num), 'id': sid, 'poster': poster, 'year': str(year) if year else ''})
+            out.sort(key=lambda r: r['number'])
+            data = {'seasons': out}
+            db.series_seasons_set(str(series_id), data)
+            return data
+        except Exception as e:
+            logger.warning(f"Series seasons fetch error for {series_id}: {e}")
+            return {'seasons': (cached or {}).get('seasons', [])}
 
     def _parse_episode(self, ep: dict) -> dict:
         s, e = ep.get('seasonNumber'), ep.get('number')

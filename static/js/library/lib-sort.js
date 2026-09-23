@@ -82,6 +82,7 @@ function updateLibSortButtons() {
 function reSortLib() {
     const container = document.getElementById('library-tree');
     if (container) sortNodeChildren(container);
+    applyLibGridFilter();
 }
 
 function sortNodeChildren(container) {

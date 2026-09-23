@@ -93,15 +93,25 @@ def _series_episodes_memo(series_id):
 
 
 def _series_ep_counts(series_id, series_path, show_s00):
-    """(présents, total) pour un dossier série, sans requête TVDB."""
+    """(présents, total, à venir) pour un dossier série, sans requête TVDB."""
     eps = _series_episodes_memo(series_id)
     known = {(e.get('s'), e.get('e')) for e in eps
              if e.get('s') is not None and e.get('e') is not None}
     ep_total = sum(1 for e in eps if ((e.get('s') or 0) > 0 or show_s00) and not library.episode_is_upcoming(e))
+    ep_upcoming = sum(1 for e in eps if (e.get('s') or 0) > 0 and library.episode_is_upcoming(e))
     present = library.present_episodes(series_path)
     ep_present = sum(1 for key in present
                      if (key in known) and (key[0] > 0 or show_s00))
-    return ep_present, ep_total
+    return ep_present, ep_total, ep_upcoming
+
+
+def _ep_title_from_file(filename):
+    """Titre d'épisode extrait d'un nom de fichier local, au format
+    « … - S01E01 - Titre » (token {t:en}) : plus lisible que le titre TVDB
+    qui est en langue originale (ex. japonais)."""
+    stem = os.path.splitext(os.path.basename(str(filename)))[0]
+    m = re.search(r'(?:S\d{2,}E\d{2,}(?:-E\d{2,})*|\d+x\d{2,}(?:-\d{2,})*)\s*[-–]\s*(.+)$', stem, re.I)
+    return m.group(1).strip() if m else ''
 
 
 @bp.route('/api/library/missing')
@@ -152,44 +162,10 @@ def api_library_missing():
     })
 
 
-@bp.route('/api/library')
-@login_required
-def api_library():
-    path = request.args.get('path', '').strip()
-    library_type = request.args.get('type', '')  # 'movie' or 'tv'
-    # Le paramètre est explicite : le frontend peut ainsi demander un premier
-    # rendu léger puis un rafraîchissement complet, même si l'option de scan
-    # rapide reste activée pour les durées de fichiers.
-    fast_scan = request.args.get('fast') == '1'
-
-    # Root call — return both movie and tv roots
-    if not path:
-        roots = []
-        for lib_type, cfg_key in [('movie', '_movie_output_path'), ('tv', '_tv_output_path')]:
-            lib_path = state.config.get(cfg_key) or state.config.get(cfg_key.lstrip('_'))
-            if lib_path and os.path.isdir(lib_path):
-                # basename() renvoie '' pour un chemin en « \\serveur\partage\ » :
-                # on revient en arrière jusqu'au premier segment non vide pour
-                # afficher juste le nom du dossier racine.
-                parts = lib_path.replace('/', '\\').rstrip('\\').split('\\')
-                root_name = os.path.basename(os.path.normpath(lib_path)) or parts[-1] or parts[-2] or lib_path
-                roots.append({'name': root_name, 'path': lib_path, 'type': lib_type, 'is_dir': True,
-                              'size': library.folder_size_direct(lib_path) if fast_scan else library.folder_size(lib_path)})
-        return jsonify({'path': '', 'type': 'root', 'entries': roots})
-
-    if not os.path.isdir(path):
-        return jsonify({'error': 'Dossier introuvable'}), 404
-
-    movie_root = os.path.abspath(state.config.get('_movie_output_path') or state.config.get('movie_output_path') or '')
-    tv_root    = os.path.abspath(state.config.get('_tv_output_path')    or state.config.get('tv_output_path')    or '')
-    abs_path   = os.path.abspath(path)
-    if abs_path.startswith(movie_root):
-        lib_type = 'movie'
-    elif abs_path.startswith(tv_root):
-        lib_type = 'tv'
-    else:
-        lib_type = library_type or 'movie'
-
+def _meta_ctx(fast_scan, lib_type, movie_fmt, tv_fmt):
+    """Contexte de méta d'un rendu bibliothèque : caches BDD uniquement
+    (search cache, OMDb, series_meta). Réutilisé par l'arborescence
+    (api_library) et la liste plate (api_library/flat)."""
     movie_fmt = state.config.get('movie_format', '{n} ({y})')
     tv_fmt    = state.config.get('tv_format',    '{n} - {s00e00} - {t}')
 
@@ -264,6 +240,10 @@ def api_library():
     except Exception:
         omdb_map = {}
     try:
+        series_meta_all = db.series_meta_all()
+    except Exception:
+        series_meta_all = {}
+    try:
         episode_omdb_map = db.omdb_episode_all()
     except Exception:
         episode_omdb_map = {}
@@ -276,6 +256,9 @@ def api_library():
     # cela chaque nœud relance sa résolution TVDB→IMDb (1 requête TVDB chacun)
     # et son walk réseau de taille de dossier.
     _req_imdb_mem = {}
+    # Séries dont l'OMDb global est déjà en cours d'enrichissement (thread de
+    # fond) pour cette requête : 1 thread max par série par rendu.
+    _req_series_enrich_queued = set()
 
     def _req_resolve_imdb(tvdb_id, title=None, year=None):
         tvdb_id = str(tvdb_id or '').strip().lower()
@@ -285,6 +268,18 @@ def api_library():
             _req_imdb_mem[tvdb_id] = omdb.series_imdb_cached(tvdb_id) or omdb.resolve_series_imdb(
                 tvdb_id, title=title, year=year)
         return _req_imdb_mem[tvdb_id]
+
+    def _req_enqueue_series_omdb(tvdb_id, title=None, year=None):
+        """Enrichit l'OMDb global d'une série en thread de fond (1 TVDB + 1 OMDb
+        la première fois) pour que note/date/genres/cert du dossier apparaissent
+        au rendu suivant, sans bloquer l'affichage."""
+        tvdb_id = str(tvdb_id or '').strip().lower()
+        if not tvdb_id or tvdb_id in _req_series_enrich_queued:
+            return
+        if omdb.series_imdb_cached(tvdb_id) and db.omdb_get(omdb.series_imdb_cached(tvdb_id)) is not None:
+            return
+        _req_series_enrich_queued.add(tvdb_id)
+        threading.Thread(target=omdb.ensure_series_omdb, args=(tvdb_id, title, year), daemon=True).start()
 
     _req_size_mem = {}
 
@@ -319,13 +314,30 @@ def api_library():
             meta['poster'] = poster
         return meta
 
-    def cache_meta(cached):
-        if not cached:
-            return None
-        results = cached.get('results') or []
+    def _best_result(cached, name):
+        """Le meilleur résultat d'un cache de recherche pour un nom de fichier :
+        si le nom porte un ID vérifié (imdb/tmdb/tvdb) et qu'un résultat le
+        porte, on le préfère au 1er. S'il n'en porte aucun → None : les infos
+        du 1er résultat (recherche TVDB par titre, autre titre homonyme) ne
+        sont pas fiables pour ce fichier, la chaîne de meta retombe sur le nom."""
+        results = (cached or {}).get('results') or []
         if not results:
             return None
-        top = results[0]
+        ids = ids_from_name(name)
+        if not ids:
+            return results[0]
+        for r in results:
+            if any(str(r.get(k) or '').strip().lower() == v for kind, v in ids
+                   for k in (('imdb_id', 'tmdb_id', 'id_tvdb', 'id') if kind == 'tvdb' else (kind,))):
+                return r
+        return None
+
+    def cache_meta(cached, name=None):
+        if not cached:
+            return None
+        top = _best_result(cached, name) if name else ((cached.get('results') or [None])[0])
+        if not top:
+            return None
         meta = {
             'title': top.get('title', ''),
             'year': top.get('year'),
@@ -427,6 +439,30 @@ def api_library():
                     return poster, ''
         return None, None
 
+    def series_poster_meta(tvdb_id):
+        """Meta minimale (poster + titre) d'une série depuis les caches, pour
+        l'affichage des dossiers en scan rapide (0 requête API)."""
+        tvdb_id = str(tvdb_id or '').strip().lower()
+        if not tvdb_id:
+            return None
+        data = (series_meta_all.get(tvdb_id) or {}).get('data') or {}
+        poster = data.get('poster') or ''
+        if poster and poster != 'N/A':
+            return {'poster': poster, 'title': data.get('title', ''), 'tvdb': tvdb_id}
+        cached = id_index.get(('tvdb', tvdb_id))
+        if cached:
+            smeta = cache_meta(cached)
+            if smeta and smeta.get('poster') and smeta['poster'] != 'N/A':
+                return {'poster': smeta['poster'], 'title': smeta.get('title', ''), 'tvdb': tvdb_id}
+        imdb = series_imdb_map.get(tvdb_id)
+        if imdb:
+            od = omdb_map.get(imdb.lower())
+            if od:
+                poster = od.get('Poster') or ''
+                if poster and poster != 'N/A':
+                    return {'poster': poster, 'title': '', 'tvdb': tvdb_id}
+        return None
+
     def series_slug(tvdb_id):
         cached = db.series_meta_get(str(tvdb_id).strip().lower())
         data = (cached or {}).get('data') or {}
@@ -467,7 +503,7 @@ def api_library():
                 cached = basename_map[base]
                 if best is None or (cached['loaded_at'] or 0) > (best['loaded_at'] or 0):
                     best = cached
-        meta = cache_meta(best)
+        meta = cache_meta(best, name)
         meta = meta or id_meta(name) or name_meta(name)
         if lib_type == 'tv':
             m2 = re.search(r'\[tvdbid-([0-9]+)\]', name, re.I)
@@ -502,12 +538,20 @@ def api_library():
                         tvdb_id = m2.group(1)
                     if tvdb_id:
                         tvdb_id = str(tvdb_id).strip().lower()
-                        imdb = series_imdb_map.get(tvdb_id) or _req_resolve_imdb(
+                        imdb = series_imdb_map.get(tvdb_id) or (None if fast_scan else _req_resolve_imdb(
                             tvdb_id, title=meta.get('title') or name.split(' (')[0].strip(),
-                            year=meta.get('year'))
+                            year=meta.get('year')))
                         if imdb:
                             meta['imdb'] = imdb
                             _apply_omdb(meta, imdb, live=False)
+                # L'OMDb global de la série (note, date, genres, cert) manque en
+                # base : on le met en cache en thread de fond. Les infos du
+                # dossier s'affichent au rendu suivant, sans bloquer la réponse.
+                if not fast_scan and not meta.get('rating') and m2:
+                    _req_enqueue_series_omdb(
+                        meta.get('tvdb') or m2.group(1),
+                        title=meta.get('title') or name.split(' (')[0].strip(),
+                        year=meta.get('year'))
         return meta
 
     def file_meta(name, duration_val=None, entry_path=None):
@@ -519,11 +563,11 @@ def api_library():
             tail = name[m.end():].strip(' -')
             if tail:
                 ep_name = os.path.splitext(tail.split(' - ')[0].strip())[0] or ''
-        meta = cache_meta(basename_map.get(name))
+        meta = cache_meta(basename_map.get(name), name)
         if not meta:
             if m:
                 key = (name[:m.start()].strip().lower(), m.group(1).lower())
-                meta = cache_meta(episode_map.get(key))
+                meta = cache_meta(episode_map.get(key), name)
             if not meta:
                 meta = id_meta(name) or name_meta(name)
         if m:
@@ -577,6 +621,75 @@ def api_library():
                     meta['runtime'] = od['Runtime']
         return meta
 
+
+    return {
+        'is_valid_name': is_valid_name,
+        'name_meta': name_meta,
+        'id_meta': id_meta,
+        'folder_meta': folder_meta,
+        'file_meta': file_meta,
+        'series_poster_meta': series_poster_meta,
+        'enqueue_series_omdb': _req_enqueue_series_omdb,
+        'series_imdb_map': series_imdb_map,
+    }
+
+
+@bp.route('/api/library')
+@login_required
+def api_library():
+    path = request.args.get('path', '').strip()
+    library_type = request.args.get('type', '')  # 'movie' or 'tv'
+    # Le paramètre est explicite : le frontend peut ainsi demander un premier
+    # rendu léger puis un rafraîchissement complet, même si l'option de scan
+    # rapide reste activée pour les durées de fichiers.
+    fast_scan = request.args.get('fast') == '1'
+
+    # Root call — return both movie and tv roots
+    if not path:
+        roots = []
+        for lib_type, cfg_key in [('movie', '_movie_output_path'), ('tv', '_tv_output_path')]:
+            lib_path = state.config.get(cfg_key) or state.config.get(cfg_key.lstrip('_'))
+            if lib_path and os.path.isdir(lib_path):
+                # basename() renvoie '' pour un chemin en « \\serveur\partage\ » :
+                # on revient en arrière jusqu'au premier segment non vide pour
+                # afficher juste le nom du dossier racine.
+                parts = lib_path.replace('/', '\\').rstrip('\\').split('\\')
+                root_name = os.path.basename(os.path.normpath(lib_path)) or parts[-1] or parts[-2] or lib_path
+                roots.append({'name': root_name, 'path': lib_path, 'type': lib_type, 'is_dir': True,
+                              'size': library.folder_size_direct(lib_path) if fast_scan else library.folder_size(lib_path)})
+        return jsonify({'path': '', 'type': 'root', 'entries': roots})
+
+    if not os.path.isdir(path):
+        return jsonify({'error': 'Dossier introuvable'}), 404
+
+    movie_root = os.path.abspath(state.config.get('_movie_output_path') or state.config.get('movie_output_path') or '')
+    tv_root    = os.path.abspath(state.config.get('_tv_output_path')    or state.config.get('tv_output_path')    or '')
+    abs_path   = os.path.abspath(path)
+    if abs_path.startswith(movie_root):
+        lib_type = 'movie'
+    elif abs_path.startswith(tv_root):
+        lib_type = 'tv'
+    else:
+        lib_type = library_type or 'movie'
+
+    movie_fmt = state.config.get('movie_format', '{n} ({y})')
+    tv_fmt    = state.config.get('tv_format',    '{n} - {s00e00} - {t}')
+    ctx = _meta_ctx(fast_scan, lib_type, movie_fmt, tv_fmt)
+    is_valid_name = ctx['is_valid_name']
+    name_meta = ctx['name_meta']
+    id_meta = ctx['id_meta']
+    folder_meta = ctx['folder_meta']
+    file_meta = ctx['file_meta']
+    series_poster_meta = ctx['series_poster_meta']
+    _req_enqueue_series_omdb = ctx['enqueue_series_omdb']
+
+    _req_size_mem = {}
+
+    def _req_folder_size(p):
+        if p not in _req_size_mem:
+            _req_size_mem[p] = library.folder_size_direct(p) if fast_scan else library.folder_size(p, recursive=False)
+        return _req_size_mem[p]
+
     all_entries = []
     try:
         all_entries = list(os.scandir(path))
@@ -616,7 +729,7 @@ def api_library():
             except Exception:
                 child_count = 0
             valid_dir = is_valid_name(entry.name, lib_type, is_dir=True)
-            ep_present = ep_total = None
+            ep_present = ep_total = ep_upcoming = None
             if lib_type == 'tv' and not fast_scan:
                 mep = re.search(r'\[tvdbid-([0-9]+)\]', entry.name, re.I)
                 if mep:
@@ -624,10 +737,25 @@ def api_library():
                     # uniquement si l'option show_s00_specials est activée).
                     # Les épisodes « à venir » (non diffusés) sont exclus du total.
                     show_s00 = bool(state.config.get('show_s00_specials'))
-                    ep_present, ep_total = _series_ep_counts(mep.group(1), entry.path, show_s00)
+                    ep_present, ep_total, ep_upcoming = _series_ep_counts(mep.group(1), entry.path, show_s00)
+            if fast_scan:
+                meta = name_meta(entry.name) or id_meta(entry.name)
+                # Dossier série en scan rapide : folder_meta() est trop coûteuse,
+                # on se contente du poster/titre de la série depuis les caches.
+                if lib_type == 'tv':
+                    mser = re.search(r'\[tvdbid-([0-9]+)\]', entry.name, re.I)
+                    if mser:
+                        smeta = series_poster_meta(mser.group(1))
+                        if smeta:
+                            meta = {**(meta or {}), **smeta}
+                        # Même enrichissement OMDb global en fond que le scan lent :
+                        # la note/infos du dossier apparaissent au F5 suivant.
+                        _req_enqueue_series_omdb(mser.group(1), title=(meta or {}).get('title') or entry.name.split(' (')[0].strip())
+            else:
+                meta = folder_meta(entry.name)
             entries.append({'name': entry.name, 'path': entry.path, 'type': lib_type, 'is_dir': True, 'child_count': child_count, 'size': _req_folder_size(entry.path), 'valid': valid_dir,
-                            'meta': folder_meta(entry.name) if not fast_scan else (name_meta(entry.name) or id_meta(entry.name)),
-                            'ep_present': ep_present, 'ep_total': ep_total})
+                            'meta': meta,
+                            'ep_present': ep_present, 'ep_total': ep_total, 'ep_upcoming': ep_upcoming})
         elif entry.is_file() and Path(entry.name).suffix.lower() in VIDEO_EXT:
             valid = is_valid_name(entry.name, lib_type)
             size = 0
@@ -644,6 +772,213 @@ def api_library():
     # la file FIFO (worker unique, calcul séquentiel dans l'ordre d'affichage).
 
     return jsonify({'path': path, 'type': lib_type, 'entries': entries, 'total': total, 'offset': offset, 'limit': limit})
+
+
+@bp.route('/api/library/flat')
+@login_required
+def api_library_flat():
+    """Liste plate de la bibliothèque (vue grille) : 1 item par film
+    (fichier) et 1 item par série (dossier [tvdbid-…]).
+    Caches BDD uniquement (search cache, OMDb, series_meta) : 0 requête API
+    externe, la note/poster manquants arrivent ensuite via l'enrichissement."""
+    movie_root = os.path.abspath(state.config.get('_movie_output_path') or state.config.get('movie_output_path') or '')
+    tv_root = os.path.abspath(state.config.get('_tv_output_path') or state.config.get('tv_output_path') or '')
+    movie_fmt = state.config.get('movie_format', '{n} ({y})')
+    tv_fmt = state.config.get('tv_format', '{n} - {s00e00} - {t}')
+    show_s00 = bool(state.config.get('show_s00_specials'))
+
+    items = []
+    seen = set()
+    # lib_type='tv' : requis par folder_meta (dossiers série) ; file_meta et
+    # is_valid_name sont indépendants du type.
+    ctx = _meta_ctx(fast_scan=False, lib_type='tv', movie_fmt=movie_fmt, tv_fmt=tv_fmt)
+
+    def _add(path, typ, name, meta, valid, size=0, ep_present=None, ep_total=None, ep_upcoming=None):
+        key = (path, typ)
+        if key in seen:
+            return
+        seen.add(key)
+        items.append({'type': typ, 'name': name, 'path': path, 'valid': valid, 'size': size,
+                      'meta': meta, 'ep_present': ep_present, 'ep_total': ep_total, 'ep_upcoming': ep_upcoming})
+
+    def _walk_files(root, depth=0, max_depth=3):
+        if depth > max_depth:
+            return
+        try:
+            entries = sorted(os.scandir(root), key=lambda e: e.name.lower())
+        except (PermissionError, OSError):
+            return
+        for e in entries:
+            try:
+                if e.is_dir(follow_symlinks=False):
+                    _walk_files(e.path, depth + 1, max_depth)
+                elif e.is_file(follow_symlinks=False) and Path(e.name).suffix.lower() in VIDEO_EXT:
+                    size = 0
+                    try:
+                        size = e.stat(follow_symlinks=False).st_size
+                    except OSError:
+                        pass
+                    meta = ctx['file_meta'](e.name, None, e.path)
+                    _add(e.path, 'movie', e.name, meta, ctx['is_valid_name'](e.name, 'movie'), size)
+            except OSError:
+                continue
+
+    def _walk_series(root, depth=0, max_depth=3):
+        if depth > max_depth:
+            return
+        try:
+            entries = sorted(os.scandir(root), key=lambda e: e.name.lower())
+        except (PermissionError, OSError):
+            return
+        for e in entries:
+            try:
+                if not e.is_dir(follow_symlinks=False):
+                    continue
+                m = re.search(r'\[tvdbid-([0-9]+)\]', e.name, re.I)
+                if m:
+                    meta = ctx['folder_meta'](e.name)
+                    if not meta:
+                        meta = {'tvdb': m.group(1)}
+                    ep_present = ep_total = ep_upcoming = None
+                    try:
+                        ep_present, ep_total, ep_upcoming = _series_ep_counts(m.group(1), e.path, show_s00)
+                    except Exception:
+                        pass
+                    size = 0
+                    try:
+                        size = library.folder_size_direct(e.path)
+                    except Exception:
+                        pass
+                    _add(e.path, 'series', e.name, meta, True, size, ep_present, ep_total, ep_upcoming)
+                else:
+                    _walk_series(e.path, depth + 1, max_depth)
+            except OSError:
+                continue
+
+    if movie_root and os.path.isdir(movie_root):
+        _walk_files(movie_root)
+    if tv_root and os.path.isdir(tv_root):
+        _walk_series(tv_root)
+    items.sort(key=lambda it: ((it['type'] != 'movie'), str(it['name']).lower()))
+    return jsonify({'items': items, 'total': len(items)})
+
+
+@bp.route('/api/library/series/<tvdb_id>')
+@login_required
+def api_library_series(tvdb_id):
+    """Détail d'une série pour la vue grille : meta, saisons (posters TVDB,
+    cache 24h) et épisodes avec leur état (présent / manquant / à venir).
+    Les posters de saison font 1 requête TVDB par saison sans image au 1er
+    affichage, puis 0 (cache BDD)."""
+    if not tvdb_id.isdigit():
+        return jsonify({'error': 'id invalide'}), 400
+    show_s00 = bool(state.config.get('show_s00_specials'))
+    tv_root = os.path.abspath(state.config.get('_tv_output_path') or state.config.get('tv_output_path') or '')
+    # Chemine du dossier série : chemin absolu fourni ou recherche [tvdbid-…]
+    path = request.args.get('path', '').strip()
+    if not (path and os.path.isdir(path) and path.lower().startswith(tv_root.lower())):
+        path = ''
+        try:
+            for root, dirs, files in os.walk(tv_root):
+                dirs[:] = [d for d in dirs if not d.startswith('.')]
+                for d in dirs:
+                    if re.search(rf'\[tvdbid-{tvdb_id}\]', d, re.I):
+                        path = os.path.join(root, d)
+                        break
+                if path:
+                    break
+        except OSError:
+            pass
+    if not path:
+        return jsonify({'error': 'Dossier série introuvable'}), 404
+
+    meta = ((db.series_meta_get(tvdb_id) or {}).get('data')) or {}
+    episodes = _series_episodes_memo(tvdb_id)
+    present = library.present_episodes(path)
+    fmap = library.episode_files(path)
+    seasons = (state.api_handler.get_series_seasons(tvdb_id)
+               if state.api_handler.tvdb else {'seasons': []}).get('seasons') or []
+
+    try:
+        ep_omdb = db.omdb_episode_all()
+    except Exception:
+        ep_omdb = {}
+    series_imdb = ((db.series_meta_get(tvdb_id) or {}).get('imdb_id')) or ''
+    year = (meta.get('year') or str(meta.get('date') or '')[:4] or '')
+
+    def _ep_omdb(s, ep):
+        for ek in (f"{series_imdb}:y{year}:s{s:02d}e{ep:02d}", f"{series_imdb}:s{s:02d}e{ep:02d}"):
+            ed = ep_omdb.get(ek)
+            if ed:
+                return ed
+        return {}
+
+    by_season = {}
+    for e in episodes:
+        s, ep = e.get('s'), e.get('e')
+        if s is None or ep is None:
+            continue
+        if s <= 0 and not show_s00:
+            continue
+        if (s, ep) in present:
+            ep_state = 'present'
+        elif library.episode_is_upcoming(e):
+            ep_state = 'upcoming'
+        else:
+            ep_state = 'missing'
+        ed = _ep_omdb(int(s), int(ep))
+        files = fmap.get((s, ep), [])
+        # Titre TVDB = langue originale (ex. japonais) : pour les épisodes
+        # présents on préfère le titre du fichier local ({t:en}), plus lisible.
+        ep_title = e.get('title', '')
+        if ep_state == 'present' and files:
+            local_title = _ep_title_from_file(files[0]['name'])
+            if local_title:
+                ep_title = local_title
+        by_season.setdefault(int(s), []).append(
+            {'s': int(s), 'e': int(ep), 'title': ep_title,
+             'airdate': e.get('airdate', ''), 'state': ep_state,
+             'runtime': ed.get('Runtime') if ed.get('Runtime') not in (None, '', 'N/A') else '',
+             'rating': ed.get('imdbRating') if ed.get('imdbRating') not in (None, '', 'N/A') else '',
+             'files': fmap.get((s, ep), [])})
+    for eps in by_season.values():
+        eps.sort(key=lambda x: x['e'])
+
+    out_seasons = []
+    for sd in seasons:
+        num = sd.get('number')
+        eps = by_season.get(num, [])
+        if not eps:
+            continue
+        out_seasons.append({
+            'number': num, 'poster': sd.get('poster', ''), 'year': sd.get('year', ''),
+            'total': len(eps),
+            'present': sum(1 for x in eps if x['state'] == 'present'),
+            'missing': sum(1 for x in eps if x['state'] == 'missing'),
+            'upcoming': sum(1 for x in eps if x['state'] == 'upcoming'),
+            'episodes': eps,
+        })
+    # Saisons présentes sur disque mais absentes de TVDB (spéciaux S00…)
+    known = {s['number'] for s in out_seasons}
+    for num in sorted(by_season):
+        if num in known:
+            continue
+        eps = by_season[num]
+        out_seasons.append({
+            'number': num, 'poster': '', 'year': '',
+            'total': len(eps),
+            'present': sum(1 for x in eps if x['state'] == 'present'),
+            'missing': sum(1 for x in eps if x['state'] == 'missing'),
+            'upcoming': sum(1 for x in eps if x['state'] == 'upcoming'),
+            'episodes': eps,
+        })
+    out_seasons.sort(key=lambda s: s['number'])
+
+    return jsonify({
+        'tvdb_id': tvdb_id, 'meta': meta,
+        'episodes_available': bool(episodes),
+        'seasons': out_seasons,
+    })
 
 
 @bp.route('/api/lib-durations', methods=['POST'])
@@ -778,58 +1113,6 @@ def api_library_enrich_episodes():
     return jsonify({'results': results})
 
 
-@bp.route('/api/library/send-back-folder', methods=['POST'])
-@login_required
-def api_library_send_back_folder():
-    d = request.json or {}
-    folder = d.get('path')
-    if not folder or not os.path.isdir(folder):
-        return jsonify({'success': False, 'message': 'Dossier introuvable'}), 400
-    movie_root = os.path.abspath(state.config.get('_movie_output_path') or state.config.get('movie_output_path') or '')
-    tv_root    = os.path.abspath(state.config.get('_tv_output_path')    or state.config.get('tv_output_path')    or '')
-    abs_folder = os.path.abspath(folder)
-    if not (abs_folder.startswith(movie_root) or abs_folder.startswith(tv_root)):
-        return jsonify({'success': False, 'message': 'Opération non autorisée hors des dossiers médias'}), 403
-    input_path = state.config.get('_input_path') or state.config.get('input_path')
-    moved, errors = [], []
-    for entry in os.scandir(folder):
-        if entry.is_file() and Path(entry.name).suffix.lower() in VIDEO_EXT:
-            dst = os.path.join(input_path, entry.name)
-            try:
-                _move_path(entry.path, dst)
-                append_history({'id': str(uuid.uuid4()), 'op': 'move', 'date': time.strftime('%Y-%m-%d %H:%M:%S'),
-                                'from_path': entry.path, 'from_name': entry.name,
-                                'to_path': dst, 'to_name': entry.name})
-                moved.append(entry.name)
-            except Exception as e:
-                errors.append(f"{entry.name}: {e}")
-    if errors:
-        return jsonify({'success': False, 'message': '\n'.join(errors), 'moved': moved}), 400
-    return jsonify({'success': True, 'moved': moved})
-
-
-@bp.route('/api/library/send-back', methods=['POST'])
-@login_required
-def api_library_send_back():
-    d = request.json or {}
-    src = d.get('path')
-    if not src or not os.path.isfile(src):
-        return jsonify({'success': False, 'message': 'Fichier introuvable'}), 400
-    dst = os.path.join(state.config.get('_input_path') or state.config.get('input_path'), os.path.basename(src))
-    job_id = str(uuid.uuid4())
-    try:
-        _run_file_op(job_id, src, dst, {
-            'id': job_id, 'op': 'move',
-            'date': time.strftime('%Y-%m-%d %H:%M:%S'),
-            'from_path': src, 'from_name': os.path.basename(src),
-            'to_path': dst, 'to_name': os.path.basename(dst),
-        })
-        return jsonify({'success': True, 'job_id': job_id})
-    except Exception as e:
-        logger.error(f"Send-back error for {src} -> {dst}: {e}")
-        return jsonify({'success': False, 'message': str(e)}), 400
-
-
 @bp.route('/api/library/rename-folder', methods=['POST'])
 @login_required
 def api_library_rename_folder():
@@ -884,13 +1167,16 @@ def _folder_series_files(folder):
     return out
 
 
-def _folder_series_rename(folder, series_title, year, tvdb_id, imdb_id, tmdb_id, translations):
+def _folder_series_rename(folder, series_title, year, tvdb_id, imdb_id, tmdb_id, translations,
+                          dry_run=False):
     """Renomme les fichiers d'un dossier série selon le format TV configuré.
     Les titres d'épisodes viennent du cache TVDB ; au 1er passage le cache est
     vide (parsing en arrière-plan) et le renommage est complété après parsing.
     Les sous-titres (.srt, .sub, .ass, ...) suivent le vidéo, même quand le
     vidéo est déjà au bon nom (passe de rattrapage).
-    Renvoie [ {from, to}, ... ]."""
+    Renvoie [ {from, to}, ... ].
+    `dry_run=True` : calcule les renommages (vidéos + sous-titres) SANS toucher
+    au disque ni à l'historique — aperçu pour la popup de confirmation."""
     ep_titles = {}
     try:
         cached = db.series_episodes_get(str(tvdb_id))
@@ -932,35 +1218,42 @@ def _folder_series_rename(folder, series_title, year, tvdb_id, imdb_id, tmdb_id,
             new_name = naming.generate_filename(name, 'tv', s, e, details)
         if new_name and new_name != name:
             dst = os.path.join(os.path.dirname(path), new_name)
-            try:
-                _move_path(path, dst)
-            except Exception as ex:
-                logger.warning(f"[Rename série] échec {name} → {new_name}: {ex}")
-                continue
-            history_entries.append({'id': str(uuid.uuid4()), 'op': 'rename',
-                                    'date': time.strftime('%Y-%m-%d %H:%M:%S'),
-                                    'from_path': path, 'from_name': name,
-                                    'to_path': dst, 'to_name': new_name})
-            _migrate_file_cache(path, dst)
+            if not dry_run:
+                try:
+                    _move_path(path, dst)
+                except Exception as ex:
+                    logger.warning(f"[Rename série] échec {name} → {new_name}: {ex}")
+                    continue
+                history_entries.append({'id': str(uuid.uuid4()), 'op': 'rename',
+                                        'date': time.strftime('%Y-%m-%d %H:%M:%S'),
+                                        'from_path': path, 'from_name': name,
+                                        'to_path': dst, 'to_name': new_name})
+                _migrate_file_cache(path, dst)
             renames.append({'from': name, 'to': new_name})
             path, name = dst, new_name
         final_videos.append((name, refs))
         # Sous-titres du même dossier que le vidéo (cas propre + orphelin).
-        for old_sub, new_sub in library.rename_subtitles_for_video(path, name, refs=refs, old_name=old_name):
+        for old_sub, new_sub in library.rename_subtitles_for_video(path, name, refs=refs,
+                                                                   old_name=old_name,
+                                                                   dry_run=dry_run):
+            if not dry_run:
+                history_entries.append({'id': str(uuid.uuid4()), 'op': 'rename',
+                                        'date': time.strftime('%Y-%m-%d %H:%M:%S'),
+                                        'from_path': old_sub, 'from_name': os.path.basename(old_sub),
+                                        'to_path': new_sub, 'to_name': os.path.basename(new_sub)})
+            renames.append({'from': os.path.basename(old_sub), 'to': os.path.basename(new_sub)})
+    # Rattrapage folder-wide : SRT dans d'autres sous-dossiers du dossier série
+    # (ex. SRT à la racine, vidéo dans « Season 1/ ») alignés sur le nom final.
+    for old_sub, new_sub in library.catchup_subtitles_for_folder(folder, final_videos,
+                                                                 dry_run=dry_run):
+        if not dry_run:
             history_entries.append({'id': str(uuid.uuid4()), 'op': 'rename',
                                     'date': time.strftime('%Y-%m-%d %H:%M:%S'),
                                     'from_path': old_sub, 'from_name': os.path.basename(old_sub),
                                     'to_path': new_sub, 'to_name': os.path.basename(new_sub)})
-            renames.append({'from': os.path.basename(old_sub), 'to': os.path.basename(new_sub)})
-    # Rattrapage folder-wide : SRT dans d'autres sous-dossiers du dossier série
-    # (ex. SRT à la racine, vidéo dans « Season 1/ ») alignés sur le nom final.
-    for old_sub, new_sub in library.catchup_subtitles_for_folder(folder, final_videos):
-        history_entries.append({'id': str(uuid.uuid4()), 'op': 'rename',
-                                'date': time.strftime('%Y-%m-%d %H:%M:%S'),
-                                'from_path': old_sub, 'from_name': os.path.basename(old_sub),
-                                'to_path': new_sub, 'to_name': os.path.basename(new_sub)})
         renames.append({'from': os.path.basename(old_sub), 'to': os.path.basename(new_sub)})
-    append_history_batch(history_entries)
+    if not dry_run:
+        append_history_batch(history_entries)
     return renames
 
 
@@ -987,6 +1280,7 @@ def api_library_rename_folder_series():
     except (TypeError, ValueError):
         year = None
     translations = d.get('translations') or {}
+    dry_run = bool(d.get('dry_run'))
     details = {}
     try:
         details = db.series_meta_get(tvdb_id) or {}
@@ -1012,13 +1306,14 @@ def api_library_rename_folder_series():
     }
     previous_data = details.get('data') or {}
     selected = {**previous_data, **{k: v for k, v in selected.items() if v}}
-    db.series_meta_set(tvdb_id, selected.get('imdbid', ''), selected)
+    if not dry_run:
+        db.series_meta_set(tvdb_id, selected.get('imdbid', ''), selected)
     series_title = naming.clean_title(details.get('data', {}).get('title') or d.get('title') or '')
     if not series_title:
         series_title = naming.clean_title(os.path.basename(abs_folder))
     imdb_id = (details.get('imdb_id') or d.get('imdb') or '').strip().lower()
     tmdb_id = str(d.get('tmdb') or '').strip()
-    if not imdb_id:
+    if not imdb_id and not dry_run:
         try:
             imdb_id = omdb.resolve_series_imdb(tvdb_id, title=series_title, year=year)
         except Exception:
@@ -1028,17 +1323,22 @@ def api_library_rename_folder_series():
     # de choisir automatiquement l'ordre Netflix pour les séries qui le
     # proposent avant le premier renommage.
     if state.api_handler.tvdb:
+        if not dry_run:
+            try:
+                tvdb_details = state.api_handler.tvdb.get_series_details(int(tvdb_id)) or {}
+                if tvdb_details:
+                    db.series_meta_set(tvdb_id, imdb_id, {**(details.get('data') or {}), **tvdb_details})
+            except Exception as e:
+                logger.warning(f"[Rename série] détails TVDB {tvdb_id}: {e}")
+        # Le cache d'épisodes est rempli même en dry-run (idempotent, TVDB 24h)
+        # pour que l'aperçu utilise les vrais titres d'épisodes.
         try:
-            tvdb_details = state.api_handler.tvdb.get_series_details(int(tvdb_id)) or {}
-            if tvdb_details:
-                db.series_meta_set(tvdb_id, imdb_id, {**(details.get('data') or {}), **tvdb_details})
-            # La série est validée par cette action : le cache d'épisodes est
-            # rempli avec l'ordre TVDB choisi avant de générer les noms.
             library.tvdb_series_episodes(tvdb_id)
         except Exception as e:
-            logger.warning(f"[Rename série] détails TVDB {tvdb_id}: {e}")
+            logger.warning(f"[Rename série] cache épisodes {tvdb_id}: {e}")
 
-    renames = _folder_series_rename(abs_folder, series_title, year, tvdb_id, imdb_id, tmdb_id, translations)
+    renames = _folder_series_rename(abs_folder, series_title, year, tvdb_id, imdb_id, tmdb_id,
+                                    translations, dry_run=dry_run)
 
     # Nom du dossier : dérivé du nom d'épisode généré (même format que le JS).
     sample_name = naming.generate_filename('sample.mkv', 'tv', 1, 1, {
@@ -1054,13 +1354,20 @@ def api_library_rename_folder_series():
     new_folder = abs_folder
     if desired_folder and desired_folder != folder_base:
         dst = os.path.join(os.path.dirname(abs_folder), desired_folder)
-        if not os.path.exists(dst):
+        if dry_run:
+            # Aperçu : on signale le futur renommage de dossier sans le faire.
+            if not os.path.exists(dst):
+                folder_note = {'from': folder_base, 'to': desired_folder}
+        elif not os.path.exists(dst):
             try:
                 shutil.move(abs_folder, dst)
                 new_folder = dst
                 folder_note = {'from': folder_base, 'to': desired_folder}
             except Exception as e:
                 folder_note = {'from': folder_base, 'to': desired_folder, 'error': str(e)}
+    if dry_run:
+        return jsonify({'success': True, 'dry_run': True, 'renames': renames,
+                        'folder': folder_note, 'new_folder': new_folder})
     _refresh_scan_snapshot()
 
     def _background():

@@ -6,6 +6,7 @@ est lu via `state` au moment de l'appel."""
 import re
 import time
 import logging
+import threading
 
 import requests
 
@@ -86,24 +87,30 @@ def fetch_omdb_single(imdb_id, title=None, year=None, is_series=False, force=Fal
             params = {'t': title, 'y': year, 'type': 'series', 'apikey': key}
         else:
             params = {'i': imdb, 'apikey': key}
+        logger.info(f"[OMDb API] → {imdb} ({title or '-'})")
         resp = requests.get('https://www.omdbapi.com/', params=params, timeout=6)
         data = resp.json()
         db.usage_bump('omdb')
         if data.get('Response') != 'True':
             err = str(data.get('Error', '')).lower()
-            logger.info(f"[OMDb] {imdb} ({title or '-'}): {data.get('Error', 'erreur')}")
+            logger.info(f"[OMDb API] ← {imdb} ({title or '-'}): {data.get('Error', 'erreur')}")
             if 'limit' in err or 'quota' in err or 'request rate' in err:
                 _omdb_mark_quota_reached()
             else:
                 db.omdb_set(imdb, data)
                 _OMDB_NEG_CACHE[imdb] = now + _OMDB_NEG_TTL
             return None
+        # Garde : si OMDb répond pour un autre titre (recherche par titre), ne
+        # jamais stocker la réponse sous notre IMDb (cache empoisonné).
+        if imdb and (data.get('imdbID') or '').strip().lower() != imdb:
+            logger.warning(f"[OMDb API] ← {imdb} ({title or '-'}): réponse pour {data.get('imdbID')} (titre) — ignorée")
+            return None
         oimdb = (data.get('imdbID') or '').lower()
         db.omdb_set(oimdb or imdb, data)
         if oimdb and oimdb != imdb:
             db.omdb_set(imdb, data)
         _OMDB_NEG_CACHE.pop(imdb, None)
-        logger.info(f"[OMDb] {imdb} ({title or '-'}): note={data.get('imdbRating')} « {data.get('Title', '')} »")
+        logger.info(f"[OMDb API] ← {imdb} ({title or '-'}): note={data.get('imdbRating')} « {data.get('Title', '')} »")
         return data
     except Exception as e:
         logger.warning(f"OMDb single fetch error for {imdb}: {e}")
@@ -176,15 +183,16 @@ def fetch_omdb_episode(series_imdb, title, year, season, episode, force=False):
         }
         if year:
             params['y'] = year
+        logger.info(f"[OMDb API] → épisode {title} S{int(season):02d}E{int(episode):02d}")
         resp = requests.get('https://www.omdbapi.com/', params=params, timeout=6)
         data = resp.json()
         db.usage_bump('omdb')
         if data.get('Response') == 'True':
             db.omdb_episode_set(cache_key, data)
-            logger.info(f"[OMDb épisode] {title} S{int(season):02d}E{int(episode):02d}: note={data.get('imdbRating')} durée={data.get('Runtime')}")
+            logger.info(f"[OMDb API] ← épisode {title} S{int(season):02d}E{int(episode):02d}: note={data.get('imdbRating')} durée={data.get('Runtime')}")
         else:
             err = str(data.get('Error', '')).lower()
-            logger.info(f"[OMDb épisode] {title} S{int(season):02d}E{int(episode):02d}: {data.get('Error', 'erreur')}")
+            logger.info(f"[OMDb API] ← épisode {title} S{int(season):02d}E{int(episode):02d}: {data.get('Error', 'erreur')}")
             if 'limit' in err or 'quota' in err or 'request rate' in err:
                 _omdb_mark_quota_reached()
             else:
@@ -273,4 +281,40 @@ def resolve_series_imdb(tvdb_id, title=None, year=None, force=False):
     except Exception as e:
         logger.warning(f"Series TVDB→IMDb resolution error for {tvdb_id}: {e}")
         _SERIES_IMDB_NEGATIVE[tvdb_id] = time.time()
+        return ''
+
+
+_SERIES_OMDB_INFLIGHT = set()
+_SERIES_OMDB_INFLIGHT_LOCK = threading.Lock()
+
+
+def ensure_series_omdb(tvdb_id, title=None, year=None):
+    """Assure que l'OMDb GLOBAL d'une série (note, date, genres, certification,
+    poster) est en cache BDD : résolution TVDB→IMDb puis fetch OMDb si absent.
+    Anti-doublon mémoire : une seule requête en parallèle par série (les autres
+    threads/séances retournent immédiatement). Renvoie l'IMDb (ou '').
+    À appeler en thread de fond : une première exécution coûte 1 TVDB + 1 OMDb."""
+    tvdb_id = str(tvdb_id or '').strip().lower()
+    if not tvdb_id:
+        return ''
+    try:
+        imdb = series_imdb_cached(tvdb_id)
+        if not imdb:
+            imdb = resolve_series_imdb(tvdb_id, title=title, year=year)
+        if not imdb:
+            return ''
+        with _SERIES_OMDB_INFLIGHT_LOCK:
+            if imdb in _SERIES_OMDB_INFLIGHT or db.omdb_get(imdb) is not None:
+                return imdb
+            _SERIES_OMDB_INFLIGHT.add(imdb)
+        try:
+            od = fetch_omdb_single(imdb, is_series=True)
+            if od and od.get('imdbRating'):
+                logger.info(f"[OMDb API] série {imdb} : note globale={od.get('imdbRating')} « {od.get('Title', '')} »")
+        finally:
+            with _SERIES_OMDB_INFLIGHT_LOCK:
+                _SERIES_OMDB_INFLIGHT.discard(imdb)
+        return imdb
+    except Exception as e:
+        logger.warning(f"Series OMDb ensure failed for {tvdb_id}: {e}")
         return ''

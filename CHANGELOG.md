@@ -1,5 +1,26 @@
 # Changelog
 
+## [1.0.12] - 2026-09-23
+
+### Added
+- **Library grid view** — tree/grid toggle in the library sidebar. New endpoints: `GET /api/library/flat` (flat list of movies + series, 0 external API requests, background enrichment) and `GET /api/library/series/<tvdb_id>` (seasons + episodes with present/missing/upcoming state, 0 TVDB requests via in-memory memo).
+- **Expandable series card** — clicking a series card expands it in place (one expanded at a time) into 3 columns: poster + info, season list with TVDB posters, episodes of the selected season. Season 1 opens by default; clicking the poster collapses. Episode rows show number, rating, title, runtime, air date and size; missing = red, upcoming = yellow.
+- **Season posters** — `TVDBAPIHandler.get_series_seasons()` (1 request per season without an image, 24 h cache) + new `series_seasons_cache` table.
+- **Upcoming episodes in the grid** — separate yellow badge (clock icon) for not-yet-aired episodes next to the present/total counter (red when episodes are missing); `ep_upcoming` propagated in `/api/library` and `/api/library/flat`.
+- **Readable episode titles in the grid** — for present episodes the title is extracted from the local filename (`… - S01E01 - {t:en}`, multi-episode `S01E01-E02` / `1x02` supported) instead of the TVDB original-language title; upcoming episodes keep the TVDB title.
+- **Poster hover preview** — floating preview box on hover over library/file rows (poster + meta chips, 120 ms delay).
+- **Startup media pre-warm** — `cache.start_media_prewarm()` walks the libraries in the background at startup and feeds the worker (missing TVDB searches + global series OMDb).
+- **Database cache purge** — `db.purge_stale_cache(roots)` removes orphan entries (dead paths in file_search_cache / media_duration / folder_size, vanished `[tvdbid-…]` in series caches); background pass `cache.run_purge_background()` (6 h minimum interval) + `POST /api/cache/purge`.
+- **IMDb-aware search** — the IMDb ID embedded in a filename (`[imdbid-tt…]`) now reorders TVDB search results (matching ID first) and triggers a fresh search when the cache is polluted with a non-matching result; `omdb.ensure_series_omdb()` fetches the global series OMDb entry (1 request, locked).
+- **Colored console logging** — new `src/logging_setup.py` (ANSI colors, compact format, noise filter, `NO_COLOR` to disable, `colorama` for Windows); the old `logging.basicConfig` call was removed from `app.py`. `colorama==0.4.6` added to `requirements.txt`.
+- **Tests** — ~440 new lines: grid endpoints, season posters, upcoming badges, IMDb-aware search, cache purge.
+
+### Improved
+- **Library tree/grid filtering** — search box in the sidebar, debounced grid filter (120 ms), no DOM rebuild when the rendered content is unchanged (signature check).
+- **Episode counter** — `_series_ep_counts()` now returns (present, total, upcoming); upcoming episodes excluded from the total.
+- **`/api/library/series/<tvdb_id>`** detail endpoint powers the expanded card with 0 TVDB requests per open.
+- **`.gitignore`** — dev tooling (node_modules, package*.json) and SQLite WAL files are ignored.
+
 ## [1.0.11] - 2026-09-09
 
 ### Added

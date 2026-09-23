@@ -28,6 +28,19 @@
 .lib-side-slider.active { outline: 1px solid var(--c-accent); }
 .lib-side-slider.active .lib-side-slider-label { color: var(--c-accent); }
 
+/* Champ de recherche de la colonne filtres */
+.lib-side-search {
+    display: flex; align-items: center; gap: 4px;
+    background: var(--c-surface3); border-radius: var(--radius);
+    padding: 6px 8px;
+}
+.lib-side-search input[type="search"] {
+    flex: 1; min-width: 0; border: none; background: none; outline: none;
+    color: var(--c-text); font-size: 0.95em;
+}
+.lib-side-search input[type="search"]::placeholder { color: var(--c-text3); }
+.lib-side-search.active { outline: 1px solid var(--c-accent); }
+
 /* ── Slider double poignée ─────────────────────────────────────────────────── */
 .dual-slider { width: 100%; }
 .dual-slider__values {
@@ -239,3 +252,174 @@
 }
 .lib-tvdb-link:hover { background: transparent; color: #8af0ae; }
 .lib-tvdb-link i { font-size: 1.7em; line-height: 1; vertical-align: middle; }
+
+/* ── Aperçu poster au survol ─────────────────────────────────────────────── */
+.lib-poster-preview {
+    position: fixed; z-index: 1000; width: 170px;
+    background: var(--c-surface); border: 1px solid var(--c-border);
+    border-radius: var(--radius); box-shadow: var(--shadow);
+    padding: 6px; pointer-events: none;
+    animation: libPosterFade 0.12s ease-out;
+}
+@keyframes libPosterFade { from { opacity: 0; } to { opacity: 1; } }
+.lib-poster-preview img {
+    width: 100%; aspect-ratio: 2 / 3; object-fit: cover;
+    border-radius: 4px; background: var(--c-surface2); display: block;
+}
+.lib-poster-preview-meta { margin-top: 6px; display: flex; flex-direction: column; gap: 3px; }
+.lib-poster-preview-title { font-size: 0.95em; font-weight: 600; color: var(--c-bright); line-height: 1.3; }
+.lib-poster-preview-chips { display: flex; flex-wrap: wrap; gap: 3px 8px; font-size: 0.85em; }
+
+/* ── Vue grille (bibliothèque) ───────────────────────────────────────────── */
+.lib-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: 14px;
+    padding: 4px 0;
+}
+.lib-grid[hidden] { display: none; }
+.lib-grid .empty-state, .lib-grid .loading, .lib-grid .message { grid-column: 1 / -1; }
+.lib-card {
+    position: relative;
+    flex-direction: row;
+    background: var(--c-surface2);
+    border: 1px solid var(--c-border);
+    border-radius: var(--radius);
+    overflow: hidden;
+    transition: border-color .12s, transform .12s;
+}
+.lib-card:hover { border-color: var(--c-accent); transform: translateY(-2px); }
+.lib-card-poster {
+    width: 100%; aspect-ratio: 2 / 3; object-fit: cover;
+    display: block; background: var(--c-surface3);
+}
+.lib-card-poster--ph { display: flex; align-items: center; justify-content: center; color: var(--c-text4); }
+.lib-card-poster--ph i { font-size: 3em; opacity: .5; }
+.lib-card-body { padding: 8px 10px 10px; }
+.lib-card-title {
+    font-size: .95em; font-weight: 600; color: var(--c-bright);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    margin-bottom: 4px;
+}
+.lib-card-meta { display: flex; flex-wrap: wrap; gap: 3px 6px; font-size: .8em; }
+.lib-card-meta .chip-size { color: var(--c-text3); }
+.lib-card-count {
+    position: absolute; top: 4px; left: 4px; z-index: 2;
+    display: inline-flex; align-items: center; gap: 3px;
+    font-size: .8em; font-weight: 600; font-variant-numeric: tabular-nums;
+    line-height: 1;
+    padding: 2px 7px; border-radius: 999px; color: #fff; background: rgba(0, 0, 0, .65);
+    white-space: nowrap;
+}
+.lib-card-counts { position: absolute; top: 4px; left: 4px; z-index: 2; display: flex; flex-wrap: nowrap; align-items: center; gap: 4px; }
+.lib-card-counts .lib-card-count { position: static; }
+.lib-card-count--missing { background: #c0392b; }
+.lib-card-count--upcoming { background: #b07d00; }
+.lib-card-count--upcoming i { font-size: 1em; width: auto; height: auto; }
+.lib-card-badge { position: absolute; top: 4px; left: 4px; z-index: 2; }
+.lib-card-actions {
+    position: absolute; top: 4px; right: 4px; z-index: 2;
+    display: flex; flex-direction: row; gap: 4px; opacity: 0; transition: opacity .12s;
+}
+.lib-card:hover .lib-card-actions { opacity: 1; }
+.lib-card-actions > * {
+    width: 32px; height: 32px; padding: 0;
+    display: flex; align-items: center; justify-content: center;
+    background: rgba(0, 0, 0, .55); border: none; border-radius: 50%;
+    color: #35bd70; cursor: pointer; text-decoration: none;
+}
+.lib-card-actions > *:hover { color: #8af0ae; }
+.lib-card-actions i { font-size: 25px; line-height: 1; display: block; align-content: center; }
+.lib-card-actions .mdi-open-in-new { padding-left: 2px; }
+
+/* Carte série expandée : prend toute la largeur de la grille.
+   3 colonnes : infos (même poster que la carte repliée) · saisons · épisodes. */
+.lib-card--expanded {
+    grid-column: 1 / -1; display: grid;
+    grid-template-columns: 200px auto 1fr;
+    gap: 12px; padding: 10px; align-items: stretch;
+    min-height: 450px; max-height: 450px;
+}
+.lib-card--expanded:hover { transform: none; }
+.lib-sd-info { position: relative; min-width: 0; }
+.lib-sd-info .lib-card-poster { width: 200px; }
+.lib-sd-info .lib-card-body { padding: 6px 2px 0; }
+.lib-view-toggle { display: flex; gap: 8px; margin-bottom: 8px; }
+.lib-view-toggle .filter-btn { flex: 1; justify-content: center; padding: 6px 0; }
+.lib-view-toggle .filter-btn i { font-size: 1.2em; align-content: center; }
+
+.lib-grid-section { margin-bottom: 10px; }
+.lib-grid-section-head {
+    display: flex; align-items: center; gap: 8px;
+    font-size: 1.05em; font-weight: 600; color: var(--c-bright);
+    padding: 6px 4px; cursor: pointer; user-select: none;
+}
+.lib-grid-section-head:hover { color: var(--c-accent); }
+.lib-grid-section-head > i:first-child { color: var(--c-text3); font-size: 1.1em; }
+.lib-grid-section-head > i:nth-child(2) { color: var(--c-accent); }
+.lib-grid-section-count {
+    font-size: .85em; font-weight: 400; color: var(--c-text3);
+    font-variant-numeric: tabular-nums;
+}
+.lib-grid-section-body[hidden] { display: none; }
+/* ── Vue grille : détail série (colonnes de la carte expandée) ─────────────── */
+.lib-sd-count { display: inline-flex; align-items: center; gap: 3px; font-size: .9em; font-weight: 600; font-variant-numeric: tabular-nums; color: var(--c-text3); }
+.lib-sd-count--missing { color: #e74c3c; }
+.lib-sd-count--upcoming { color: #d4a017; }
+.lib-sd-count i { font-size: 2em; vertical-align: -2px; align-content: center; }
+.lib-sd-seasons { display: flex; flex-direction: column; gap: 4px; width: 350px; max-width: 100%; min-height: 0; max-height: 100%; overflow-y: auto; padding: 6px; background: var(--c-surface2); border-radius: var(--radius); }
+.lib-sd-seasons::-webkit-scrollbar, .lib-sd-eps::-webkit-scrollbar { width: 8px; }
+.lib-sd-seasons::-webkit-scrollbar-thumb, .lib-sd-eps::-webkit-scrollbar-thumb { background: var(--c-border2); border-radius: 4px; }
+.lib-sd-seasons::-webkit-scrollbar-track, .lib-sd-eps::-webkit-scrollbar-track { background: transparent; }
+.lib-sd-season {
+    display: flex; align-items: center; gap: 10px;
+    padding: 6px 8px; border: none; border-radius: var(--radius);
+    background: none; text-align: left; cursor: pointer;
+    color: var(--c-text); outline: none; transition: background .12s;
+}
+.lib-sd-season:hover { background: var(--c-surface3); }
+.lib-sd-season--active { background: var(--c-surface3); }
+.lib-sd-season--active .lib-sd-season-name { color: var(--c-accent); }
+.lib-sd-season-poster { width: 200px; aspect-ratio: 16 / 9; object-fit: cover; border-radius: 4px; background: var(--c-surface3); flex: 0 0 auto; }
+.lib-sd-season-poster--ph { display: flex; align-items: center; justify-content: center; color: var(--c-text4); font-size: .8em; font-weight: 600; }
+.lib-sd-season-info { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.lib-sd-season-name { font-weight: 600; color: var(--c-bright); font-size: .95em; }
+.lib-sd-counts { display: flex; flex-wrap: wrap; gap: 3px 6px; font-size: .85em; font-variant-numeric: tabular-nums; color: var(--c-text3); }
+.lib-sd-counts .lib-sd-count--missing { color: #e74c3c; }
+.lib-sd-counts .lib-sd-count--upcoming { color: #d4a017; }
+.lib-sd-eps { display: flex; flex-direction: column; gap: 2px; min-height: 0; max-height: 100%; overflow-y: auto; padding: 6px; background: var(--c-surface2); border-radius: var(--radius); }
+.lib-sd-eps.lib-sd-eps--swap { animation: libSdEpsFade .14s ease-out; }
+@keyframes libSdEpsFade { from { opacity: .35; } to { opacity: 1; } }
+.lib-sd-eps-empty { color: var(--c-text3); padding: 24px 10px; text-align: center; }
+.lib-sd-eps-head {
+    display: flex; align-items: center; gap: 10px;
+    padding: 6px 10px; border-radius: var(--radius);
+    font-size: 1em; font-weight: 700; color: var(--c-bright);
+}
+.lib-sd-eps-head .lib-sd-counts { margin-left: auto; }
+.lib-ep-row {
+    display: flex; align-items: center; gap: 10px;
+    padding: 7px 10px; border-radius: var(--radius);
+    border-left: 3px solid transparent;
+}
+.lib-ep-row:hover { background: var(--c-surface3); }
+.lib-ep-row--present { border-left-color: var(--c-accent); }
+.lib-ep-row--missing { border-left-color: #e74c3c; }
+.lib-ep-row--upcoming { border-left-color: #d4a017; opacity: .8; }
+.lib-ep-badge {
+    flex: 0 0 auto; width: 24px; height: 24px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center; font-size: .9em;
+}
+.lib-ep-row--present .lib-ep-badge { background: rgba(53, 189, 112, .18); color: #35bd70; }
+.lib-ep-row--missing .lib-ep-badge { background: rgba(231, 76, 60, .18); color: #e74c3c; }
+.lib-ep-row--upcoming .lib-ep-badge { background: rgba(212, 160, 23, .2); color: #d4a017; }
+.lib-ep-label { flex: 0 0 auto; min-width: 76px; font-weight: 600; color: var(--c-bright); font-variant-numeric: tabular-nums; }
+.lib-ep-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--c-text2); }
+.lib-ep-size { flex: 0 0 auto; color: var(--c-text3); font-size: .9em; }
+.lib-ep-chips { display: inline-flex; gap: 3px 8px; flex: 0 0 auto; font-size: .85em; }
+@media (max-width: 900px) {
+    .lib-card--expanded { grid-template-columns: 1fr; grid-template-rows: none; max-height: none; }
+    .lib-sd-info .lib-card-poster { width: 120px; }
+    .lib-sd-seasons { width: 100%; max-height: 300px; }
+    .lib-sd-eps { max-height: 300px; }
+}

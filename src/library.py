@@ -11,6 +11,7 @@ logger = logging.getLogger(__name__)
 
 _FOLDER_DIR_CACHE = {}      # path -> (mtime, size) : taille de dossier (non récursif)
 _EP_CACHE = {}              # path -> (mtime, set) : épisodes (saison, numéro) présents
+_EP_FILE_CACHE = {}         # path -> (mtime, dict) : (saison, numéro) -> fichiers
 VIDEO_EXT = {'.mkv', '.mp4', '.avi', '.mov', '.wmv', '.m4v', '.ts', '.flv', '.webm'}
 SUBTITLE_EXT = {'.srt', '.sub', '.ass', '.ssa', '.vtt', '.idx'}
 _SUB_MARKER = r'[Ss]\d{1,2}[Ee]\d{1,3}(?:[-–—~]\s*[Ee]\d{1,3}|[Ee]\d{1,3})?|\b\d{1,2}x\d{2}(?:[-–—~]\d{2})?'
@@ -212,6 +213,37 @@ def present_episodes(path):
     return present
 
 
+def episode_files(path):
+    """Carte (saison, episode) → [{'name', 'size', 'path'}] des fichiers du
+    dossier série. Même balayage que present_episodes (mémoïsé)."""
+    try:
+        mtime = int(os.path.getmtime(path))
+    except OSError:
+        return {}
+    mem = _EP_FILE_CACHE.get(path)
+    if mem and mem[0] == mtime:
+        return mem[1]
+    fmap = {}
+    try:
+        for root, dirs, files in os.walk(path):
+            dirs[:] = [d for d in dirs if not d.startswith('.')]
+            for f in files:
+                if Path(f).suffix.lower() in VIDEO_EXT:
+                    full = os.path.join(root, f)
+                    try:
+                        size = os.path.getsize(full)
+                    except OSError:
+                        size = 0
+                    for key in episode_refs(f):
+                        fmap.setdefault(key, []).append({'name': f, 'size': size, 'path': full})
+    except Exception:
+        pass
+    _EP_FILE_CACHE[path] = (mtime, fmap)
+    if len(_EP_FILE_CACHE) > 2000:
+        _EP_FILE_CACHE.clear()
+    return fmap
+
+
 def _stem_prefix(name):
     """Partie du stem avant le marqueur d'épisode (ou le stem complet)."""
     stem = Path(name).stem
@@ -227,7 +259,8 @@ def _norm_prefix(name):
     return p
 
 
-def rename_subtitles_for_video(video_path, new_video_name, refs=None, old_name=None):
+def rename_subtitles_for_video(video_path, new_video_name, refs=None, old_name=None,
+                               dry_run=False):
     """Renomme les sous-titres d'un fichier vidéo en conservant le même stem.
 
     Deux cas gérés :
@@ -268,11 +301,12 @@ def rename_subtitles_for_video(video_path, new_video_name, refs=None, old_name=N
             target = os.path.join(d, new_stem + ext)
             if os.path.abspath(entry.path) == target:
                 continue
-            try:
-                os.replace(entry.path, target)
-                renames.append((entry.path, target))
-            except OSError:
-                pass
+            if not dry_run:
+                try:
+                    os.replace(entry.path, target)
+                except OSError:
+                    pass
+            renames.append((entry.path, target))
             continue
         # Cas 2 : le sous-titre porte exactement les mêmes marqueurs
         # d'épisode que le vidéo et le même préfixe de série → on lui
@@ -288,15 +322,16 @@ def rename_subtitles_for_video(video_path, new_video_name, refs=None, old_name=N
         target = os.path.join(d, new_stem + ext)
         if os.path.abspath(entry.path) == target:
             continue
-        try:
-            os.replace(entry.path, target)
-            renames.append((entry.path, target))
-        except OSError:
-            pass
+        if not dry_run:
+            try:
+                os.replace(entry.path, target)
+            except OSError:
+                pass
+        renames.append((entry.path, target))
     return renames
 
 
-def catchup_subtitles_for_folder(folder, videos):
+def catchup_subtitles_for_folder(folder, videos, dry_run=False):
     """Rattrapage folder-wide des sous-titres (scan récursif du dossier série).
 
     Un dossier de série = une seule série : chaque sous-titre portant des
@@ -328,11 +363,12 @@ def catchup_subtitles_for_folder(folder, videos):
             target = os.path.join(root, new_stem + ext)
             if os.path.abspath(sub_path) == os.path.abspath(target):
                 continue
-            try:
-                os.replace(sub_path, target)
-                renames.append((sub_path, target))
-            except OSError:
-                pass
+            if not dry_run:
+                try:
+                    os.replace(sub_path, target)
+                except OSError:
+                    pass
+            renames.append((sub_path, target))
     return renames
 
 

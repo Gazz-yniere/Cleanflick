@@ -57,9 +57,39 @@ function libMetaMatches(node) {
 }
 
 function libAnyFilterActive() {
-    return libFilter !== 'all' || libGenreFilter.size > 0 || libAgeRange !== null
+    return libFilter !== 'all' || libSearchQuery !== '' || libGenreFilter.size > 0 || libAgeRange !== null
         || libSizeRange !== null || libRatingRange !== null || libDateRange !== null
         || libMissingOnly;
+}
+
+// ── Recherche par chaîne (nom de fichier/dossier ou titre) ──────────────────
+// Normalisation : minuscules, accents retirés, extension du fichier retirée.
+function libNormSearch(s) {
+    return String(s || '')
+        .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+        .replace(/\.[a-z0-9]{2,5}$/i, '')
+        .toLowerCase();
+}
+function libNodeSearchText(n) {
+    const name = n._entry ? n._entry.name : '';
+    const title = (n._meta && n._meta.title) ? n._meta.title : '';
+    if (!name && !title) {
+        const el = n.querySelector(':scope > .lib-row .lib-name-main');
+        if (el) return el.textContent || '';
+    }
+    return name + ' ' + title;
+}
+function libSearchInput(v) {
+    libSearchQuery = String(v || '').trim();
+    updateLibFacetButtons();
+    scheduleApplyLibFilter();
+}
+function libSearchReset() {
+    const el = document.getElementById('lib-search');
+    if (el) el.value = '';
+    libSearchQuery = '';
+    updateLibFacetButtons();
+    scheduleApplyLibFilter();
 }
 
 // Pré-charge les enfants de tous les dossiers collapsed (sans les déplier) pour
@@ -86,6 +116,8 @@ function applyLibFilter() {
     if (!container) return;
     if (libAnyFilterActive()) preloadAllFolders(container);
     const facetsActive = libGenreFilter.size > 0 || libAgeRange !== null;
+    const searchActive = libSearchQuery !== '';
+    const q = searchActive ? libNormSearch(libSearchQuery) : '';
     function rangeOk(n) {
         // Taille : filtrage des fichiers uniquement (les dossiers suivent leurs enfants).
         if (libSizeRange && !(n._sort && n._sort.is_dir)) {
@@ -127,14 +159,18 @@ function applyLibFilter() {
             // d'épisode ne doit donc pas faire apparaître la série dans le filtre.
             const isSeriesNode = !!(n._sort && n._sort.is_dir && n._tvdb);
             const childCanMatch = !(libRatingRange && isSeriesNode);
-            const visible = isRootLevel || n._loading || ((selfMatches && metaOk && rangeOk(n) && missingOk)
-                || (childCanMatch && childVisible));
+            // Recherche : la ligne correspond si son propre nom/titre contient la
+            // chaîne ; un dossier peut aussi apparaître via un descendant (récursif).
+            const searchSelfOk = !searchActive || libNormSearch(libNodeSearchText(n)).includes(q);
+            const visible = isRootLevel || n._loading || ((selfMatches && metaOk && rangeOk(n) && missingOk && searchSelfOk)
+                || ((searchActive || childCanMatch) && childVisible));
             n.style.display = visible ? '' : 'none';
             if (visible) anyVisible = true;
         });
         return anyVisible;
     }
     process(container, true, true);
+    applyLibGridFilter();
 }
 
 // ── Filtres : facettes (genre) + sliders de plage (âge / taille / note) ─────
@@ -188,6 +224,7 @@ function libFacetSelectAll(kind, on) {
 }
 
 function updateLibFacetButtons() {
+    document.getElementById('lib-search')?.closest('.lib-side-search')?.classList.toggle('active', libSearchQuery !== '');
     const g = document.getElementById('lib-filter-genre');
     if (g) g.classList.toggle('active', libGenreFilter.size > 0);
     document.querySelector('#lib-age-slider')?.closest('.lib-side-slider')?.classList.toggle('active', libAgeRange !== null);

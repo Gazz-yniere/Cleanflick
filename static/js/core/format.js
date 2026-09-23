@@ -10,7 +10,9 @@ function interpolate(template, vars) {
         if (fmt) {
             const code = fmt.slice(1).toLowerCase();
             const trans = vars._translations || {};
-            if (/^[a-zA-Z]{2,3}$/.test(code) && ['n','title','original_title','t','episode_title'].includes(name))
+            // t/episode_title exclus : {t:lang} retombe sur le titre d'épisode,
+            // jamais sur la map de traductions de la série (nom de série).
+            if (/^[a-zA-Z]{2,3}$/.test(code) && ['n','title','original_title'].includes(name))
                 return translateLang(trans, code, val);
         }
         if (val === undefined || val === null || String(val).trim() === '' || String(val) === 'None') return '';

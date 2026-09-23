@@ -5,10 +5,7 @@ fichier ne fait que l'assemblage et le `app.run()`.
     - Développement : `python app.py`
     - Production    : `gunicorn ... app:app`
 """
-import logging
 import os
-
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
 from src.routes import create_app
 

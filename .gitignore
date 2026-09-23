@@ -16,6 +16,15 @@ dist/
 # Données sensibles — ne pas committer
 config.json
 
+# Node.js — outillages dev (opencode), pas de dépendance projet
+node_modules/
+package.json
+package-lock.json
+
+# SQLite WAL
+cleanflick.db-shm
+cleanflick.db-wal
+
 # Médias — trop lourds pour git
 downloads/
 output/

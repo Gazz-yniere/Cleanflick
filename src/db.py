@@ -90,6 +90,12 @@ def init_db():
         loaded_at INTEGER
     )''')
     cur.execute('''
+    CREATE TABLE IF NOT EXISTS series_seasons_cache (
+        series_id TEXT PRIMARY KEY,
+        data_json TEXT,
+        loaded_at INTEGER
+    )''')
+    cur.execute('''
     CREATE TABLE IF NOT EXISTS usage_counters (
         service TEXT PRIMARY KEY,
         total INTEGER,
@@ -460,6 +466,36 @@ def series_episodes_set(series_id: str, data: dict):
         conn.close()
 
 
+def series_seasons_get(series_id: str, max_age: int = None):
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute('SELECT data_json, loaded_at FROM series_seasons_cache WHERE series_id = ?', (series_id.lower(),))
+        r = cur.fetchone()
+        if not r:
+            return None
+        if max_age is not None and r['loaded_at'] and (time.time() - r['loaded_at']) > max_age:
+            return None
+        try:
+            return json.loads(r['data_json'] or '{}')
+        except Exception:
+            return None
+    finally:
+        conn.close()
+
+
+def series_seasons_set(series_id: str, data: dict):
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute('INSERT OR REPLACE INTO series_seasons_cache (series_id, data_json, loaded_at) VALUES (?, ?, ?)', (
+            series_id.lower(), json.dumps(data, ensure_ascii=False), int(time.time())
+        ))
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def series_meta_get(tvdb_id: str):
     conn = get_conn()
     cur = conn.cursor()
@@ -573,6 +609,59 @@ def usage_get():
         return out
     finally:
         conn.close()
+
+
+def purge_stale_cache(roots=None) -> dict:
+    """Nettoie les caches de la BDD : supprime les entrées qui ne correspondent
+    plus à rien sur le disque.
+    - file_search_cache : fichier supprimé (fkey mort)
+    - series_meta_cache / series_episodes_cache : [tvdbid-XXX] absent des dossiers
+    - media_duration_cache / folder_size_cache : chemin supprimé
+    `roots` : list of library root paths to scan for tvdb ids.
+    Renvoie {'table': nb_supprimés, ...} + {'scanned_series_dirs': n}."""
+    import re as _re
+    out = {}
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        # ── file_search_cache : chemins morts ──
+        cur.execute('SELECT fkey, file_path FROM file_search_cache')
+        rows = cur.fetchall()
+        dead_fkeys = [r['fkey'] for r in rows if not r['file_path'] or not os.path.exists(r['file_path'])]
+        if dead_fkeys:
+            cur.executemany('DELETE FROM file_search_cache WHERE fkey = ?', [(k,) for k in dead_fkeys])
+        out['file_search_cache'] = len(dead_fkeys)
+        # ── series : tvdb ids disparus des bibliothèques ──
+        live_ids = set()
+        scanned_dirs = 0
+        for root in (roots or []):
+            if not root or not os.path.isdir(root):
+                continue
+            for dirpath, dirnames, _filenames in os.walk(root):
+                scanned_dirs += 1
+                for d in dirnames:
+                    m = _re.search(r'\[tvdbid-(\d+)\]', d, _re.I)
+                    if m:
+                        live_ids.add(m.group(1).lower())
+        for table in ('series_meta_cache', 'series_episodes_cache'):
+            col = 'tvdb_id' if table == 'series_meta_cache' else 'series_id'
+            cur.execute(f'SELECT {col} FROM {table}')
+            stale = [r[0] for r in cur.fetchall() if str(r[0]).strip().lower() not in live_ids]
+            if stale:
+                cur.executemany(f'DELETE FROM {table} WHERE {col} = ?', [(k,) for k in stale])
+            out[table] = len(stale)
+        # ── durées + tailles de dossiers : chemins morts ──
+        for table, col in (('media_duration_cache', 'path'), ('folder_size_cache', 'path')):
+            cur.execute(f'SELECT {col} FROM {table}')
+            stale = [r[0] for r in cur.fetchall() if not r[0] or not os.path.exists(r[0])]
+            if stale:
+                cur.executemany(f'DELETE FROM {table} WHERE {col} = ?', [(k,) for k in stale])
+            out[table] = len(stale)
+        out['scanned_series_dirs'] = scanned_dirs
+        conn.commit()
+    finally:
+        conn.close()
+    return out
 
 
 def meta_get(key: str, default=None):

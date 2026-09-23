@@ -34,11 +34,11 @@ class APIHandler:
             logger.error("TVDB handler not initialized")
         return self.tvdb
 
-    def search_movie(self, title: str, year: Optional[int] = None) -> List[Dict]:
-        return self.tvdb.search_movie(title, year) if self._require_tvdb() else []
+    def search_movie(self, title: str, year: Optional[int] = None, imdb_id: str = '') -> List[Dict]:
+        return self.tvdb.search_movie(title, year, imdb_id) if self._require_tvdb() else []
 
-    def search_tv(self, title: str, year: Optional[int] = None) -> List[Dict]:
-        return self.tvdb.search_series(title, year) if self._require_tvdb() else []
+    def search_tv(self, title: str, year: Optional[int] = None, imdb_id: str = '') -> List[Dict]:
+        return self.tvdb.search_series(title, year, imdb_id) if self._require_tvdb() else []
 
     def search_auto(self, title, year=None, filename='', season=None, episode=None, media_hint='') -> Dict:
         if not self._require_tvdb():
@@ -91,3 +91,12 @@ class APIHandler:
             return tvdb.get_series_episodes(int(series_id), season, page, season_type)
         except ValueError:
             return {'series_id': series_id, 'episodes': [], 'source': 'tvdb'}
+
+    def get_series_seasons(self, series_id: str) -> Dict:
+        tvdb = self._require_tvdb()
+        if not tvdb:
+            return {'series_id': series_id, 'seasons': [], 'source': 'tvdb'}
+        try:
+            return tvdb.get_series_seasons(int(series_id))
+        except ValueError:
+            return {'series_id': series_id, 'seasons': [], 'source': 'tvdb'}

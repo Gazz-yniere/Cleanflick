@@ -55,8 +55,10 @@ function collectUncachedImdb(entries) {
                 const mtv = String(e.name || '').match(/\[tvdbid-(\d+)\]/i);
                 if (mtv) tv = mtv[1];
             }
-            // Pas de résolution TVDB implicite : le dossier doit être validé
-            // explicitement via la recherche manuelle.
+            // Dossier série sans note globale : on demande l'enrichissement
+            // OMDb (note/date/genres/cert) via son ID TVDB (résolution mise
+            // en cache côté serveur, 1 OMDb max par série).
+            if (tv && !m.rating) tvdbIds.push(tv);
             continue;
         }
         if (m.episode) continue; // épisodes : enrichis via leur série
@@ -117,6 +119,8 @@ function applyEnrichResults(results) {
         if (n._imdb && results[n._imdb]) applyEnrichedMeta(n, results[n._imdb]);
         if (n._tvdb && tvdbResults[String(n._tvdb)]) applyEnrichedMeta(n, tvdbResults[String(n._tvdb)]);
     });
+    // Vue grille : applique les mêmes résultats à la liste plate.
+    if (window.libGridApplyEnrich) window.libGridApplyEnrich(results);
 }
 
 function applyEpisodeEnrichResults(results) {

@@ -140,17 +140,31 @@ def enqueue_media_roots(roots, include_cached=False):
 def _process_media_item(item):
     path = item['path']
     file_cached = file_cache_lookup(path)
+    from .api.tvdb import TVDBAPIHandler
+    item_imdb = TVDBAPIHandler.imdb_from_name(os.path.basename(path))
     params = {
         'type': item['media_type'], 'title': item['title'], 'year': item['year'],
     }
     key = params_cache_key(params)
     cached = db.cache_get(key)
     results = (file_cached or {}).get('results', []) if file_cached else (cached or {}).get('results', [])
+    # Cache existant mais sans le résultat correspondant à l'ID IMDb du nom de
+    # fichier (association ratée) : on re-recherche pour corriger l'ordre.
+    poisoned = bool(item_imdb and results
+                    and not any(str(r.get('imdb_id') or '').strip().lower() == item_imdb for r in results))
+    if poisoned:
+        results = []
     if not cached and not file_cached:
         if item['media_type'] == 'tv':
-            results = state.api_handler.search_tv(item['title'], item['year'])
+            results = state.api_handler.search_tv(item['title'], item['year'], item_imdb)
         else:
-            results = state.api_handler.search_movie(item['title'], item['year'])
+            results = state.api_handler.search_movie(item['title'], item['year'], item_imdb)
+    elif poisoned:
+        # Le cache était pollué (voir plus haut) : re-recherche avec l'ID IMDb.
+        if item['media_type'] == 'tv':
+            results = state.api_handler.search_tv(item['title'], item['year'], item_imdb)
+        else:
+            results = state.api_handler.search_movie(item['title'], item['year'], item_imdb)
     # Le cache TVDB peut exister avant le cache OMDb (interruption, ancienne
     # version) : l'enrichissement doit quand même être repris sans nouvelle
     # recherche TVDB.
@@ -164,6 +178,8 @@ def _process_media_item(item):
         if tvdb_id:
             _SERIES_QUEUE.add(str(tvdb_id).lower())
     if not cached and not file_cached:
+        db.cache_set(key, item['media_type'], results)
+    elif poisoned:
         db.cache_set(key, item['media_type'], results)
     file_cache_store(path, item['media_type'], results)
     try:
@@ -193,9 +209,9 @@ def _media_worker_loop():
                 episodes = (cached_episodes or {}).get('episodes') or []
                 if not episodes or len(episodes) >= 500:
                     library.tvdb_series_episodes(series_id)
-                imdb = omdb.series_imdb_cached(series_id) or omdb.resolve_series_imdb(series_id)
-                if imdb and db.omdb_get(imdb) is None:
-                    omdb.fetch_omdb_single(imdb, is_series=True)
+                # OMDb GLOBAL de la série (note, date, genres, cert, poster) :
+                # 1 requête max en parallèle (lock mémoire dans ensure_series_omdb).
+                omdb.ensure_series_omdb(series_id)
             except Exception as e:
                 logger.warning(f"Series metadata preload failed for {series_id}: {e}")
             continue
@@ -212,6 +228,68 @@ def _schedule_omdb_quota_retry():
              state.config.get('_tv_output_path')]
     omdb.mark_quota_retry_scheduled()
     enqueue_media_roots(roots, include_cached=True)
+
+
+_PREWARM_LOCK = threading.Lock()
+_PREWARM_DONE = False
+
+
+def start_media_prewarm():
+    """Au démarrage : parcourt les bibliothèques en fond et alimente le worker
+    (recherches manquantes + OMDb global des séries). Ne relance rien si
+    déjà lancé (tests, reloader Flask)."""
+    global _PREWARM_DONE
+    with _PREWARM_LOCK:
+        if _PREWARM_DONE:
+            return
+        _PREWARM_DONE = True
+    roots = [state.config.get('_movie_output_path'), state.config.get('_tv_output_path')]
+    enqueue_media_roots(roots)
+
+
+# ── Nettoyage de la BDD (caches orphelins) ────────────────────────────────────
+_PURGE_LOCK = threading.Lock()
+_PURGE_RUNNING = False
+_PURGE_MIN_INTERVAL = 6 * 3600  # 6 h entre deux purges automatiques
+_PURGE_KEY = 'last_cache_purge'
+
+
+def _purge_due(force=False):
+    if force:
+        return True
+    try:
+        last = float(db.meta_get(_PURGE_KEY, 0) or 0)
+        return time.time() - last >= _PURGE_MIN_INTERVAL
+    except Exception:
+        return True
+
+
+def run_purge_background(force=False):
+    """Lance la purge des caches orphelins en thread de fond (1 max).
+    `force` saute le gard-fou temporel (purge manuelle). True si lancée."""
+    global _PURGE_RUNNING
+    with _PURGE_LOCK:
+        if _PURGE_RUNNING:
+            return False
+        if not _purge_due(force):
+            return False
+        _PURGE_RUNNING = True
+
+    def _run():
+        global _PURGE_RUNNING
+        try:
+            roots = [state.config.get('_movie_output_path'), state.config.get('_tv_output_path')]
+            res = db.purge_stale_cache(roots)
+            db.meta_set(_PURGE_KEY, str(int(time.time())))
+            logger.info(f"[Purge cache] {res}")
+        except Exception as e:
+            logger.warning(f"Cache purge failed: {e}")
+        finally:
+            with _PURGE_LOCK:
+                _PURGE_RUNNING = False
+
+    threading.Thread(target=_run, daemon=True).start()
+    return True
 
 
 def _refresh_days():
