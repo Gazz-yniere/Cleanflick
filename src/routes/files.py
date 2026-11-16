@@ -10,7 +10,8 @@ from flask import Blueprint, jsonify, request
 from .. import state
 from .. import library
 from ..auth import login_required
-from ..history import load_history, save_history, append_history
+from ..history import (load_history_entry, load_history_page,
+                       load_reverted_history_ids, save_history, append_history)
 from ..utils import _move_path, _run_file_op, _ensure_dir, _series_folder_name, _refresh_scan_snapshot, _migrate_file_cache
 
 logger = logging.getLogger(__name__)
@@ -110,8 +111,7 @@ def api_move_progress(job_id):
 def api_revert():
     d = request.json
     entry_id = d.get('id')
-    history = load_history()
-    entry = next((e for e in history if e.get('id') == entry_id), None)
+    entry = load_history_entry(entry_id)
     if not entry:
         return jsonify({"success": False, "message": "Entrée introuvable"}), 404
     if not os.path.exists(entry['to_path']):
@@ -156,12 +156,15 @@ def api_revert():
 @bp.route('/api/history')
 @login_required
 def api_history():
-    history = load_history()
-    reverted_ids = {
-        candidate.get('revert_of')
-        for candidate in history
-        if candidate.get('op') == 'revert' and candidate.get('revert_of')
-    }
+    try:
+        limit = min(500, max(1, int(request.args.get('limit', 100))))
+        offset = max(0, int(request.args.get('offset', 0)))
+    except (TypeError, ValueError):
+        return jsonify({"error": "Paramètres de pagination invalides"}), 400
+    history = load_history_page(limit + 1, offset)
+    has_more = len(history) > limit
+    history = history[:limit]
+    reverted_ids = load_reverted_history_ids()
     # Le statut reste calculé côté serveur, mais les chemins sont normalisés
     # une seule fois pour limiter les accès disque quand l'historique est long.
     existence = {}
@@ -192,7 +195,9 @@ def api_history():
             else:
                 e['can_revert'] = True
                 e['revert_status'] = 'available'
-    return jsonify(history)
+    response = jsonify(history)
+    response.headers['X-History-Has-More'] = 'true' if has_more else 'false'
+    return response
 
 
 @bp.route('/api/history/clear', methods=['POST'])

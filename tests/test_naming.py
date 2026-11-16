@@ -66,6 +66,21 @@ def test_interpolate_episode_title_token_no_lang():
     assert out == 'Rouge : la Passion'
 
 
+def test_episode_title_language_tokens_map_to_tvdb_codes():
+    assert naming.episode_title_languages(
+        '{t:en} - {episode_title:fr} - {t:EN}'
+    ) == ['eng', 'fra']
+
+
+def test_interpolate_episode_title_languages():
+    out = naming.interpolate('{t:en} / {episode_title:fr}', {
+        't': 'Original title',
+        'episode_title': 'Original title',
+        '_episode_translations': {'eng': 'English title', 'fra': 'Titre français'},
+    })
+    assert out == 'English title / Titre français'
+
+
 def test_generate_filename_user_tv_format_uses_episode_title(monkeypatch):
     # Format réel de l'utilisateur : {n:en} ({y}) [tvdbid-{tvdbid}] - {s00e00} - {t:en}
     prev = state.config

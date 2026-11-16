@@ -18,7 +18,8 @@
     <div class="error"><i class="mdi mdi-alert-circle"></i> {{ error }}</div>
     {% endif %}
     <form method="POST">
-        <input type="password" name="password" placeholder="Mot de passe" autofocus>
+        <label for="password">Mot de passe</label>
+        <input type="password" id="password" name="password" autofocus autocomplete="current-password">
         <button type="submit"><i class="mdi mdi-login"></i> Connexion</button>
     </form>
 </div>

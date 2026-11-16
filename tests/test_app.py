@@ -186,6 +186,26 @@ def test_api_history_clear(app_client):
     assert app_client.get('/api/history').get_json() == []
 
 
+def test_api_history_pagination(app_client):
+    from src import db
+
+    for i in range(3):
+        db.add_history({
+            'id': f'page-{i}', 'op': 'rename', 'date': '2026-01-01 00:00:00',
+            'from_path': f'/missing/{i}', 'from_name': f'{i}.mkv',
+            'to_path': f'/missing/{i}-new', 'to_name': f'{i}-new.mkv',
+        })
+
+    first_page = app_client.get('/api/history?limit=2&offset=0')
+    assert [entry['id'] for entry in first_page.get_json()] == ['page-2', 'page-1']
+    assert first_page.headers['X-History-Has-More'] == 'true'
+
+    last_page = app_client.get('/api/history?limit=2&offset=2')
+    assert [entry['id'] for entry in last_page.get_json()] == ['page-0']
+    assert last_page.headers['X-History-Has-More'] == 'false'
+    assert app_client.get('/api/history?limit=invalid').status_code == 400
+
+
 def test_api_move_and_progress(app_client, tmp_path):
     dl = tmp_path / 'downloads'
     src = dl / 'movie.mkv'
@@ -403,7 +423,6 @@ def test_api_library_series_detail(app_client, tmp_path, monkeypatch):
     assert data['tvdb_id'] == '888'
     assert data['meta']['title'] == 'Serie X'
     assert data['episodes_available'] is True
-
     s1 = next(s for s in data['seasons'] if s['number'] == 1)
     assert s1['poster'] == 'http://x/s1.jpg'
     assert s1['total'] == 3 and s1['present'] == 2 and s1['missing'] == 1 and s1['upcoming'] == 0
@@ -415,6 +434,65 @@ def test_api_library_series_detail(app_client, tmp_path, monkeypatch):
     assert s2['episodes'][0]['state'] == 'upcoming'
     files01 = s1['episodes'][0]['files']
     assert files01 and files01[0]['name'].endswith('.mkv')
+
+
+def test_api_library_size_range_uses_persisted_cache(app_client, tmp_path):
+    import time
+
+    from src import db
+
+    file_path = str(tmp_path / 'out' / 'movies' / 'Film.mkv')
+    db.library_file_sizes_set([{
+        'path': file_path,
+        'parent': str(tmp_path / 'out' / 'movies'),
+        'size': 4096,
+        'mtime': 123,
+        'is_video': True,
+    }])
+    db.meta_set('library_file_sizes_indexed_at', int(time.time()))
+
+    response = app_client.get('/api/library/size-range')
+
+    assert response.status_code == 200
+    assert response.get_json() == {
+        'min': 4096,
+        'max': 4096,
+        'count': 1,
+        'ready': True,
+        'loading': False,
+        'error': None,
+    }
+
+
+def test_library_size_index_persists_and_prunes_file_entries(app_client, tmp_path):
+    from src import db
+    from src.routes import library as lib_routes
+
+    root = tmp_path / 'out' / 'movies'
+    nested = root / 'Film'
+    nested.mkdir(parents=True)
+    video = nested / 'Film.mkv'
+    video.write_bytes(b'video-data')
+    subtitle = nested / 'Film.srt'
+    subtitle.write_bytes(b'subtitle')
+    stale = str(root / 'removed.mkv')
+    db.library_file_sizes_set([{
+        'path': stale,
+        'parent': str(root),
+        'size': 100,
+        'mtime': 1,
+        'is_video': True,
+    }], scan_id=1)
+
+    lib_routes._library_size_index_worker([str(root)], 2)
+
+    indexed = db.library_file_sizes_get([str(video), str(subtitle), stale])
+    assert indexed[str(video)]['size'] == len(b'video-data')
+    assert indexed[str(video)]['is_video'] is True
+    assert indexed[str(subtitle)]['is_video'] is False
+    assert stale not in indexed
+    assert db.library_file_sizes_range()['count'] == 1
+    assert db.meta_get('library_file_sizes_indexed_at')
 
 
 def test_api_search_auto_cache(app_client, monkeypatch):
@@ -783,7 +861,8 @@ def test_library_rename_folder_series_sync(app_client, monkeypatch, tmp_path):
     monkeypatch.setattr(omdb, 'fetch_omdb_single', lambda *a, **k: None)
     episodes = [{'s': 1, 'e': 1, 'title': 'Pilot'}, {'s': 1, 'e': 2, 'title': 'Second'}]
     monkeypatch.setattr(library, 'tvdb_series_episodes',
-                        lambda sid: db.series_episodes_set(sid, {'episodes': episodes}) or episodes)
+                        lambda sid, series_path=None, season_types=None:
+                        db.series_episodes_set(sid, {'episodes': episodes}) or episodes)
 
     tv_root = str(tmp_path / 'out' / 'tv')
     folder = os.path.join(tv_root, 'bad folder')
@@ -1045,3 +1124,90 @@ def test_rename_subtitles_catchup_across_subfolders(tmp_path):
     assert not (series / 'Show S01E01.srt').exists()
     assert any(r['from'] == 'Show S01E01.srt' and r['to'] == 'Show - S01E01 - Pilot.srt'
                for r in renames)
+
+
+def test_folder_series_rename_uses_localized_episode_titles(app_client, tmp_path, monkeypatch):
+    from src import db, state
+    from src.routes.library import _folder_series_rename
+
+    monkeypatch.setattr(state, 'config', {
+        **(state.config or {}),
+        'tv_format': '{n} - {s00e00} - {t:en}',
+    })
+    folder = tmp_path / 'Show'
+    folder.mkdir()
+    (folder / 'Show S01E01-E02.mkv').write_bytes(b'x')
+    db.series_episodes_set('779', {
+        'order': 'default',
+        'episode_title_languages': ['eng'],
+        'episodes': [
+            {'s': 1, 'e': 1, 'title': 'Pilot One',
+             'episode_title_translations': {'eng': 'English One'}},
+            {'s': 1, 'e': 2, 'title': 'Pilot Two',
+             'episode_title_translations': {'eng': 'English Two'}},
+        ],
+    })
+
+    renames = _folder_series_rename(
+        str(folder), 'Show', 2020, '779', '', '', {}, dry_run=True,
+    )
+    assert renames == [{
+        'from': 'Show S01E01-E02.mkv',
+        'to': 'Show - S01E01-E02 - English One & English Two.mkv',
+    }]
+
+
+def test_enrich_episode_title_translations_uses_cached_tvdb_season_data(
+        app_client, monkeypatch):
+    from src import db, library, state
+
+    monkeypatch.setattr(state, 'config', {
+        **(state.config or {}),
+        'tv_format': '{n} - {s00e00} - {t:en}',
+    })
+    monkeypatch.setattr(
+        state.api_handler,
+        'get_series_episodes',
+        lambda series_id, season_type='default', lang=None, **kwargs: {
+            'episodes': [{
+                'season': 1, 'episode': 2, 'episode_title': 'English title',
+            }],
+        },
+    )
+    cached = {
+        'order': 'default',
+        'episodes': [{'s': 1, 'e': 2, 'title': 'Titre original'}],
+    }
+
+    enriched = library.enrich_episode_title_translations('780', cached)
+
+    assert enriched['episodes'][0]['episode_title_translations'] == {
+        'eng': 'English title',
+    }
+    assert db.series_episodes_get('780')['episode_title_languages'] == ['eng']
+
+
+def test_tv_details_cache_varies_by_episode_title_language(app_client, monkeypatch):
+    from src import db, state
+
+    config = {**(state.config or {}), 'tv_format': '{t:en}'}
+    monkeypatch.setattr(state, 'config', config)
+    cache_keys = []
+    calls = []
+    monkeypatch.setattr(db, 'details_get', lambda _kind, key: cache_keys.append(key))
+    monkeypatch.setattr(db, 'details_set', lambda *_args: None)
+
+    def get_details(*args, **kwargs):
+        calls.append((args, kwargs))
+        return {'title': ''}
+
+    monkeypatch.setattr(state.api_handler, 'get_tv_details', get_details)
+    assert app_client.get('/api/tv/781').status_code == 200
+
+    config['tv_format'] = '{t:fr}'
+    assert app_client.get('/api/tv/781').status_code == 200
+
+    assert cache_keys == ['781:s1e1:lang-eng', '781:s1e1:lang-fra']
+    assert [call[1]['episode_title_languages'] for call in calls] == [
+        ['eng'], ['fra'],
+    ]

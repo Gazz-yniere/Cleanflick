@@ -330,8 +330,7 @@ function libGridToggleSection(key) {
     const body = sec.querySelector('.lib-grid-section-body');
     const open = body.hidden;
     body.hidden = !open;
-    sec.querySelector('.lib-grid-section-head > i:first-child').className =
-        `mdi ${open ? 'mdi-chevron-down' : 'mdi-chevron-right'}`;
+    sec.querySelector('.lib-grid-section-head > i:first-child').classList.toggle('open', open);
     libGridSections[key] = open;
     try { localStorage.setItem(LIB_GRID_SECTIONS_KEY, JSON.stringify(libGridSections)); } catch (e) {}
 }
@@ -343,7 +342,7 @@ function libGridSectionHtml(labelHtml, items, key) {
         : `<div class="lib-grid"><div class="empty-state">${tr('lib_grid_empty')}</div></div>`;
     return `<section class="lib-grid-section" data-key="${key}">
         <div class="lib-grid-section-head" onclick="libGridToggleSection('${key}')">
-            <i class="mdi ${open ? 'mdi-chevron-down' : 'mdi-chevron-right'}"></i>
+            <i class="mdi mdi-chevron-right${open ? ' open' : ''}"></i>
             ${labelHtml}
             <span class="lib-grid-section-count">${items.length}</span>
         </div>
@@ -354,7 +353,7 @@ function libGridSectionHtml(labelHtml, items, key) {
 function libGridSeriesSectionHtml(series) {
     return `<section class="lib-grid-section" data-key="series">
         <div class="lib-grid-section-head" onclick="libGridToggleSection('series')">
-            <i class="mdi ${libGridSections.series !== false ? 'mdi-chevron-down' : 'mdi-chevron-right'}"></i>
+            <i class="mdi mdi-chevron-right${libGridSections.series !== false ? ' open' : ''}"></i>
             <i class="mdi mdi-television"></i> ${tr('lib_grid_series')}
             <span class="lib-grid-section-count">${series.length}</span>
         </div>
@@ -421,7 +420,7 @@ function loadLibGrid(force) {
         return;
     }
     const grid = document.getElementById('library-grid');
-    if (grid) grid.innerHTML = `<div class="loading"><div class="spinner"></div></div>`;
+    if (grid) grid.innerHTML = `<div class="skeleton-grid">${'<div class="skeleton skeleton-card"></div>'.repeat(8)}</div>`;
     fetch('/api/library/flat')
         .then(r => r.json())
         .then(data => {

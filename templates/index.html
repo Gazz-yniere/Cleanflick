@@ -31,10 +31,10 @@
     </header>
 
     <nav>
-        <a href="#" onclick="switchTab('files', event)" class="nav-link active" data-i18n="nav_files"><i class="mdi mdi-folder-play"></i></a>
-        <a href="#" onclick="switchTab('library', event)" class="nav-link" data-i18n="nav_library"><i class="mdi mdi-bookshelf"></i></a>
-        <a href="#" onclick="switchTab('history', event)" class="nav-link" data-i18n="nav_history"><i class="mdi mdi-history"></i></a>
-        <a href="#" onclick="switchTab('config', event)" class="nav-link" data-i18n="nav_config"><i class="mdi mdi-cog"></i></a>
+        <a href="#" onclick="switchTab('files', event)" class="nav-link active"><i class="mdi mdi-folder-play"></i><span data-i18n="nav_files">Fichiers</span></a>
+        <a href="#" onclick="switchTab('library', event)" class="nav-link"><i class="mdi mdi-bookshelf"></i><span data-i18n="nav_library">Bibliothèque</span></a>
+        <a href="#" onclick="switchTab('history', event)" class="nav-link"><i class="mdi mdi-history"></i><span data-i18n="nav_history">Historique</span></a>
+        <a href="#" onclick="switchTab('config', event)" class="nav-link"><i class="mdi mdi-cog"></i><span data-i18n="nav_config">Config</span></a>
     </nav>
 
     <div class="content">
@@ -50,14 +50,22 @@
                 <button class="btn btn-secondary" onclick="moveAll()" data-i18n="btn_move_all"><i class="mdi mdi-folder-move"></i></button>
             </div>
 
-            <div class="files-grid">
-                    <div class="files-grid-header">
-                        <span class="col-file" data-i18n="th_file"></span>
-                        <span class="col-preview" data-i18n="th_preview"></span>
-                        <span class="col-actions" data-i18n="th_actions"></span>
-                    </div>
-                    <div id="files-tbody"></div>
+            <div id="files-batch-toolbar" class="files-batch-toolbar" hidden>
+                <span><strong id="files-selected-count" aria-live="polite">0</strong> <span data-i18n="files_selected">épisodes sélectionnés</span></span>
+                <div>
+                    <button class="btn btn-primary" onclick="manualSearchSelected()"><i class="mdi mdi-magnify"></i> <span data-i18n="btn_search_selected_series">Rechercher la série</span></button>
+                    <button class="btn btn-secondary" onclick="clearSelectedEpisodes()"><i class="mdi mdi-close"></i> <span data-i18n="btn_clear_selection">Effacer la sélection</span></button>
                 </div>
+            </div>
+
+            <div class="files-grid" role="grid" aria-multiselectable="true" data-i18n-aria-label="nav_files">
+                <div class="files-grid-header" role="row">
+                    <span class="col-file" role="columnheader" data-i18n="th_file"></span>
+                    <span class="col-preview" role="columnheader" data-i18n="th_preview"></span>
+                    <span class="col-actions" role="columnheader" data-i18n="th_actions"></span>
+                </div>
+                <div id="files-tbody" role="rowgroup"></div>
+            </div>
                 <div id="filesPosterPreview" class="files-poster-preview" hidden>
                     <img id="filesPosterPreviewImg" alt="">
                     <div id="filesPosterPreviewMeta" class="files-poster-preview-meta"></div>
@@ -68,63 +76,91 @@
         <div id="library" class="section">
             <div class="lib-layout">
                 <aside class="lib-sidebar">
-                    <div class="lib-view-toggle">
-                        <button class="filter-btn active" id="lib-view-tree" onclick="setLibView('tree')" title="Arbre"><i class="mdi mdi-file-tree"></i></button>
-                        <button class="filter-btn" id="lib-view-grid" onclick="setLibView('grid')" title="Grille"><i class="mdi mdi-view-grid"></i></button>
+                    <div class="lib-sidebar-head">
+                        <div class="lib-view-toggle" role="group" data-i18n-aria-label="lib_view_title">
+                            <button class="filter-btn active" id="lib-view-tree" onclick="setLibView('tree')" data-i18n-title="lib_view_tree"><i class="mdi mdi-file-tree"></i><span data-i18n="lib_view_tree">Arbre</span></button>
+                            <button class="filter-btn" id="lib-view-grid" onclick="setLibView('grid')" data-i18n-title="lib_view_grid"><i class="mdi mdi-view-grid"></i><span data-i18n="lib_view_grid">Grille</span></button>
+                        </div>
                     </div>
 
-                    <div class="lib-side-title" data-i18n="lib_side_filters">Filtres</div>
-                    <div class="lib-side-search">
+                    <div class="lib-side-heading">
+                        <div class="lib-side-title" data-i18n="lib_side_filters">Filtres</div>
+                        <button class="lib-reset-all" type="button" onclick="resetLibFilters()" data-i18n-title="lib_filter_reset" data-i18n-aria-label="lib_filter_reset">
+                            <i class="mdi mdi-filter-remove-outline"></i><span data-i18n="lib_filter_reset">Réinitialiser</span>
+                        </button>
+                    </div>
+
+                    <label class="lib-side-search">
+                        <i class="mdi mdi-magnify" aria-hidden="true"></i>
                         <input type="search" id="lib-search" data-i18n-placeholder="lib_filter_search_ph" placeholder="Rechercher un nom…" oninput="libSearchInput(this.value)">
-                        <button class="lib-side-reset" onclick="libSearchReset()" title="Tous"><i class="mdi mdi-filter-remove"></i></button>
-                    </div>
-                    <button class="filter-btn active" id="lib-filter" onclick="cycleLibFilter()"><i class="mdi mdi-filter-variant"></i><span data-i18n="filter_all">Tous</span></button>
-                    <span class="lib-filter-wrap">
-                        <button class="filter-btn" id="lib-filter-genre" onclick="toggleLibFilterPanel('genre')"><i class="mdi mdi-tag-multiple-outline"></i><span data-i18n="lib_filter_genre">Genre</span></button>
-                        <div class="lib-filter-panel" id="lib-genre-panel">
-                            <button class="lib-filter-all" onclick="libFacetSelectAll('genre', false)" data-i18n="lib_filter_all">Tous</button>
-                            <div class="lib-filter-list" id="lib-genre-list"></div>
-                        </div>
-                    </span>
+                    </label>
 
-                    <div class="lib-side-slider">
-                        <div class="lib-side-slider-head">
-                            <span class="lib-side-slider-label"><i class="mdi mdi-account-group-outline"></i> <span data-i18n="lib_filter_age">Tranche d'âge</span></span>
-                            <button class="lib-side-reset" onclick="libAgeReset()" title="Tous"><i class="mdi mdi-filter-remove"></i></button>
-                        </div>
-                        <div class="dual-slider" id="lib-age-slider"></div>
-                    </div>
-
-                    <div class="lib-side-slider">
-                        <div class="lib-side-slider-head">
-                            <span class="lib-side-slider-label"><i class="mdi mdi-database"></i> <span data-i18n="lib_filter_size">Taille</span></span>
-                            <button class="lib-side-reset" onclick="libSizeReset()" title="Tous"><i class="mdi mdi-filter-remove"></i></button>
-                        </div>
-                        <div class="dual-slider" id="lib-size-slider"></div>
-                    </div>
-
-                    <div class="lib-side-slider">
-                        <div class="lib-side-slider-head">
-                            <span class="lib-side-slider-label"><i class="mdi mdi-star"></i> <span data-i18n="lib_filter_rating">Note</span></span>
-                            <button class="lib-side-reset" onclick="libRatingReset()" title="Tous"><i class="mdi mdi-filter-remove"></i></button>
-                        </div>
-                        <div class="dual-slider" id="lib-rating-slider"></div>
-                    </div>
-
-                    <div class="lib-side-slider">
-                        <div class="lib-side-slider-head">
-                            <span class="lib-side-slider-label"><i class="mdi mdi-calendar-range"></i> <span data-i18n="lib_filter_date">Date</span></span>
-                            <button class="lib-side-reset" onclick="libDateReset()" title="Tous"><i class="mdi mdi-filter-remove"></i></button>
-                        </div>
-                        <div class="dual-slider" id="lib-date-slider"></div>
-                    </div>
-
+                    <label class="lib-filter-field">
+                        <span data-i18n="lib_filter_validation">État</span>
+                        <select id="lib-filter" class="lib-filter-select" onchange="setLibFilter(this.value)">
+                            <option value="all" data-i18n="filter_all">Tous</option>
+                            <option value="valid" data-i18n="lib_valid">Valides</option>
+                            <option value="invalid" data-i18n="lib_invalid">Invalides</option>
+                        </select>
+                    </label>
                     <button class="filter-btn" id="lib-filter-missing" onclick="toggleLibMissingFilter()"><i class="mdi mdi-alert-circle-outline"></i><span data-i18n="lib_filter_missing">Manquants</span></button>
 
-                    <div class="lib-side-title" data-i18n="lib_sort_title">Trier par</div>
-                    <button class="filter-btn active" id="lib-sort-name" onclick="setLibSort('name')"><i class="mdi mdi-sort-ascending"></i><span data-i18n="lib_sort_name">Alphabétique</span></button>
-                    <button class="filter-btn" id="lib-sort-size" onclick="setLibSort('size')"><i class="mdi mdi-sort"></i><span data-i18n="lib_sort_size">Taille</span></button>
-                    <button class="filter-btn" id="lib-sort-rating" onclick="setLibSort('rating')"><i class="mdi mdi-star"></i><span data-i18n="lib_sort_rating">Note</span></button>
+                    <details class="lib-filter-group" id="lib-advanced-filters" ontoggle="setLibFacetPreload(this.open)">
+                        <summary>
+                            <span><i class="mdi mdi-tune-variant" aria-hidden="true"></i><span data-i18n="lib_filter_more">Filtres avancés</span></span>
+                            <span class="lib-filter-count" id="lib-advanced-count" hidden></span>
+                            <i class="mdi mdi-chevron-down lib-details-chevron" aria-hidden="true"></i>
+                        </summary>
+                        <div class="lib-filter-group-body">
+                            <details class="lib-genre-section" id="lib-genre-section">
+                                <summary>
+                                    <span><i class="mdi mdi-tag-multiple-outline" aria-hidden="true"></i><span data-i18n="lib_filter_genre">Genre</span></span>
+                                    <span class="lib-genre-count" id="lib-genre-count" hidden></span>
+                                    <i class="mdi mdi-chevron-down lib-details-chevron" aria-hidden="true"></i>
+                                </summary>
+                                <button class="lib-filter-clear" type="button" onclick="libFacetSelectAll('genre', false)" data-i18n="lib_filter_clear">Effacer</button>
+                                <div class="lib-filter-list" id="lib-genre-list"></div>
+                            </details>
+
+                            <div class="lib-side-slider">
+                                <div class="lib-side-slider-head">
+                                    <span class="lib-side-slider-label"><i class="mdi mdi-account-group-outline" aria-hidden="true"></i><span data-i18n="lib_filter_age">Tranche d'âge</span></span>
+                                    <button class="lib-side-reset" onclick="libAgeReset()" data-i18n-title="lib_filter_clear" data-i18n-aria-label="lib_filter_clear"><i class="mdi mdi-filter-remove"></i></button>
+                                </div>
+                                <div class="dual-slider" id="lib-age-slider"></div>
+                            </div>
+                            <div class="lib-side-slider">
+                                <div class="lib-side-slider-head">
+                                    <span class="lib-side-slider-label"><i class="mdi mdi-database" aria-hidden="true"></i><span data-i18n="lib_filter_size">Taille</span></span>
+                                    <button class="lib-side-reset" onclick="libSizeReset()" data-i18n-title="lib_filter_clear" data-i18n-aria-label="lib_filter_clear"><i class="mdi mdi-filter-remove"></i></button>
+                                </div>
+                                <div class="dual-slider" id="lib-size-slider"></div>
+                            </div>
+                            <div class="lib-side-slider">
+                                <div class="lib-side-slider-head">
+                                    <span class="lib-side-slider-label"><i class="mdi mdi-star" aria-hidden="true"></i><span data-i18n="lib_filter_rating">Note</span></span>
+                                    <button class="lib-side-reset" onclick="libRatingReset()" data-i18n-title="lib_filter_clear" data-i18n-aria-label="lib_filter_clear"><i class="mdi mdi-filter-remove"></i></button>
+                                </div>
+                                <div class="dual-slider" id="lib-rating-slider"></div>
+                            </div>
+                            <div class="lib-side-slider">
+                                <div class="lib-side-slider-head">
+                                    <span class="lib-side-slider-label"><i class="mdi mdi-calendar-range" aria-hidden="true"></i><span data-i18n="lib_filter_date">Date</span></span>
+                                    <button class="lib-side-reset" onclick="libDateReset()" data-i18n-title="lib_filter_clear" data-i18n-aria-label="lib_filter_clear"><i class="mdi mdi-filter-remove"></i></button>
+                                </div>
+                                <div class="dual-slider" id="lib-date-slider"></div>
+                            </div>
+                        </div>
+                    </details>
+
+                    <div class="lib-sort-group">
+                        <div class="lib-side-title" data-i18n="lib_sort_title">Trier par</div>
+                        <div class="lib-sort-options">
+                            <button class="filter-btn active" id="lib-sort-name" onclick="setLibSort('name')"><i class="mdi mdi-sort-ascending"></i><span data-i18n="lib_sort_name">Alphabétique</span></button>
+                            <button class="filter-btn" id="lib-sort-size" onclick="setLibSort('size')"><i class="mdi mdi-sort"></i><span data-i18n="lib_sort_size">Taille</span></button>
+                            <button class="filter-btn" id="lib-sort-rating" onclick="setLibSort('rating')"><i class="mdi mdi-star"></i><span data-i18n="lib_sort_rating">Note</span></button>
+                        </div>
+                    </div>
                 </aside>
                 <div class="lib-main">
                     <div id="library-tree"></div>
@@ -161,6 +197,7 @@
                     <tr><td colspan="4" class="empty-state" data-i18n="hist_empty"></td></tr>
                 </tbody>
             </table>
+            <button id="history-load-more" class="btn btn-secondary history-load-more" onclick="loadHistory(true)" data-i18n="hist_load_more" hidden></button>
         </div>
 
         <!-- ===== CONFIGURATION ===== -->
@@ -380,7 +417,7 @@
 
     <footer class="app-footer">
         <span data-i18n="footer_text"></span>
-        <span class="footer-meta">· <a href="https://github.com/Gazz-yniere/Cleanflick" target="_blank">GitHub</a> · v1.0.12</span>
+        <span class="footer-meta">· <a href="https://github.com/Gazz-yniere/Cleanflick" target="_blank">GitHub</a> · v1.0.13</span>
     </footer>
 </div>
 

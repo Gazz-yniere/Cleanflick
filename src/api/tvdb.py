@@ -1,6 +1,7 @@
 """Client TVDB (tvdb_v4_official) : recherche, détails, épisodes."""
 import re
 import logging
+import time
 from typing import Dict, List, Optional
 
 import tvdb_v4_official
@@ -14,6 +15,7 @@ class TVDBAPIHandler:
     def __init__(self, api_key: str, pin: Optional[str] = None):
         self.api_key = api_key
         self.pin = pin
+        self._localized_episode_cache = {}
         try:
             self.client = tvdb_v4_official.TVDB(api_key, pin=pin) if pin else tvdb_v4_official.TVDB(api_key)
             logger.info("TVDB API client initialized")
@@ -361,8 +363,15 @@ class TVDBAPIHandler:
             return {'id': movie_id, 'tvdbid': str(movie_id), 'title': '', 'year': '', 'source': 'tvdb'}
 
     def get_series_episodes(self, series_id: int, season: Optional[int] = None, page: int = 0,
-                            season_type: str = 'default') -> Dict:
+                            season_type: str = 'default', lang: str = None) -> Dict:
         try:
+            cache_key = (series_id, season, page, season_type, lang)
+            cache = getattr(self, '_localized_episode_cache', None)
+            if cache is None:
+                cache = self._localized_episode_cache = {}
+            cached = cache.get(cache_key) if lang else None
+            if cached and time.time() - cached[0] < 86400:
+                return cached[1]
             logger.info(f"[TVDB API] → épisodes série id={series_id}")
             all_episodes = []
             current_page = page
@@ -372,7 +381,10 @@ class TVDBAPIHandler:
             # à 20 pages : TVDB fournit le nombre réel de pages dans la réponse.
             # Le plafond protège seulement une réponse API incohérente.
             while current_page < 100:
-                result = self.client.get_series_episodes(series_id, season_type=season_type, page=current_page)
+                kwargs = {'season_type': season_type, 'page': current_page}
+                if lang:
+                    kwargs['lang'] = lang
+                result = self.client.get_series_episodes(series_id, **kwargs)
                 db.usage_bump('tvdb')
                 found_season = False
                 for ep in result.get('episodes', []):
@@ -382,7 +394,10 @@ class TVDBAPIHandler:
                             found_season = True
                             all_episodes.append(self._parse_episode(ep))
                         elif ep_season > season and found_season:
-                            return {'series_id': series_id, 'episodes': all_episodes, 'source': 'tvdb'}
+                            response = {'series_id': series_id, 'episodes': all_episodes, 'source': 'tvdb'}
+                            if lang and all_episodes:
+                                cache[cache_key] = (time.time(), response)
+                            return response
                     else:
                         all_episodes.append(self._parse_episode(ep))
                 total_pages = result.get('totalPages') or result.get('total_pages')
@@ -398,7 +413,10 @@ class TVDBAPIHandler:
                     seen_next.add(next_link)
                 current_page += 1
             logger.info(f"[TVDB API] ← épisodes série id={series_id} : {len(all_episodes)} épisode(s) récupéré(s)")
-            return {'series_id': series_id, 'episodes': all_episodes, 'source': 'tvdb'}
+            response = {'series_id': series_id, 'episodes': all_episodes, 'source': 'tvdb'}
+            if lang and all_episodes:
+                cache[cache_key] = (time.time(), response)
+            return response
         except Exception as e:
             logger.error(f"Series episodes error: {e}")
             return {'series_id': series_id, 'episodes': [], 'source': 'tvdb'}

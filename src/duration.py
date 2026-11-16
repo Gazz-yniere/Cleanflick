@@ -59,7 +59,27 @@ def get_duration(path, non_blocking=False):
             return minutes
     except Exception:
         pass
-    if non_blocking or state.config.get('lib_fast_scan'):
+    if non_blocking or (state.config or {}).get('lib_fast_scan'):
+        _dur_enqueue(path, mt)
+        return None
+    return _parse_duration_cached(path, mt, sz)
+
+
+def get_duration_cached(path, size, mtime, cached=None, non_blocking=False):
+    """Resolve duration from supplied cached file metadata without statting it."""
+    try:
+        sz = int(size)
+        mt = int(mtime)
+    except (TypeError, ValueError):
+        return None
+    key = (path, mt)
+    if key in _MEDIA_DUR_CACHE:
+        return _MEDIA_DUR_CACHE[key]
+    if cached and cached.get('size') == sz and cached.get('mtime') == mt:
+        minutes = cached.get('minutes')
+        _MEDIA_DUR_CACHE[key] = minutes
+        return minutes
+    if non_blocking or (state.config or {}).get('lib_fast_scan'):
         _dur_enqueue(path, mt)
         return None
     return _parse_duration_cached(path, mt, sz)

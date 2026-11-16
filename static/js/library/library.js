@@ -8,6 +8,7 @@ let libRatingRange = null;   // [min, max] 0-10, ou null
 let libDateRange = null;     // [anneeMin, anneeMax], ou null
 let libMissingOnly = false;
 let libShowS00 = false;
+const REDUCED_MOTION = window.matchMedia('(prefers-reduced-motion: reduce)');
 const LIB_EXPANDED_KEY = 'cleanflick_lib_expanded';
 const LIB_TAB_KEY = 'cleanflick_active_tab';
 const LIB_PAGE_SIZE = 200;
@@ -192,6 +193,7 @@ function loadLibrary() {
             });
             applyLibFilter();
             collectLibFacets();
+            if (document.getElementById('lib-advanced-filters')?.open) setLibFacetPreload(true);
             if (typeof collectGridEnrich === 'function' && libView === 'grid') collectGridEnrich();
             const fromCache = libTreeCacheFresh();
             // Les dossiers persistés sont re-ouverts (instantanément si hydratés
@@ -310,11 +312,14 @@ function buildLibNode(entry, depth, autoExpand) {
     wrap._meta = entry.meta || null;
     wrap._entry = entry;
     wrap._durPending = !entry.is_dir && !!entry.dur_pending;
+    wrap._searchSource = null;
+    wrap._searchText = '';
 
     if (entry.is_dir) {
         const row = document.createElement('div');
         row.className = 'lib-row lib-row--dir';
         row.dataset.path = entry.path;
+        wrap._row = row;
         const badgeDir = entry.valid === false ? `<span class="lib-badge lib-badge--warn"><i class="mdi mdi-alert"></i></span>` : '';
         const dirActions = document.createElement('div');
         dirActions.className = 'lib-actions';
@@ -397,6 +402,7 @@ function buildLibNode(entry, depth, autoExpand) {
         const children = document.createElement('div');
         children.className = 'lib-children';
         children.style.display = 'none';
+        wrap._childrenEl = children;
         // Cache : rend immédiatement les enfants déjà visités (F5 quasi instantané).
         // On n'hydrate que les dossiers dépliés (persistés) — ou tous si un filtre
         // est actif (pour que le filtre évalue leur contenu). Le reste reste lazy.
@@ -412,12 +418,18 @@ function buildLibNode(entry, depth, autoExpand) {
         const toggle = (e) => {
             if (e && e.target.closest('.lib-actions, button, a')) return;
             const isOpen = children.style.display !== 'none';
+            row.querySelector('.lib-toggle i').classList.toggle('open', !isOpen);
             if (isOpen) {
                 children.style.display = 'none';
-                row.querySelector('.lib-toggle i').className = 'mdi mdi-chevron-right';
             } else {
                 children.style.display = 'block';
-                row.querySelector('.lib-toggle i').className = 'mdi mdi-chevron-down';
+                const h = children.getBoundingClientRect().height;
+                if (h && children.animate && !REDUCED_MOTION) {
+                    children.animate(
+                        [{ opacity: 0, transform: 'translateY(-4px)' }, { opacity: 1, transform: 'translateY(0)' }],
+                        { duration: 180, easing: 'cubic-bezier(0.23, 1, 0.32, 1)' }
+                    );
+                }
                 if (!wrap._loaded) {
                     wrap._loaded = true;
                     loadLibChildren(entry, children, row, 0, LIB_PAGE_SIZE);
@@ -436,6 +448,7 @@ function buildLibNode(entry, depth, autoExpand) {
         const row = document.createElement('div');
         row.className = 'lib-row lib-row--file';
         row.dataset.filePath = entry.path;
+        wrap._row = row;
         row.innerHTML = `
             ${libLead(entry, 'mdi-file-video lib-icon-file')}
             <span class="lib-name lib-name--file">
@@ -512,12 +525,14 @@ function loadLibChildren(entry, children, row, offset, limit) {
             if (/\[tvdbid-/.test(entry.name)) loadLibMissing(entry.path, wrap._missingBadge, wrap._upcomingBadge, children);
             else refreshSeriesBadges(children);
             wrap._loading = false;
+            if (typeof continueLibFacetPreload === 'function') continueLibFacetPreload();
             scheduleApplyLibFilter();
             scheduleCollectFacets();
         })
         .catch(() => {
             wrap._loading = false;
-            if (offset === 0) children.innerHTML = `<div class="lib-loading lib-loading--error">✗</div>`;
+            if (offset === 0) children.innerHTML = `<div class="lib-loading lib-loading--error"><i class="mdi mdi-alert-circle-outline"></i></div>`;
+            if (typeof continueLibFacetPreload === 'function') continueLibFacetPreload();
         });
 }
 

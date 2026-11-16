@@ -26,6 +26,109 @@ logger = logging.getLogger(__name__)
 bp = Blueprint('library', __name__)
 
 VIDEO_EXT = {'.mkv', '.mp4', '.avi', '.mov', '.wmv', '.m4v', '.ts', '.flv', '.webm'}
+_SIZE_INDEX_TTL = 24 * 60 * 60
+_SIZE_INDEX_LOCK = threading.Lock()
+_SIZE_INDEX_RUNNING = False
+_SIZE_INDEX_ERROR = None
+
+
+def _library_size_index_worker(roots, scan_id):
+    global _SIZE_INDEX_RUNNING, _SIZE_INDEX_ERROR
+    errors = []
+    try:
+        for root in roots:
+            stack = [root]
+            batch = []
+            root_complete = True
+            while stack:
+                current = stack.pop()
+                try:
+                    with os.scandir(current) as iterator:
+                        for entry in iterator:
+                            try:
+                                if entry.is_dir(follow_symlinks=False):
+                                    if not entry.name.startswith('.'):
+                                        stack.append(entry.path)
+                                elif entry.is_file(follow_symlinks=False):
+                                    stat = entry.stat(follow_symlinks=False)
+                                    path = os.path.abspath(entry.path)
+                                    batch.append({
+                                        'path': path,
+                                        'parent': os.path.dirname(path),
+                                        'size': stat.st_size,
+                                        'mtime': int(stat.st_mtime),
+                                        'is_video': Path(entry.name).suffix.lower() in VIDEO_EXT,
+                                    })
+                                    if len(batch) >= 500:
+                                        db.library_file_sizes_set(batch, scan_id)
+                                        batch.clear()
+                            except OSError as e:
+                                root_complete = False
+                                logger.debug(f"Library size index skipped {entry.path}: {e}")
+                except OSError as e:
+                    root_complete = False
+                    errors.append(f"{current}: {e}")
+            if batch:
+                db.library_file_sizes_set(batch, scan_id)
+            if root_complete:
+                db.library_file_sizes_delete_unseen(root, scan_id)
+            else:
+                errors.append(f"{root}: scan incomplet, cache non purgé")
+        if errors:
+            _SIZE_INDEX_ERROR = '; '.join(errors[:3])
+        else:
+            db.meta_set('library_file_sizes_indexed_at', int(time.time()))
+            _SIZE_INDEX_ERROR = None
+    except Exception as e:
+        _SIZE_INDEX_ERROR = str(e)
+        logger.exception("Library file size index failed")
+    finally:
+        with _SIZE_INDEX_LOCK:
+            _SIZE_INDEX_RUNNING = False
+
+
+def _start_library_size_index():
+    global _SIZE_INDEX_RUNNING, _SIZE_INDEX_ERROR
+    try:
+        indexed_at = int(db.meta_get('library_file_sizes_indexed_at', '0') or 0)
+    except Exception as e:
+        logger.warning(f"Library size cache status unavailable: {e}")
+        indexed_at = 0
+    if indexed_at and time.time() - indexed_at < _SIZE_INDEX_TTL:
+        return
+    with _SIZE_INDEX_LOCK:
+        if _SIZE_INDEX_RUNNING:
+            return
+        _SIZE_INDEX_RUNNING = True
+        _SIZE_INDEX_ERROR = None
+    config = state.config or {}
+    roots = list(dict.fromkeys(
+        os.path.abspath(path) for path in (
+            config.get('_movie_output_path') or config.get('movie_output_path'),
+            config.get('_tv_output_path') or config.get('tv_output_path'),
+        ) if path and os.path.isdir(path)
+    ))
+    scan_id = int(time.time() * 1_000_000)
+    threading.Thread(
+        target=_library_size_index_worker, args=(roots, scan_id), daemon=True,
+    ).start()
+
+
+@bp.route('/api/library/size-range')
+@login_required
+def api_library_size_range():
+    _start_library_size_index()
+    sizes = db.library_file_sizes_range()
+    indexed_at = int(db.meta_get('library_file_sizes_indexed_at', '0') or 0)
+    with _SIZE_INDEX_LOCK:
+        loading = _SIZE_INDEX_RUNNING
+        error = _SIZE_INDEX_ERROR
+    return jsonify({
+        **sizes,
+        'ready': bool(indexed_at),
+        'loading': loading,
+        'error': error,
+    })
 
 
 @bp.route('/api/library/tvdb-link/<int:tvdb_id>')
@@ -63,7 +166,28 @@ def api_library_tvdb_orders(tvdb_id):
             label = item.get('alternateName') or item.get('name') or order
             if not any(x.get('value') == order for x in orders):
                 orders.append({'value': order, 'label': label})
-        return jsonify({'orders': orders, 'details': details or {}})
+        request_data = request.get_json(silent=True) or {}
+        series_path = request_data.get('path') or request.args.get('path', '')
+        recommended_order = None
+        if series_path:
+            tv_root = os.path.abspath(state.config.get('_tv_output_path') or state.config.get('tv_output_path') or '')
+            abs_series_path = os.path.abspath(series_path)
+            try:
+                path_is_in_tv_root = os.path.commonpath([tv_root, abs_series_path]) == tv_root
+            except ValueError:
+                path_is_in_tv_root = False
+            if tv_root and path_is_in_tv_root and abs_series_path != tv_root and os.path.isdir(abs_series_path):
+                episodes = library.tvdb_series_episodes(
+                    str(tvdb_id), abs_series_path,
+                    season_types=(details or {}).get('seasonTypes') or [],
+                )
+                _SERIES_EP_MEM.pop(str(tvdb_id), None)
+                cached = db.series_episodes_get(str(tvdb_id)) or {}
+                series_meta = (db.series_meta_get(str(tvdb_id)) or {}).get('data') or {}
+                configured_order = str(series_meta.get('episode_order') or state.config.get('tvdb_episode_order') or 'auto').lower()
+                if episodes and (cached.get('order_match') or configured_order != 'auto'):
+                    recommended_order = 'official' if cached.get('order', 'default') == 'default' else cached.get('order')
+        return jsonify({'orders': orders, 'details': details or {}, 'recommended_order': recommended_order})
     except Exception as e:
         logger.warning(f'TVDB order resolution failed for {tvdb_id}: {e}')
         return jsonify({'orders': []})
@@ -646,6 +770,7 @@ def api_library():
 
     # Root call — return both movie and tv roots
     if not path:
+        _start_library_size_index()
         roots = []
         for lib_type, cfg_key in [('movie', '_movie_output_path'), ('tv', '_tv_output_path')]:
             lib_path = state.config.get(cfg_key) or state.config.get(cfg_key.lstrip('_'))
@@ -717,6 +842,13 @@ def api_library():
     else:
         page = all_entries[offset:]
 
+    media_paths = [
+        os.path.abspath(entry.path) for entry in page
+        if Path(entry.name).suffix.lower() in VIDEO_EXT
+    ]
+    cached_sizes = db.library_file_sizes_get(media_paths)
+    cached_durations = db.media_durs_get_many([entry.path for entry in page if Path(entry.name).suffix.lower() in VIDEO_EXT])
+    size_updates = []
     entries = []
     for entry in page:
         try:
@@ -758,16 +890,34 @@ def api_library():
                             'ep_present': ep_present, 'ep_total': ep_total, 'ep_upcoming': ep_upcoming})
         elif entry.is_file() and Path(entry.name).suffix.lower() in VIDEO_EXT:
             valid = is_valid_name(entry.name, lib_type)
-            size = 0
+            abs_entry_path = os.path.abspath(entry.path)
+            cached_size = cached_sizes.get(abs_entry_path)
             try:
-                size = entry.stat(follow_symlinks=False).st_size
+                if cached_size:
+                    size = cached_size['size']
+                    mtime = cached_size['mtime']
+                else:
+                    stat = entry.stat(follow_symlinks=False)
+                    size, mtime = stat.st_size, int(stat.st_mtime)
+                    size_updates.append({
+                        'path': abs_entry_path,
+                        'parent': os.path.dirname(abs_entry_path),
+                        'size': size,
+                        'mtime': mtime,
+                        'is_video': True,
+                    })
             except OSError:
-                pass
-            dur = duration.get_duration(entry.path, non_blocking=fast_scan)
+                size, mtime = 0, 0
+            dur = duration.get_duration_cached(
+                entry.path, size, mtime, cached_durations.get(entry.path),
+                non_blocking=fast_scan,
+            ) if mtime else None
             entries.append({'name': entry.name, 'path': entry.path, 'type': lib_type, 'is_dir': False, 'size': size,
                              'valid': valid, 'meta': file_meta(entry.name, dur, entry.path),
                             'dur_pending': dur is None and state.config.get('lib_fast_scan')
                             and duration.is_pending(entry.path)})
+    if size_updates:
+        db.library_file_sizes_set(size_updates)
     # Mode scan rapide : get_duration() a déjà mis les durées manquantes dans
     # la file FIFO (worker unique, calcul séquentiel dans l'ordre d'affichage).
 
@@ -783,6 +933,7 @@ def api_library_flat():
     externe, la note/poster manquants arrivent ensuite via l'enrichissement."""
     movie_root = os.path.abspath(state.config.get('_movie_output_path') or state.config.get('movie_output_path') or '')
     tv_root = os.path.abspath(state.config.get('_tv_output_path') or state.config.get('tv_output_path') or '')
+    _start_library_size_index()
     movie_fmt = state.config.get('movie_format', '{n} ({y})')
     tv_fmt = state.config.get('tv_format', '{n} - {s00e00} - {t}')
     show_s00 = bool(state.config.get('show_s00_specials'))
@@ -808,20 +959,40 @@ def api_library_flat():
             entries = sorted(os.scandir(root), key=lambda e: e.name.lower())
         except (PermissionError, OSError):
             return
+        media_entries = [
+            entry for entry in entries
+            if Path(entry.name).suffix.lower() in VIDEO_EXT
+        ]
+        cached_sizes = db.library_file_sizes_get([os.path.abspath(entry.path) for entry in media_entries])
+        size_updates = []
         for e in entries:
             try:
                 if e.is_dir(follow_symlinks=False):
                     _walk_files(e.path, depth + 1, max_depth)
                 elif e.is_file(follow_symlinks=False) and Path(e.name).suffix.lower() in VIDEO_EXT:
-                    size = 0
-                    try:
-                        size = e.stat(follow_symlinks=False).st_size
-                    except OSError:
-                        pass
+                    abs_path = os.path.abspath(e.path)
+                    cached = cached_sizes.get(abs_path)
+                    if cached:
+                        size = cached['size']
+                    else:
+                        try:
+                            stat = e.stat(follow_symlinks=False)
+                            size = stat.st_size
+                            size_updates.append({
+                                'path': abs_path,
+                                'parent': os.path.dirname(abs_path),
+                                'size': size,
+                                'mtime': int(stat.st_mtime),
+                                'is_video': True,
+                            })
+                        except OSError:
+                            size = 0
                     meta = ctx['file_meta'](e.name, None, e.path)
                     _add(e.path, 'movie', e.name, meta, ctx['is_valid_name'](e.name, 'movie'), size)
             except OSError:
                 continue
+        if size_updates:
+            db.library_file_sizes_set(size_updates)
 
     def _walk_series(root, depth=0, max_depth=3):
         if depth > max_depth:
@@ -1143,6 +1314,10 @@ def api_library_rename_folder():
     except Exception as e:
         return jsonify({'success': False, 'message': str(e)}), 400
     try:
+        db.library_file_sizes_move_under(abs_folder, dst)
+    except Exception as e:
+        logger.warning(f"Library size cache migration failed for {abs_folder} -> {dst}: {e}")
+    try:
         with state.scan_watch_lock:
             state.scan_last_snapshot = watcher._scan_snapshot()
     except Exception:
@@ -1178,11 +1353,15 @@ def _folder_series_rename(folder, series_title, year, tvdb_id, imdb_id, tmdb_id,
     `dry_run=True` : calcule les renommages (vidéos + sous-titres) SANS toucher
     au disque ni à l'historique — aperçu pour la popup de confirmation."""
     ep_titles = {}
+    ep_records = {}
     try:
         cached = db.series_episodes_get(str(tvdb_id))
+        cached = library.enrich_episode_title_translations(str(tvdb_id), cached or {})
         for ep in (cached or {}).get('episodes') or []:
             if ep.get('s') is not None and ep.get('e') is not None:
-                ep_titles[(ep.get('s'), ep.get('e'))] = ep.get('title') or ''
+                ref = (ep.get('s'), ep.get('e'))
+                ep_records[ref] = ep
+                ep_titles[ref] = ep.get('title') or ep.get('episode_title') or ''
     except Exception:
         pass
     # Épisodes spéciaux (S00) : renommés uniquement si la série en a dans TVDB.
@@ -1207,15 +1386,27 @@ def _folder_series_rename(folder, series_title, year, tvdb_id, imdb_id, tmdb_id,
             t = ep_titles.get(r, '')
             if t and t not in titles:
                 titles.append(t)
+        episode_translations = {}
+        for lang in naming.episode_title_languages():
+            localized_titles = []
+            for ref in refs:
+                episode = ep_records.get(ref) or {}
+                translated = (episode.get('episode_title_translations') or {}).get(lang)
+                title = translated or ep_titles.get(ref, '')
+                if title and title not in localized_titles:
+                    localized_titles.append(title)
+            if localized_titles:
+                episode_translations[lang] = ' & '.join(localized_titles)
+        file_details = {**details, 'episode_title_translations': episode_translations}
         if len(refs) > 1:
             label = naming.multi_episode_label(s, [r[1] for r in refs])
-            new_name = naming.generate_filename(name, 'tv', s, e, details,
+            new_name = naming.generate_filename(name, 'tv', s, e, file_details,
                                                 episode_label=label,
                                                 sxe_label=naming.multi_episode_label_sxe(s, [r[1] for r in refs]),
                                                 episode_title=' & '.join(titles) or None)
         else:
-            details['episode_title'] = titles[0] if titles else ''
-            new_name = naming.generate_filename(name, 'tv', s, e, details)
+            file_details['episode_title'] = titles[0] if titles else ''
+            new_name = naming.generate_filename(name, 'tv', s, e, file_details)
         if new_name and new_name != name:
             dst = os.path.join(os.path.dirname(path), new_name)
             if not dry_run:
@@ -1322,6 +1513,7 @@ def api_library_rename_folder_series():
     # La validation manuelle charge aussi les types d'ordre TVDB. Cela permet
     # de choisir automatiquement l'ordre Netflix pour les séries qui le
     # proposent avant le premier renommage.
+    tvdb_details = {}
     if state.api_handler.tvdb:
         if not dry_run:
             try:
@@ -1333,7 +1525,11 @@ def api_library_rename_folder_series():
         # Le cache d'épisodes est rempli même en dry-run (idempotent, TVDB 24h)
         # pour que l'aperçu utilise les vrais titres d'épisodes.
         try:
-            library.tvdb_series_episodes(tvdb_id)
+            library.tvdb_series_episodes(
+                tvdb_id, abs_folder,
+                season_types=tvdb_details.get('seasonTypes') or tvdb_details.get('season_types') or None,
+            )
+            _SERIES_EP_MEM.pop(str(tvdb_id), None)
         except Exception as e:
             logger.warning(f"[Rename série] cache épisodes {tvdb_id}: {e}")
 
@@ -1363,6 +1559,10 @@ def api_library_rename_folder_series():
                 shutil.move(abs_folder, dst)
                 new_folder = dst
                 folder_note = {'from': folder_base, 'to': desired_folder}
+                try:
+                    db.library_file_sizes_move_under(abs_folder, dst)
+                except Exception as e:
+                    logger.warning(f"Library size cache migration failed for {abs_folder} -> {dst}: {e}")
             except Exception as e:
                 folder_note = {'from': folder_base, 'to': desired_folder, 'error': str(e)}
     if dry_run:
@@ -1372,7 +1572,8 @@ def api_library_rename_folder_series():
 
     def _background():
         try:
-            library.tvdb_series_episodes(tvdb_id)
+            library.tvdb_series_episodes(tvdb_id, new_folder)
+            _SERIES_EP_MEM.pop(str(tvdb_id), None)
         except Exception as e:
             logger.warning(f"[Rename série] cache épisodes {tvdb_id}: {e}")
         # 2e passe de renommage : le parsing TVDB a rempli le cache des
@@ -1421,6 +1622,10 @@ def api_library_delete_folder():
         return jsonify({'success': False, 'message': 'Le dossier n\'est pas vide'}), 400
     try:
         os.rmdir(path)
-        return jsonify({'success': True})
     except Exception as e:
         return jsonify({'success': False, 'message': str(e)}), 400
+    try:
+        db.library_file_sizes_delete_under(abs_path)
+    except Exception as e:
+        logger.warning(f"Library size cache cleanup failed for {abs_path}: {e}")
+    return jsonify({'success': True})

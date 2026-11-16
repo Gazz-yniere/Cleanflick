@@ -73,11 +73,12 @@ function libNormSearch(s) {
 function libNodeSearchText(n) {
     const name = n._entry ? n._entry.name : '';
     const title = (n._meta && n._meta.title) ? n._meta.title : '';
-    if (!name && !title) {
-        const el = n.querySelector(':scope > .lib-row .lib-name-main');
-        if (el) return el.textContent || '';
+    const source = name + ' ' + title;
+    if (n._searchSource !== source) {
+        n._searchSource = source;
+        n._searchText = libNormSearch(source);
     }
-    return name + ' ' + title;
+    return n._searchText || '';
 }
 function libSearchInput(v) {
     libSearchQuery = String(v || '').trim();
@@ -99,8 +100,8 @@ function preloadAllFolders(container) {
     const walk = (el) => {
         for (const n of el.children) {
             if (!n._sort || !n._sort.is_dir) continue;
-            if (n._loaded) continue;
-            const childrenEl = n.querySelector(':scope > .lib-children');
+            if (n._loaded || n._loading) continue;
+            const childrenEl = n._childrenEl;
             const row = n.querySelector(':scope > .lib-row');
             if (!childrenEl || !row || !n._entry) continue;
             n._loaded = true;
@@ -140,7 +141,7 @@ function applyLibFilter() {
         nodes.forEach(n => {
             const hasMeta = !!(n._meta && (n._meta.genres || n._meta.certification));
             const metaOk = hasMeta ? libMetaMatches(n) : (facetsActive ? parentMetaOk : true);
-            const childrenEl = n.querySelector(':scope > .lib-children');
+            const childrenEl = n._childrenEl;
             let childVisible = false;
             if (childrenEl) childVisible = process(childrenEl, false, metaOk);
             let selfMatches = libFilter === 'all' ? true :
@@ -150,7 +151,7 @@ function applyLibFilter() {
             // l'exclut pas du filtre (elle ne porte pas de _missingCount).
             // Les lignes « à venir » (jaunes) n'ont ni _missingCount ni classe
             // --missing : elles sont donc masquées quand le filtre est actif.
-            const isMissingRow = !!n.querySelector(':scope > .lib-row.lib-row--missing');
+            const isMissingRow = !!n._row?.classList.contains('lib-row--missing');
             const missingOk = !libMissingOnly || isMissingRow || (n._missingCount !== undefined && n._missingCount > 0);
             // Dossier en cours de chargement : on ne peut pas encore évaluer ses
             // enfants (non présents dans le DOM) → on le garde visible le temps
@@ -161,7 +162,7 @@ function applyLibFilter() {
             const childCanMatch = !(libRatingRange && isSeriesNode);
             // Recherche : la ligne correspond si son propre nom/titre contient la
             // chaîne ; un dossier peut aussi apparaître via un descendant (récursif).
-            const searchSelfOk = !searchActive || libNormSearch(libNodeSearchText(n)).includes(q);
+            const searchSelfOk = !searchActive || libNodeSearchText(n).includes(q);
             const visible = isRootLevel || n._loading || ((selfMatches && metaOk && rangeOk(n) && missingOk && searchSelfOk)
                 || ((searchActive || childCanMatch) && childVisible));
             n.style.display = visible ? '' : 'none';
@@ -183,19 +184,81 @@ function scheduleCollectFacets() {
 }
 let _filterDebounceTimer = null;
 function scheduleApplyLibFilter() {
-    if (_filterDebounceTimer) return;
-    _filterDebounceTimer = setTimeout(() => { _filterDebounceTimer = null; applyLibFilter(); }, 250);
+    if (_filterDebounceTimer) clearTimeout(_filterDebounceTimer);
+    _filterDebounceTimer = setTimeout(() => {
+        _filterDebounceTimer = null;
+        requestAnimationFrame(applyLibFilter);
+    }, 90);
 }
+// Facettes en cache : le parcours de l'arbre complet coûte (des milliers de
+// nœuds). Les valeurs sont calculées en débouncé (250 ms) et les panneaux /
+// sliders sont rendus depuis ce cache → l'ouverture d'un panneau est instantanée.
+const _libFacetCache = { genres: null, size: null, year: null };
+let _libFacetPreloadRequested = false;
+let _libSizeRangeLoaded = false;
+let _libSizeRangeRequest = false;
+
 function collectLibFacets() {
     const genres = new Set();
+    const years = [];
     document.querySelectorAll('#library-tree .lib-node').forEach(n => {
+        const s = n._sort;
+        if (s && typeof s.year === 'number' && s.year > 0) years.push(s.year);
         const m = n._meta;
         if (m && m.genres) String(m.genres).split(',').forEach(g => { g = g.trim(); if (g) genres.add(g); });
     });
+    years.sort((a, b) => a - b);
+    _libFacetCache.genres = genres;
+    _libFacetCache.year = years.length ? [years[0], years[years.length - 1]] : null;
     renderLibFacetList('lib-genre-list', genres, libGenreFilter);
     updateLibFacetButtons();
-    libSizeRebuild();
-    libDateRebuild();
+    libSizeRender();
+    libDateRender();
+}
+
+function loadLibSizeRange() {
+    if (_libSizeRangeLoaded || _libSizeRangeRequest) return;
+    _libSizeRangeRequest = true;
+    fetch('/api/library/size-range')
+        .then(response => {
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            return response.json();
+        })
+        .then(data => {
+            if (data.ready) {
+                _libFacetCache.size = data.count ? [data.min, data.max] : null;
+                _libSizeRangeLoaded = true;
+                libSizeRender();
+                return;
+            }
+            if (data.error) throw new Error(data.error);
+            setTimeout(loadLibSizeRange, data.loading ? 750 : 1500);
+        })
+        .catch(error => {
+            const host = document.getElementById('lib-size-slider');
+            if (host) host.innerHTML = `<div class="lib-slider-empty">${esc(error.message)}</div>`;
+            console.error('Library size range unavailable:', error);
+        })
+        .finally(() => { _libSizeRangeRequest = false; });
+}
+
+function setLibFacetPreload(enabled) {
+    _libFacetPreloadRequested = enabled;
+    if (enabled) continueLibFacetPreload();
+}
+
+function continueLibFacetPreload() {
+    if (!_libFacetPreloadRequested) return;
+    const container = document.getElementById('library-tree');
+    if (!container) return;
+    preloadAllFolders(container);
+    const pending = [...container.querySelectorAll('.lib-node')].some(n =>
+        n._childrenEl && (!n._loaded || n._loading)
+    );
+    if (!pending) {
+        _libFacetPreloadRequested = false;
+        collectLibFacets();
+    }
 }
 
 function renderLibFacetList(listId, values, selected) {
@@ -225,8 +288,23 @@ function libFacetSelectAll(kind, on) {
 
 function updateLibFacetButtons() {
     document.getElementById('lib-search')?.closest('.lib-side-search')?.classList.toggle('active', libSearchQuery !== '');
-    const g = document.getElementById('lib-filter-genre');
-    if (g) g.classList.toggle('active', libGenreFilter.size > 0);
+    const genreSection = document.getElementById('lib-genre-section');
+    const genreCount = document.getElementById('lib-genre-count');
+    if (genreSection) genreSection.classList.toggle('active', libGenreFilter.size > 0);
+    if (genreCount) {
+        genreCount.textContent = String(libGenreFilter.size);
+        genreCount.hidden = libGenreFilter.size === 0;
+    }
+    let activeCount = libGenreFilter.size;
+    if (libAgeRange) activeCount++;
+    if (libSizeRange) activeCount++;
+    if (libRatingRange) activeCount++;
+    if (libDateRange) activeCount++;
+    const advancedCount = document.getElementById('lib-advanced-count');
+    if (advancedCount) {
+        advancedCount.textContent = String(activeCount);
+        advancedCount.hidden = activeCount === 0;
+    }
     document.querySelector('#lib-age-slider')?.closest('.lib-side-slider')?.classList.toggle('active', libAgeRange !== null);
     document.querySelector('#lib-size-slider')?.closest('.lib-side-slider')?.classList.toggle('active', libSizeRange !== null);
     document.querySelector('#lib-rating-slider')?.closest('.lib-side-slider')?.classList.toggle('active', libRatingRange !== null);
@@ -235,31 +313,38 @@ function updateLibFacetButtons() {
     if (m) m.classList.toggle('active', libMissingOnly);
 }
 
-function toggleLibFilterPanel(kind) {
-    const panel = document.getElementById(`lib-${kind}-panel`);
-    if (!panel) return;
-    const open = panel.classList.toggle('open');
-    document.querySelectorAll('.lib-filter-panel').forEach(p => { if (p !== panel) p.classList.remove('open'); });
-    if (open) collectLibFacets();
-}
-
 function setLibFilter(f) {
     libFilter = f;
     updateLibFilterButton();
     applyLibFilter();
 }
 
-function cycleLibFilter() {
-    const order = ['all', 'valid', 'invalid'];
-    const idx = order.indexOf(libFilter);
-    libFilter = order[(idx + 1) % order.length];
-    setLibFilter(libFilter);
+function updateLibFilterButton() {
+    const select = document.getElementById('lib-filter');
+    if (select) select.value = libFilter;
 }
 
-function updateLibFilterButton() {
-    const btn = document.getElementById('lib-filter');
-    if (!btn) return;
-    const labels = { all: tr('filter_all'), valid: tr('lib_valid'), invalid: tr('lib_invalid') };
-    const icons = { all: 'mdi mdi-filter-variant', valid: 'mdi mdi-check-circle', invalid: 'mdi mdi-alert' };
-    btn.innerHTML = `<i class="${icons[libFilter]}"></i><span>${esc(labels[libFilter])}</span>`;
+function resetLibFilters() {
+    libFilter = 'all';
+    libSearchQuery = '';
+    libGenreFilter.clear();
+    libAgeRange = null;
+    libSizeRange = null;
+    libRatingRange = null;
+    libDateRange = null;
+    libMissingOnly = false;
+
+    const search = document.getElementById('lib-search');
+    if (search) search.value = '';
+    document.querySelectorAll('#lib-genre-list input[type=checkbox]').forEach(input => { input.checked = false; });
+    document.getElementById('lib-advanced-filters').open = false;
+    document.getElementById('lib-genre-section').open = false;
+
+    updateLibFilterButton();
+    updateLibFacetButtons();
+    libAgeSliderSync();
+    libRatingSliderSync();
+    libSizeRender();
+    libDateRender();
+    applyLibFilter();
 }

@@ -1,7 +1,76 @@
 // ── Render ────────────────────────────────────────────────────────────────────
+const selectedEpisodePaths = new Set();
+
+function isBatchSearchEligible(file) {
+    return file?.media_type === 'tv'
+        && file.season !== null && file.season !== undefined && String(file.season).trim() !== ''
+        && file.episode !== null && file.episode !== undefined && String(file.episode).trim() !== ''
+        && Number.isInteger(Number(file.season)) && Number.isInteger(Number(file.episode));
+}
+
+function updateBatchSelectionUI() {
+    const toolbar = document.getElementById('files-batch-toolbar');
+    const count = document.getElementById('files-selected-count');
+    if (toolbar) toolbar.hidden = selectedEpisodePaths.size === 0;
+    if (count) count.textContent = String(selectedEpisodePaths.size);
+}
+
+function toggleFileRowSelection(row) {
+    const path = decodeURIComponent(row.dataset.filePath);
+    if (selectedEpisodePaths.has(path)) selectedEpisodePaths.delete(path);
+    else selectedEpisodePaths.add(path);
+    const selected = selectedEpisodePaths.has(path);
+    row.classList.toggle('file-row--selected', selected);
+    row.setAttribute('aria-selected', String(selected));
+    updateBatchSelectionUI();
+}
+
+function bindFileRowSelection(tbody) {
+    if (tbody.dataset.selectionBound) return;
+    tbody.dataset.selectionBound = 'true';
+    tbody.addEventListener('click', event => {
+        const row = event.target.closest('.file-row--selectable');
+        if (!row || !tbody.contains(row) || event.target.closest('.actions-cell, button, a, input, select, textarea')) return;
+        toggleFileRowSelection(row);
+    });
+    tbody.addEventListener('keydown', event => {
+        const row = event.target.closest('.file-row--selectable');
+        if (event.target !== row || (event.key !== 'Enter' && event.key !== ' ')) return;
+        event.preventDefault();
+        toggleFileRowSelection(row);
+    });
+}
+
+function clearSelectedEpisodes() {
+    selectedEpisodePaths.clear();
+    renderTable();
+}
+
+function manualSearchSelected() {
+    const files = [...selectedEpisodePaths]
+        .map(path => allFiles.find(file => file.path === path))
+        .filter(isBatchSearchEligible);
+    if (!files.length) {
+        clearSelectedEpisodes();
+        return;
+    }
+    const normalizeTitle = title => String(title || '').normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+    const seriesTitles = new Set(files.map(file => normalizeTitle(file.title)));
+    if (seriesTitles.size !== 1 || !files[0].title) {
+        alert(tr('err_select_same_series'));
+        return;
+    }
+    openManualSearchModal(files[0].title, { batchPaths: files.map(file => file.path) });
+}
+
 function renderTable() {
+    selectedEpisodePaths.forEach(path => {
+        if (!allFiles.some(file => file.path === path)) selectedEpisodePaths.delete(path);
+    });
     const filtered = currentFilter ? allFiles.filter(f => f.media_type === currentFilter) : allFiles;
     const tbody = document.getElementById('files-tbody');
+    bindFileRowSelection(tbody);
     let rows = filtered.map(file => buildFileRow(file));
     Object.values(activeTransfers).forEach(t => {
         if (!filtered.some(f => f.path === t.filePath)) {
@@ -9,24 +78,31 @@ function renderTable() {
         }
     });
     if (!rows.length) {
-        tbody.innerHTML = `<div class="empty-state">${tr('no_files_found')}</div>`;
+        tbody.innerHTML = `<div class="file-row" role="row"><div class="empty-state" role="gridcell">${tr('no_files_found')}</div></div>`;
+        updateBatchSelectionUI();
         return;
     }
     tbody.innerHTML = rows.join('');
+    updateBatchSelectionUI();
+    if (tbody.animate && !window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+        tbody.animate([{ opacity: 0.4 }, { opacity: 1 }], { duration: 160, easing: 'ease-out' });
+    }
 }
 
 function buildFileRow(file) {
     const transfer = getActiveTransfer(file.path);
     const dataPath = `data-file-path="${pathKey(file.path)}"`;
     if (transfer) {
-        return `<div ${dataPath} class="file-row transferring" data-job-id="${transfer.jobId}">
-            <div class="transfer-cell">${renderTransferOverlay(file, transfer)}</div>
+        return `<div ${dataPath} class="file-row transferring" role="row" data-job-id="${transfer.jobId}">
+            <div class="transfer-cell" role="gridcell">${renderTransferOverlay(file, transfer)}</div>
         </div>`;
     }
-    return `<div ${dataPath} class="file-row">
-        <div class="file-name-cell">${esc(file.filename)}</div>
-        <div class="preview-cell preview-cell-td">${renderPreview(file)}</div>
-        <div class="actions-cell actions-cell-td">${renderActions(file)}</div>
+    const selectable = isBatchSearchEligible(file);
+    const selected = selectable && selectedEpisodePaths.has(file.path);
+    return `<div ${dataPath} class="file-row${selectable ? ' file-row--selectable' : ''}${selected ? ' file-row--selected' : ''}" role="row"${selectable ? ` tabindex="0" aria-selected="${selected}"` : ''}>
+        <div class="file-name-cell" role="gridcell">${esc(file.filename)}</div>
+        <div class="preview-cell preview-cell-td" role="gridcell">${renderPreview(file)}</div>
+        <div class="actions-cell actions-cell-td" role="gridcell">${renderActions(file)}</div>
     </div>`;
 }
 
@@ -73,15 +149,15 @@ function filterFiles(type) {
 function renderPreview(file) {
     const p = filesPreviews[file.path];
     if (!p) return `<div class="no-preview">${tr('btn_other')}</div>`;
-    if (p.loading) return `<div class="loading-cell">◌ ${tr('searching')}</div>`;
-    if (p.error) return `<div class="no-preview">❌ ${esc(p.error)}</div>`;
+    if (p.loading) return `<div class="loading-cell"><i class="mdi mdi-loading mdi-spin"></i> ${tr('searching')}</div>`;
+    if (p.error) return `<div class="no-preview"><i class="mdi mdi-alert-circle-outline"></i> ${esc(p.error)}</div>`;
     if (!p.data) return `<div class="no-preview">${tr('no_result')}</div>`;
     const { source, details } = p.data;
     const notFound = details.not_found || source.not_found;
     // Film : le format par défaut n'a besoin que de titre/année (dispos OMDb).
     // Série : le titre d'épisode est inconnu sans TVDB → pas de renommage.
     const newName = (notFound && file.media_type !== 'movie') ? '' : generateFilename(file, details);
-    const poster = source.poster ? `<img src="${esc(source.poster)}" alt="">` : (file.media_type === 'movie' ? '🎬' : '📺');
+    const poster = source.poster ? `<img src="${esc(source.poster)}" alt="">` : `<i class="mdi ${file.media_type === 'movie' ? 'mdi-film' : 'mdi-television'}"></i>`;
     const isTv = file.media_type !== 'movie';
     const chips = previewChips(source, details, isTv, file.duration);
     const notFoundBadge = notFound
@@ -89,7 +165,7 @@ function renderPreview(file) {
         : '';
     const secondLine = notFound
         ? notFoundBadge
-        : `<div class="rename-preview">➜ ${esc(newName)}</div>`;
+        : `<div class="rename-preview"><i class="mdi mdi-arrow-right"></i> ${esc(newName)}</div>`;
     return `<div class="preview-wrap">
         <div class="preview-poster">${poster}</div>
         <div class="preview-info">
@@ -147,6 +223,7 @@ function applyPathChange(filePath, newPath, newName) {
     if (fileIdx === -1) return;
     
     allFiles[fileIdx] = { ...allFiles[fileIdx], filename: newName, path: newPath };
+    if (selectedEpisodePaths.delete(filePath)) selectedEpisodePaths.add(newPath);
     filesPreviews[newPath] = filesPreviews[filePath];
     delete filesPreviews[filePath];
     
@@ -156,6 +233,7 @@ function applyPathChange(filePath, newPath, newName) {
         oldRow.querySelector('.file-name-cell').textContent = newName;
         oldRow.querySelector('.actions-cell').innerHTML = renderActions(allFiles[fileIdx]);
     }
+    updateBatchSelectionUI();
 }
 
 function updateFileRow(fileOrPath) {

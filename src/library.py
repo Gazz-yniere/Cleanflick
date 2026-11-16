@@ -5,7 +5,7 @@ import time
 import logging
 from pathlib import Path
 
-from . import db, state
+from . import db, naming, state
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +101,14 @@ def folder_size_direct(path):
     Cette variante ne descend jamais dans les sous-dossiers : elle est destinée
     au premier rendu de l'arbre, où une taille complète serait trop coûteuse.
     """
+    try:
+        indexed_at = float(db.meta_get('library_file_sizes_indexed_at', '0') or 0)
+        if indexed_at and time.time() - indexed_at < 24 * 60 * 60:
+            cached = db.library_file_size_sum_direct(os.path.abspath(path))
+            if cached is not None:
+                return cached['size']
+    except Exception as e:
+        logger.warning(f"Library file size cache unavailable for {path}: {e}")
     total = 0
     try:
         for entry in os.scandir(path):
@@ -114,24 +122,159 @@ def folder_size_direct(path):
     return total
 
 
-def tvdb_series_episodes(series_id):
+def _episode_order_candidates(season_types):
+    candidates = [('default', 'official')]
+    for item in season_types or []:
+        if not isinstance(item, dict):
+            continue
+        value = str(item.get('type') or '').strip().lower()
+        label = str(item.get('alternateName') or item.get('name') or '').strip().lower()
+        if value in ('', 'official', 'default'):
+            if not value and 'netflix' in label:
+                candidates.append(('alternate', 'alternate'))
+            continue
+        order = 'alternate' if value == 'netflix' else value
+        candidates.append((order, order))
+    unique = []
+    seen = set()
+    for order, setting in candidates:
+        if order not in seen:
+            unique.append((order, setting))
+            seen.add(order)
+    return unique
+
+
+def _episode_title_key(title):
+    return re.sub(r'\W+', '', str(title or '').casefold())
+
+
+def _local_episode_title(filename):
+    stem = Path(filename).stem
+    match = re.search(
+        r'(?:[Ss]\d{1,2}[Ee]\d{1,3}(?:[-–—~]\s*[Ee]\d{1,3}|[Ee]\d{1,3})?'
+        r'|\b\d{1,2}x\d{2}(?:[-–—~]\d{2})?)\s*[-–—]\s*(.+)$',
+        stem,
+        re.I,
+    )
+    return _episode_title_key(match.group(1)) if match else ''
+
+
+def _best_episode_order(candidates, local_files):
+    """Choose the TVDB order that best covers the episode numbers already on disk."""
+    local_refs = set(local_files)
+    if not local_refs or not candidates:
+        return 'default', [], False
+
+    best_order = next(iter(candidates))
+    best_episodes = candidates[best_order]
+    best_score = (-1, -1)
+    for order, episodes in candidates.items():
+        by_ref = {}
+        for episode in episodes:
+            try:
+                ref = (int(episode.get('s')), int(episode.get('e')))
+            except (TypeError, ValueError):
+                continue
+            by_ref[ref] = _episode_title_key(
+                episode.get('title') or episode.get('episode_title') or episode.get('t')
+            )
+        matched = local_refs & by_ref.keys()
+        title_matches = 0
+        for ref in matched:
+            remote_title = by_ref.get(ref)
+            if not remote_title:
+                continue
+            if any(_local_episode_title(item.get('name')) == remote_title
+                   for item in local_files.get(ref, [])):
+                title_matches += 1
+        score = (len(matched), title_matches)
+        if score > best_score:
+            best_order, best_episodes, best_score = order, episodes, score
+    return best_order, best_episodes, best_score[0] > 0
+
+
+def _normalized_series_episodes(result):
+    episodes = []
+    seen = set()
+    for episode in (result or {}).get('episodes', []):
+        try:
+            season = int(episode.get('s', episode.get('season')))
+            number = int(episode.get('e', episode.get('episode')))
+        except (TypeError, ValueError):
+            continue
+        key = (season, number)
+        if key in seen:
+            continue
+        seen.add(key)
+        episodes.append({
+            's': season,
+            'e': number,
+            'title': episode.get('title') or episode.get('episode_title') or episode.get('t') or '',
+            'airdate': episode.get('airdate') or episode.get('d') or '',
+        })
+    return episodes
+
+
+def tvdb_series_episodes(series_id, series_path=None, season_types=None):
     """Liste complète des épisodes TVDB (toutes saisons), mise en cache 24h."""
     cached = db.series_episodes_get(series_id)
     stale = None
-    order = 'default'
+    meta_record = db.series_meta_get(str(series_id)) or {}
+    meta = meta_record.get('data') or {}
+    configured = str(meta.get('episode_order') or (state.config or {}).get('tvdb_episode_order') or 'auto').lower()
+    auto_order = configured == 'auto'
+    order = 'default' if auto_order else ('default' if configured in ('official', 'default') else
+                                          'alternate' if configured == 'netflix' else configured)
+    order_match = False
+    local_files = {}
+    if auto_order and series_path and os.path.isdir(series_path):
+        _EP_FILE_CACHE.pop(series_path, None)
+        _EP_CACHE.pop(series_path, None)
+        local_files = episode_files(series_path)
+
+    if auto_order and local_files:
+        season_types = season_types or meta.get('season_types') or meta.get('seasonTypes') or []
+        if not season_types and state.api_handler.tvdb:
+            try:
+                details = state.api_handler.tvdb.get_series_details(int(series_id)) or {}
+                season_types = details.get('seasonTypes') or details.get('season_types') or []
+            except Exception as e:
+                logger.warning(f"TVDB season-order lookup failed for {series_id}: {e}")
+        candidate_episodes = {}
+        candidates = _episode_order_candidates(season_types)
+        for candidate_order, _setting in candidates:
+            try:
+                response = state.api_handler.get_series_episodes(series_id, season_type=candidate_order)
+                episodes = _normalized_series_episodes(response)
+                if episodes:
+                    candidate_episodes[candidate_order] = episodes
+            except Exception as e:
+                logger.warning(f"TVDB episode-order lookup failed for {series_id} ({candidate_order}): {e}")
+        if candidate_episodes:
+            order, selected_episodes, order_match = _best_episode_order(candidate_episodes, local_files)
+            if selected_episodes:
+                if order_match:
+                    selected_setting = 'official' if order == 'default' else order
+                    try:
+                        db.series_meta_set(
+                            str(series_id),
+                            meta_record.get('imdb_id', ''),
+                            {**meta, 'episode_order': selected_setting},
+                        )
+                    except Exception as e:
+                        logger.warning(f"TVDB episode-order preference save failed for {series_id}: {e}")
+                db.series_episodes_set(series_id, {
+                    'episodes': selected_episodes, 'order': order, 'order_match': order_match,
+                })
+                return selected_episodes
+
     try:
-        meta = (db.series_meta_get(str(series_id)) or {}).get('data') or {}
-        configured = str(meta.get('episode_order') or state.config.get('tvdb_episode_order') or 'auto').lower()
-        types = meta.get('season_types') or []
-        has_netflix = any('netflix' in str(t.get('alternateName') or '').lower()
-                          for t in types if isinstance(t, dict))
-        if configured in ('alternate', 'netflix') or (configured == 'auto' and has_netflix):
-            order = 'alternate'
+        if cached and cached.get('episodes'):
+            stale = cached['episodes']
     except Exception:
         pass
-    if cached and cached.get('episodes'):
-        stale = cached['episodes']
-    if cached and cached.get('episodes') and cached.get('order', 'default') == order and len(cached['episodes']) < 500:
+    if (cached and cached.get('episodes') and cached.get('order', 'default') == order
+            and len(cached['episodes']) < 500 and not (auto_order and local_files)):
         # Cache obsolète sans airdate (précédent au split manquant/à venir) : on
         # re-récupère pour que la date de diffusion soit disponible.
         if any('airdate' not in e for e in cached['episodes']):
@@ -140,23 +283,62 @@ def tvdb_series_episodes(series_id):
             return cached['episodes']
     try:
         res = state.api_handler.get_series_episodes(series_id, season_type=order)
-        raw = [{'s': e.get('s'), 'e': e.get('e'), 'title': e.get('title', ''), 'airdate': e.get('airdate', '')}
-               for e in res.get('episodes', []) if e.get('s') is not None and e.get('e') is not None]
-        # Déduplication par (saison, episode) : la réponse TVDB peut contenir des doublons.
-        episodes = []
-        seen = set()
-        for e in raw:
-            key = (e['s'], e['e'])
-            if key in seen:
-                continue
-            seen.add(key)
-            episodes.append(e)
+        episodes = _normalized_series_episodes(res)
         if episodes:
-            db.series_episodes_set(series_id, {'episodes': episodes, 'order': order})
+            db.series_episodes_set(series_id, {
+                'episodes': episodes, 'order': order, 'order_match': order_match,
+            })
             return episodes
     except Exception as e:
         logger.warning(f"Missing-episodes TVDB fetch error for {series_id}: {e}")
     return stale or []
+
+
+def enrich_episode_title_translations(series_id, cached):
+    """Ajoute au cache les titres d'épisodes demandés par le format TV."""
+    languages = naming.episode_title_languages()
+    episodes = (cached or {}).get('episodes') or []
+    if not languages or not episodes:
+        return cached or {}
+
+    loaded = set((cached or {}).get('episode_title_languages') or [])
+    changed = False
+    order = (cached or {}).get('order') or 'default'
+    for lang in languages:
+        if lang in loaded:
+            continue
+        try:
+            response = state.api_handler.get_series_episodes(
+                series_id, season_type=order, lang=lang,
+            )
+            localized = (response or {}).get('episodes') or []
+            if not localized:
+                logger.warning(f"TVDB episode translations unavailable for {series_id} ({lang})")
+                continue
+            translated_by_ref = {}
+            for episode in localized:
+                season = episode.get('s')
+                if season is None:
+                    season = episode.get('season')
+                number = episode.get('e')
+                if number is None:
+                    number = episode.get('episode')
+                translated_by_ref[(season, number)] = (
+                    episode.get('episode_title') or episode.get('title') or ''
+                )
+            for episode in episodes:
+                translated = translated_by_ref.get((episode.get('s'), episode.get('e')))
+                if translated:
+                    episode.setdefault('episode_title_translations', {})[lang] = translated
+            loaded.add(lang)
+            changed = True
+        except Exception as e:
+            logger.warning(f"TVDB episode translations failed for {series_id} ({lang}): {e}")
+
+    if changed:
+        cached['episode_title_languages'] = sorted(loaded)
+        db.series_episodes_set(str(series_id), cached)
+    return cached
 
 
 _EP_REF_PATTERNS = [
@@ -401,6 +583,6 @@ def ensure_library_series_episodes():
             if entry.is_dir(follow_symlinks=False):
                 m = re.search(r'\[tvdbid-([0-9]+)\]', entry.name, re.I)
                 if m:
-                    tvdb_series_episodes(m.group(1))
+                    tvdb_series_episodes(m.group(1), entry.path)
     except Exception as e:
         logger.warning(f"Library series episodes prefill error: {e}")

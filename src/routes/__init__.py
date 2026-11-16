@@ -35,6 +35,13 @@ def create_app():
     if not os.environ.get('PYTEST_CURRENT_TEST'):
         cache_mod.run_purge_background()
         cache_mod.start_media_prewarm()
+        # Pré-remplit le cache TVDB des épisodes pour toutes les séries de la
+        # librairie (1 req/série) : sans ça, les pastilles « x/y épisodes » de
+        # la grille restent vides pour les séries jamais passées par le worker
+        # de recherche (nouveaux déploiements, BDD neuve).
+        import threading
+        from .. import library as library_mod
+        threading.Thread(target=library_mod.ensure_library_series_episodes, daemon=True).start()
 
     from . import auth, browse, scan, search, library, files, config, usage
     app.register_blueprint(auth.bp)

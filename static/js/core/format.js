@@ -10,10 +10,13 @@ function interpolate(template, vars) {
         if (fmt) {
             const code = fmt.slice(1).toLowerCase();
             const trans = vars._translations || {};
-            // t/episode_title exclus : {t:lang} retombe sur le titre d'épisode,
-            // jamais sur la map de traductions de la série (nom de série).
-            if (/^[a-zA-Z]{2,3}$/.test(code) && ['n','title','original_title'].includes(name))
-                return translateLang(trans, code, val);
+            const episodeTrans = vars._episode_translations || {};
+            if (/^[a-zA-Z]{2,3}$/.test(code)) {
+                if (['n','title','original_title'].includes(name))
+                    return translateLang(trans, code, val);
+                if (['t','episode_title'].includes(name))
+                    return translateLang(episodeTrans, code, val);
+            }
         }
         if (val === undefined || val === null || String(val).trim() === '' || String(val) === 'None') return '';
         const s = String(val).trim();
@@ -57,6 +60,7 @@ function generateFilename(file, details) {
         imdbid: details.imdbid || details.imdb || '', imdb: details.imdbid || details.imdb || '',
         tmdbid: details.tmdbid || details.tmdb || '', tmdb: details.tmdbid || details.tmdb || '',
         _translations: details.translations || {},
+        _episode_translations: details.episode_title_translations || {},
     };
     const result = interpolate(fmt, vars)
         .replace(/:/g, ' -').replace(/[<>"\/\\|?*]/g, '')
@@ -69,7 +73,6 @@ function mergeDetails(details, result) {
     details.imdb = details.imdbid;
     details.tmdbid = details.tmdbid || result.tmdb_id || '';
     details.tmdb = details.tmdbid;
-    if (!details.translations || !Object.keys(details.translations).length)
-        details.translations = result.translations || {};
+    details.translations = { ...(result.translations || {}), ...(details.translations || {}) };
     return details;
 }

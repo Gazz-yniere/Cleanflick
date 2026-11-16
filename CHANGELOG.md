@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.0.13] - 2026-11-16
+
+### Added
+- **Grouped series search** — select multiple episode rows directly (no checkboxes) and apply one TVDB series result to all selected files, with per-episode metadata, progress, and cached results.
+- **Database-backed library file sizes** — file sizes are indexed once and exposed for fast size-filter ranges instead of repeatedly traversing media folders.
+
+### Improved
+- **Unified visual theme** — refreshed the header, footer, buttons, and icons around a consistent orange accent and improved styling across the files, library, history, configuration, and login views.
+- **Library filters** — reorganized the filter controls and made slider updates more responsive; size filtering uses cached database values.
+- **Library and history performance** — reduced repeated filesystem work in the library and added indexed, paginated history loading for large histories.
+- **TVDB episode-order matching** — better selects the order that matches local episode numbering when TVDB offers multiple orders, including Netflix order.
+- **Localized episode renaming** — `{t:en}`, `{t:fr}`, and `{episode_title:lang}` formats now use localized episode titles in Files and Library renames, including multi-episode files.
+- **Grouped-search completion state** — the completed batch action is labeled “Done” rather than “Cancel”.
+
 ## [1.0.12] - 2026-09-23
 
 ### Added

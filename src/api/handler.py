@@ -53,7 +53,9 @@ class APIHandler:
         except ValueError:
             return {'id': movie_id, 'source': source}
 
-    def get_tv_details(self, tv_id: str, season: int = 1, episode: int = 1, source: str = 'tvdb', search_data: Dict = None) -> Dict:
+    def get_tv_details(self, tv_id: str, season: int = 1, episode: int = 1, source: str = 'tvdb',
+                       search_data: Optional[Dict] = None,
+                       episode_title_languages: Optional[List[str]] = None) -> Dict:
         if not self._require_tvdb() or source != 'tvdb':
             return {'id': tv_id, 'source': source}
         try:
@@ -64,18 +66,34 @@ class APIHandler:
                 'sxe': f"{season}x{str(episode).zfill(2)}",
                 's00e00': f"S{str(season).zfill(2)}E{str(episode).zfill(2)}",
             })
-            if season and episode:
+            if season is not None and episode is not None:
                 try:
-                    for ep in self.tvdb.get_series_episodes(series_id, season=season).get('episodes', []):
-                        if ep.get('season') == season and ep.get('episode') == episode:
-                            details['episode_title'] = ep.get('episode_title', ep.get('title', ''))
-                            details['t'] = details['episode_title']
-                            details['episode_overview'] = ep.get('overview', '')
-                            details['airdate'] = ep.get('airdate', '')
-                            details['absolute'] = ep.get('absolute')
-                            details['episode_rating'] = ep.get('rating')
-                            details['episode_runtime'] = ep.get('runtime')
-                            break
+                    episodes = self.tvdb.get_series_episodes(series_id, season=season).get('episodes', [])
+                    episode_data = next((ep for ep in episodes
+                                         if ep.get('season') == season and ep.get('episode') == episode), None)
+                    if episode_data:
+                        details['episode_title'] = episode_data.get('episode_title', episode_data.get('title', ''))
+                        details['t'] = details['episode_title']
+                        details['episode_overview'] = episode_data.get('overview', '')
+                        details['airdate'] = episode_data.get('airdate', '')
+                        details['absolute'] = episode_data.get('absolute')
+                        details['episode_rating'] = episode_data.get('rating')
+                        details['episode_runtime'] = episode_data.get('runtime')
+                        episode_translations = {}
+                        for lang in episode_title_languages or []:
+                            try:
+                                localized = self.tvdb.get_series_episodes(
+                                    series_id, season=season, lang=lang,
+                                ).get('episodes', [])
+                                translated = next((ep for ep in localized
+                                                   if ep.get('season') == season and ep.get('episode') == episode), None)
+                                translated_title = (translated or {}).get('episode_title') or (translated or {}).get('title')
+                                if translated_title:
+                                    episode_translations[lang] = translated_title
+                            except Exception as e:
+                                logger.warning(f"Could not fetch episode translation S{season}E{episode} ({lang}): {e}")
+                        if episode_translations:
+                            details['episode_title_translations'] = episode_translations
                 except Exception as e:
                     logger.warning(f"Could not fetch episode S{season}E{episode}: {e}")
             return details
@@ -83,11 +101,13 @@ class APIHandler:
             return {'id': tv_id, 'source': source}
 
     def get_series_episodes(self, series_id: str, season: Optional[int] = None, page: int = 0,
-                            season_type: str = 'default') -> Dict:
+                            season_type: str = 'default', lang: Optional[str] = None) -> Dict:
         tvdb = self._require_tvdb()
         if not tvdb:
             return {'series_id': series_id, 'episodes': [], 'source': 'tvdb'}
         try:
+            if lang:
+                return tvdb.get_series_episodes(int(series_id), season, page, season_type, lang)
             return tvdb.get_series_episodes(int(series_id), season, page, season_type)
         except ValueError:
             return {'series_id': series_id, 'episodes': [], 'source': 'tvdb'}

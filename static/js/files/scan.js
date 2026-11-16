@@ -51,7 +51,7 @@ function flashNewFiles(paths, rootEl) {
 // ── Scan ──────────────────────────────────────────────────────────────────────
 function scanFiles() {
     const tbody = document.getElementById('files-tbody');
-    tbody.innerHTML = `<div class="loading-row"><span class="spinner"></span> ${tr('scanning')}</div>`;
+    tbody.innerHTML = Array.from({ length: 6 }, () => `<div class="loading-row skeleton skeleton-row" role="row"><div role="gridcell"></div></div>`).join('');
     allFiles = [];
     fetch('/api/scan')
         .then(r => { if (r.status === 401) { window.location='/login'; throw new Error('401'); } if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
@@ -73,7 +73,7 @@ function scanFiles() {
                 if (!filesPreviews[file.path]) enqueuePreview(file);
             });
         })
-        .catch(e => { if (!e.message.includes('401')) tbody.innerHTML = `<tr><td colspan="4" class="message error">${tr('err_scan')} ${esc(e.message)}</td></tr>`; });
+        .catch(e => { if (!e.message.includes('401')) tbody.innerHTML = `<div class="file-row" role="row"><div role="gridcell" class="message error">${tr('err_scan')} ${esc(e.message)}</div></div>`; });
 }
 
 function enqueuePreview(file) {

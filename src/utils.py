@@ -1,5 +1,6 @@
 """Utilitaires de fichiers : déplacement, progression, versions statiques."""
 import hashlib
+import logging
 import os
 import re
 import shutil
@@ -9,6 +10,8 @@ from pathlib import Path
 
 from . import db, state
 from .history import append_history
+
+logger = logging.getLogger(__name__)
 
 
 def _ensure_dir(path):
@@ -121,8 +124,9 @@ def _migrate_file_cache(old_p, new_p):
             old_fkey = hashlib.md5(f"{os.path.abspath(old_p)}|{os.path.getsize(old_p) if os.path.exists(old_p) else 0}|{int(os.path.getmtime(old_p)) if os.path.exists(old_p) else 0}".encode('utf-8')).hexdigest()
             new_fkey = hashlib.md5(f"{os.path.abspath(new_p)}|{fsize}|{fmtime}".encode('utf-8')).hexdigest()
             db.file_cache_migrate(old_fkey, new_fkey, os.path.abspath(new_p), fsize, fmtime, os.path.basename(old_p))
-    except Exception:
-        pass
+            db.library_file_size_migrate(old_p, new_p, fsize, fmtime)
+    except Exception as e:
+        logger.warning(f"File cache migration failed for {old_p} -> {new_p}: {e}")
 
 
 def _make_progress(file_size=0, finished=False, error=None, phase='copying', **extra):
@@ -167,18 +171,7 @@ def _run_file_op(job_id, src_path, dst_path, history_entry):
                         state.scan_last_snapshot = watcher._scan_snapshot()
                 except Exception:
                     pass
-                # Attempt to migrate file cache from old path fingerprint to new path
-                try:
-                    old_p = str(src_path)
-                    new_p = str(dst_path)
-                    if os.path.exists(new_p):
-                        fsize = os.path.getsize(new_p)
-                        fmtime = int(os.path.getmtime(new_p))
-                        old_fkey = hashlib.md5(f"{os.path.abspath(old_p)}|{os.path.getsize(old_p) if os.path.exists(old_p) else 0}|{int(os.path.getmtime(old_p)) if os.path.exists(old_p) else 0}".encode('utf-8')).hexdigest()
-                        new_fkey = hashlib.md5(f"{os.path.abspath(new_p)}|{fsize}|{fmtime}".encode('utf-8')).hexdigest()
-                        db.file_cache_migrate(old_fkey, new_fkey, os.path.abspath(new_p), fsize, fmtime, os.path.basename(old_p))
-                except Exception:
-                    pass
+                _migrate_file_cache(str(src_path), str(dst_path))
             else:
                 raise FileNotFoundError(f"Vérification impossible après déplacement : {src_path} -> {dst_path}")
         except Exception as e:

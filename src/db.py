@@ -34,6 +34,8 @@ def init_db():
         to_name TEXT,
         extra TEXT
     )''')
+    cur.execute('CREATE INDEX IF NOT EXISTS idx_history_date_id ON history(date DESC, id DESC)')
+    cur.execute('CREATE INDEX IF NOT EXISTS idx_history_op ON history(op)')
     cur.execute('''
     CREATE TABLE IF NOT EXISTS search_cache (
         key TEXT PRIMARY KEY,
@@ -118,6 +120,17 @@ def init_db():
         loaded_at INTEGER
     )''')
     cur.execute('''
+    CREATE TABLE IF NOT EXISTS library_file_size_cache (
+        path TEXT PRIMARY KEY,
+        parent TEXT NOT NULL,
+        size INTEGER NOT NULL,
+        mtime INTEGER NOT NULL,
+        is_video INTEGER NOT NULL DEFAULT 0,
+        scan_id INTEGER NOT NULL DEFAULT 0
+    )''')
+    cur.execute('CREATE INDEX IF NOT EXISTS idx_library_file_size_parent ON library_file_size_cache(parent)')
+    cur.execute('CREATE INDEX IF NOT EXISTS idx_library_file_size_size ON library_file_size_cache(size)')
+    cur.execute('''
     CREATE TABLE IF NOT EXISTS app_meta (
         key TEXT PRIMARY KEY,
         value TEXT
@@ -161,27 +174,61 @@ def add_history_batch(entries):
         conn.close()
 
 
-def get_history():
+def _history_row_to_item(row):
+    extra = {}
+    try:
+        extra = json.loads(row['extra'] or '{}')
+    except Exception:
+        extra = {}
+    return {
+        'id': row['id'], 'op': row['op'], 'date': row['date'],
+        'from_path': row['from_path'], 'from_name': row['from_name'],
+        'to_path': row['to_path'], 'to_name': row['to_name'],
+        **extra
+    }
+
+
+def get_history(limit=None, offset=0):
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute('SELECT * FROM history ORDER BY date DESC')
+    query = 'SELECT * FROM history ORDER BY date DESC, id DESC'
+    if limit is not None:
+        query += ' LIMIT ? OFFSET ?'
+        cur.execute(query, (limit, offset))
+    elif offset:
+        query += ' LIMIT -1 OFFSET ?'
+        cur.execute(query, (offset,))
+    else:
+        cur.execute(query)
     rows = cur.fetchall()
-    result = []
-    for r in rows:
-        extra = {}
-        try:
-            extra = json.loads(r['extra'] or '{}')
-        except Exception:
-            extra = {}
-        item = {
-            'id': r['id'], 'op': r['op'], 'date': r['date'],
-            'from_path': r['from_path'], 'from_name': r['from_name'],
-            'to_path': r['to_path'], 'to_name': r['to_name'],
-            **extra
-        }
-        result.append(item)
     conn.close()
-    return result
+    return [_history_row_to_item(row) for row in rows]
+
+
+def get_history_entry(entry_id):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute('SELECT * FROM history WHERE id = ?', (entry_id,))
+    row = cur.fetchone()
+    conn.close()
+    return _history_row_to_item(row) if row else None
+
+
+def get_reverted_history_ids():
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT extra FROM history WHERE op = 'revert'")
+    rows = cur.fetchall()
+    conn.close()
+    reverted_ids = set()
+    for row in rows:
+        try:
+            revert_of = json.loads(row['extra'] or '{}').get('revert_of')
+            if revert_of:
+                reverted_ids.add(revert_of)
+        except (TypeError, ValueError):
+            continue
+    return reverted_ids
 
 
 def clear_history():
@@ -379,6 +426,194 @@ def omdb_episode_get(key: str):
             return json.loads(r['data_json'] or '{}')
         except Exception:
             return {}
+    finally:
+        conn.close()
+
+
+def library_file_sizes_get(paths):
+    """Return cached sizes for a set of media paths in bounded SQL batches."""
+    out = {}
+    paths = list(dict.fromkeys(paths or []))
+    if not paths:
+        return out
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        for offset in range(0, len(paths), 900):
+            batch = paths[offset:offset + 900]
+            placeholders = ','.join('?' for _ in batch)
+            cur.execute(
+                f'SELECT path, size, mtime, is_video FROM library_file_size_cache WHERE path IN ({placeholders})',
+                batch,
+            )
+            out.update({
+                row['path']: {'size': row['size'], 'mtime': row['mtime'], 'is_video': bool(row['is_video'])}
+                for row in cur.fetchall()
+            })
+        return out
+    finally:
+        conn.close()
+
+
+def library_file_sizes_set(entries, scan_id=0):
+    """Persist file sizes in one transaction; scan_id marks a full index pass."""
+    if not entries:
+        return
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.executemany('''
+            INSERT INTO library_file_size_cache (path, parent, size, mtime, is_video, scan_id)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(path) DO UPDATE SET
+                parent = excluded.parent,
+                size = excluded.size,
+                mtime = excluded.mtime,
+                is_video = excluded.is_video,
+                scan_id = CASE WHEN excluded.scan_id = 0
+                               THEN library_file_size_cache.scan_id
+                               ELSE excluded.scan_id END
+        ''', [
+            (entry['path'], entry['parent'], int(entry['size']), int(entry['mtime']),
+             int(bool(entry.get('is_video'))), int(scan_id))
+            for entry in entries
+        ])
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def library_file_sizes_range():
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute('SELECT MIN(size), MAX(size), COUNT(*) FROM library_file_size_cache WHERE is_video = 1 AND size > 0')
+        row = cur.fetchone()
+        return {'min': row[0], 'max': row[1], 'count': row[2]}
+    finally:
+        conn.close()
+
+
+def library_file_size_sum_direct(parent):
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute('SELECT SUM(size), COUNT(*) FROM library_file_size_cache WHERE parent = ?', (parent,))
+        row = cur.fetchone()
+        return {'size': row[0] or 0, 'count': row[1]} if row[1] else None
+    finally:
+        conn.close()
+
+
+def library_file_sizes_delete_unseen(root, scan_id):
+    prefix = os.path.abspath(root).rstrip(os.sep) + os.sep
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            'DELETE FROM library_file_size_cache WHERE substr(path, 1, ?) = ? AND scan_id != ?',
+            (len(prefix), prefix, int(scan_id)),
+        )
+        conn.commit()
+        return cur.rowcount
+    finally:
+        conn.close()
+
+
+def library_file_sizes_delete_under(path):
+    prefix = os.path.abspath(path).rstrip(os.sep)
+    if not prefix:
+        return
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            'DELETE FROM library_file_size_cache WHERE path = ? OR substr(path, 1, ?) = ?',
+            (prefix, len(prefix + os.sep), prefix + os.sep),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def library_file_size_migrate(old_path, new_path, size, mtime):
+    new_path = os.path.abspath(new_path)
+    old_path = os.path.abspath(old_path)
+    is_video = os.path.splitext(new_path)[1].lower() in {
+        '.mkv', '.mp4', '.avi', '.mov', '.wmv', '.m4v', '.ts', '.flv', '.webm',
+    }
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute('DELETE FROM library_file_size_cache WHERE path = ?', (old_path,))
+        cur.execute('DELETE FROM media_duration_cache WHERE path = ?', (new_path,))
+        cur.execute('''
+            INSERT OR REPLACE INTO library_file_size_cache (path, parent, size, mtime, is_video, scan_id)
+            VALUES (?, ?, ?, ?, ?, 0)
+        ''', (new_path, os.path.dirname(new_path), int(size), int(mtime), int(is_video)))
+        cur.execute('UPDATE media_duration_cache SET path = ?, size = ?, mtime = ? WHERE path = ?',
+                    (new_path, int(size), int(mtime), old_path))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def library_file_sizes_move_under(old_path, new_path):
+    old_path = os.path.abspath(old_path).rstrip(os.sep)
+    new_path = os.path.abspath(new_path).rstrip(os.sep)
+    old_prefix, new_prefix = old_path + os.sep, new_path + os.sep
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            'DELETE FROM library_file_size_cache WHERE path = ? OR substr(path, 1, ?) = ?',
+            (new_path, len(new_prefix), new_prefix),
+        )
+        for table in ('media_duration_cache', 'folder_size_cache'):
+            cur.execute(
+                f'DELETE FROM {table} WHERE path = ? OR substr(path, 1, ?) = ?',
+                (new_path, len(new_prefix), new_prefix),
+            )
+        for table, column in (
+            ('library_file_size_cache', 'path'),
+            ('media_duration_cache', 'path'),
+            ('folder_size_cache', 'path'),
+        ):
+            cur.execute(
+                f'UPDATE {table} SET {column} = ? || substr({column}, ?) '
+                f'WHERE {column} = ? OR substr({column}, 1, ?) = ?',
+                (new_path, len(old_path) + 1, old_path, len(old_prefix), old_prefix),
+            )
+        cur.execute(
+            'UPDATE library_file_size_cache SET parent = ? || substr(parent, ?) '
+            'WHERE parent = ? OR substr(parent, 1, ?) = ?',
+            (new_path, len(old_path) + 1, old_path, len(old_prefix), old_prefix),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def media_durs_get_many(paths):
+    out = {}
+    paths = list(dict.fromkeys(paths or []))
+    if not paths:
+        return out
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        for offset in range(0, len(paths), 900):
+            batch = paths[offset:offset + 900]
+            placeholders = ','.join('?' for _ in batch)
+            cur.execute(
+                f'SELECT path, size, mtime, minutes FROM media_duration_cache WHERE path IN ({placeholders})',
+                batch,
+            )
+            out.update({
+                row['path']: {'size': row['size'], 'mtime': row['mtime'], 'minutes': row['minutes']}
+                for row in cur.fetchall()
+            })
+        return out
     finally:
         conn.close()
 

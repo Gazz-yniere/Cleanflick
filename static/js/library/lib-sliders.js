@@ -51,6 +51,14 @@ function createDualSlider(host, cfg) {
     };
 }
 
+// Un seul passage par frame pendant le drag : les valeurs intermédiaires sont
+// ignorées pour que l'interface reste fluide.
+let _libFilterFrame = 0;
+function throttledApplyLibFilter() {
+    if (_libFilterFrame) return;
+    _libFilterFrame = requestAnimationFrame(() => { _libFilterFrame = 0; applyLibFilter(); });
+}
+
 // ── Slider tranche d'âge : 6 positions, 1 position = 1 tranche (step = 1). ──
 const AGE_SLIDER_TICKS = ['Tous', '7+', '10+', '13+', '16+', '18+'];
 let libAgeSliderCtl = null;
@@ -62,7 +70,7 @@ const libAgeSliderCfg = {
         const a = Math.round(l), b = Math.round(h);
         libAgeRange = (a === 0 && b === 5) ? null : [a, b];
         updateLibFacetButtons();
-        applyLibFilter();
+        throttledApplyLibFilter();
     },
 };
 function libAgeSliderSync() {
@@ -82,7 +90,7 @@ const libRatingSliderCfg = {
     onChange: (l, h) => {
         libRatingRange = (l === 0 && h === 10) ? null : [l, h];
         updateLibFacetButtons();
-        applyLibFilter();
+        throttledApplyLibFilter();
     },
 };
 function libRatingSliderSync() {
@@ -95,25 +103,31 @@ function libRatingReset() {
 }
 
 // ── Slider taille : domaine [min, max] des tailles chargées, échelle log,
-//    ~100 positions (step calculé sur le domaine log). ───────────────────────
+//    ~100 positions (step calculé sur le domaine log). Rendu depuis le cache
+//    facettes (lib-filters.js) : aucun parcours de l'arbre ici. ──────────────
 function libSizeShowEmpty() {
     const host = document.getElementById('lib-size-slider');
     if (host) host.innerHTML = `<div class="lib-slider-empty">${tr('lib_filter_no_range')}</div>`;
 }
-function libSizeRebuild() {
+function libSizeShowLoading() {
+    const host = document.getElementById('lib-size-slider');
+    if (host) host.innerHTML = `<div class="lib-slider-empty"><span class="lib-spinner"></span> ${tr('lib_filter_loading_range')}</div>`;
+}
+function libSizeRender() {
     const host = document.getElementById('lib-size-slider');
     if (!host) return;
-    const sizes = [];
-    document.querySelectorAll('#library-tree .lib-node').forEach(n => {
-        const s = n._sort && n._sort.size;
-        // Fichiers uniquement : les tailles de dossiers/racines sont récursives et
-        // faussent le domaine (ex. racine = toute la bibliothèque).
-        if (n._sort && !n._sort.is_dir && typeof s === 'number' && s > 0) sizes.push(s);
-    });
-    if (!sizes.length) { libSizeShowEmpty(); return; }
-    sizes.sort((a, b) => a - b);
-    const lo = sizes[0];
-    const hi = sizes[sizes.length - 1];
+    if (!_libSizeRangeLoaded) {
+        libSizeShowLoading();
+        loadLibSizeRange();
+        return;
+    }
+    const range = _libFacetCache.size;
+    if (!range) {
+        libSizeShowEmpty();
+        return;
+    }
+    const lo = range[0];
+    const hi = range[1];
     const loL = Math.max(0, Math.log10(lo));
     const hiL = Math.log10(Math.max(hi, lo * 10));
     const span = hiL - loL;
@@ -130,31 +144,26 @@ function libSizeRebuild() {
             const maxB = Math.round(Math.pow(10, h));
             libSizeRange = (minB <= lo && maxB >= hi) ? null : [minB, maxB];
             updateLibFacetButtons();
-            applyLibFilter();
+            throttledApplyLibFilter();
         },
     });
 }
 function libSizeReset() {
     libSizeRange = null;
-    libSizeRebuild();
+    libSizeRender();
 }
 
 // ── Slider date : domaine [anneeMin, anneeMax] des années de sortie connues. ─
-function libDateRebuild() {
+function libDateRender() {
     const host = document.getElementById('lib-date-slider');
     if (!host) return;
-    const years = [];
-    document.querySelectorAll('#library-tree .lib-node').forEach(n => {
-        const y = n._sort && n._sort.year;
-        if (typeof y === 'number' && y > 0) years.push(y);
-    });
-    if (!years.length) {
+    const range = _libFacetCache.year;
+    if (!range) {
         host.innerHTML = `<div class="lib-slider-empty">${tr('lib_filter_no_range')}</div>`;
         return;
     }
-    years.sort((a, b) => a - b);
-    const lo = years[0];
-    const hi = years[years.length - 1];
+    const lo = range[0];
+    const hi = range[1];
     const cur = libDateRange || [lo, hi];
     createDualSlider(host, {
         min: lo, max: hi, step: 1,
@@ -165,13 +174,13 @@ function libDateRebuild() {
             const a = Math.round(l), b = Math.round(h);
             libDateRange = (a <= lo && b >= hi) ? null : [a, b];
             updateLibFacetButtons();
-            applyLibFilter();
+            throttledApplyLibFilter();
         },
     });
 }
 function libDateReset() {
     libDateRange = null;
-    libDateRebuild();
+    libDateRender();
 }
 
 function initLibSliders() {
@@ -181,6 +190,6 @@ function initLibSliders() {
     if (ratingHost && !libRatingSliderCtl) libRatingSliderCtl = createDualSlider(ratingHost, libRatingSliderCfg);
     libAgeSliderSync();
     libRatingSliderSync();
-    libSizeRebuild();
-    libDateRebuild();
+    libSizeRender();
+    libDateRender();
 }

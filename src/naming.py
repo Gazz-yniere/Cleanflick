@@ -4,6 +4,7 @@ Le renommage de la bibliothèque est calculé côté serveur pour que la route
 de renommage de dossier série reste synchrone : le parsing TVDB (titres
 d'épisodes, épisodes manquants, enrichissement) passe en arrière-plan."""
 import re
+from typing import List
 
 from . import state
 
@@ -22,6 +23,18 @@ _LANG_MAP_INV = {v: k for k, v in _LANG_MAP.items()}
 # t/episode_title sont volontairement exclus : un {t:lang} doit retomber sur le
 # titre d'épisode (langue originale), jamais sur le nom de série.
 _TRANS_NAMES = ('n', 'title', 'original_title')
+
+
+def episode_title_languages(template=None) -> List[str]:
+    """TVDB language codes requested by localized episode-title tokens."""
+    if template is None:
+        template = (state.config or {}).get('tv_format', '')
+    codes = re.findall(r'\{(?:t|episode_title):([a-zA-Z]{2,3})\}', template or '')
+    languages: List[str] = []
+    for code in codes:
+        language = code.lower()
+        languages.append(_LANG_MAP.get(language) or language)
+    return list(dict.fromkeys(languages))
 
 
 def clean_title(title):
@@ -61,14 +74,18 @@ def interpolate(template, vars_):
     sur le titre d'épisode (jamais le nom de série). Sinon formatage numérique
     0Nd/d. Valeurs vides -> chaîne vide."""
     translations = vars_.get('_translations') or {}
+    episode_translations = vars_.get('_episode_translations') or {}
 
     def _repl(m):
         name, fmt = m.group(1), m.group(2)
         val = vars_.get(name)
         if fmt:
             code = fmt[1:].lower()
-            if re.fullmatch(r'[a-zA-Z]{2,3}', code) and name in _TRANS_NAMES:
-                return _translate(translations, code, val)
+            if re.fullmatch(r'[a-zA-Z]{2,3}', code):
+                if name in _TRANS_NAMES:
+                    return _translate(translations, code, val)
+                if name in ('t', 'episode_title'):
+                    return _translate(episode_translations, code, val)
         if val is None or str(val).strip() == '' or str(val) == 'None':
             return ''
         s = str(val).strip()
@@ -119,6 +136,7 @@ def _vars_for(file, details):
         'tmdbid': details.get('tmdbid') or details.get('tmdb') or '',
         'tmdb': details.get('tmdbid') or details.get('tmdb') or '',
         '_translations': details.get('translations') or {},
+        '_episode_translations': details.get('episode_title_translations') or {},
     }
 
 

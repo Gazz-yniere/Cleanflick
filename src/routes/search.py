@@ -3,7 +3,7 @@ import logging
 
 from flask import Blueprint, jsonify, request
 
-from .. import db, state
+from .. import db, naming, state
 from ..auth import login_required
 from ..cache import file_cache_lookup, file_cache_store, params_cache_key
 from ..api import omdb
@@ -64,7 +64,10 @@ def _filter_for_file(results, file_imdb, media_type, title, year):
     if m is not None:
         rest = [r for r in results if r is not m]
         m = dict(m)
-        m.pop('not_found', None)
+        # Le stub OMDb (id 0) doit rester marqué not_found : sans ce drapeau,
+        # le client appellerait /api/movie/0 après un rechargement.
+        if str(m.get('id')) not in ('0', ''):
+            m.pop('not_found', None)
         return [m] + rest
     stub = _omdb_stub(file_imdb, media_type, title, year)
     return stub if stub else []
@@ -282,7 +285,10 @@ def api_tv_details(tv_id):
     season = request.args.get('season', 1, type=int)
     episode = request.args.get('episode', 1, type=int)
     source = request.args.get('source', 'tvdb')
+    episode_title_languages = naming.episode_title_languages()
     cache_key = f"{tv_id}:s{season}e{episode}"
+    if episode_title_languages:
+        cache_key += ':lang-' + '-'.join(episode_title_languages)
     try:
         cached = db.details_get('tv', cache_key)
         if cached is not None:
@@ -293,12 +299,18 @@ def api_tv_details(tv_id):
             return jsonify(out)
     except Exception:
         pass
-    details = state.api_handler.get_tv_details(str(tv_id), season, episode, source)
+    if episode_title_languages:
+        details = state.api_handler.get_tv_details(
+            str(tv_id), season, episode, source,
+            episode_title_languages=episode_title_languages,
+        )
+    else:
+        details = state.api_handler.get_tv_details(str(tv_id), season, episode, source)
     try:
         db.details_set('tv', cache_key, details)
     except Exception:
         pass
-    if details.get('title') and season and episode:
+    if details.get('title') and season is not None and episode is not None:
         try:
             omdb.fetch_omdb_episode(details.get('imdbid') or details.get('imdb') or '', details.get('title'), details.get('year'), season, episode)
             ekey = f"{(details.get('imdbid') or details.get('imdb') or '').strip().lower()}:y{details.get('year')}:s{int(season):02d}e{int(episode):02d}"

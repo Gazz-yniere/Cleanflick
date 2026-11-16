@@ -32,6 +32,98 @@ def test_present_episodes_multi_episode_file(tmp_path):
     assert library.present_episodes(str(d)) == {(1, 1), (1, 2), (1, 3)}
 
 
+def test_episode_order_matching_prefers_official_when_local_season_matches(tmp_path):
+    folder = tmp_path / 'series'
+    folder.mkdir()
+    (folder / 'Show - S01E01 - Pilot.mkv').write_bytes(b'x')
+    (folder / 'Show - S01E02 - Finale.mkv').write_bytes(b'x')
+    local_files = library.episode_files(str(folder))
+    candidates = {
+        'default': [
+            {'s': 1, 'e': 1, 'title': 'Pilot'},
+            {'s': 1, 'e': 2, 'title': 'Finale'},
+        ],
+        'alternate': [
+            {'s': 1, 'e': 1, 'title': 'Part One'},
+            {'s': 1, 'e': 2, 'title': 'Part Two'},
+            {'s': 2, 'e': 1, 'title': 'The Beginning'},
+        ],
+    }
+
+    order, episodes, matched = library._best_episode_order(candidates, local_files)
+
+    assert order == 'default'
+    assert len(episodes) == 2
+    assert matched
+
+
+def test_episode_order_matching_selects_alternate_when_local_numbers_match_it(tmp_path):
+    folder = tmp_path / 'series'
+    folder.mkdir()
+    (folder / 'Show - S01E01 - Part One.mkv').write_bytes(b'x')
+    (folder / 'Show - S02E01 - The Beginning.mkv').write_bytes(b'x')
+    local_files = library.episode_files(str(folder))
+    candidates = {
+        'default': [
+            {'s': 1, 'e': 1, 'title': 'Pilot'},
+            {'s': 1, 'e': 2, 'title': 'Finale'},
+        ],
+        'alternate': [
+            {'s': 1, 'e': 1, 'title': 'Part One'},
+            {'s': 2, 'e': 1, 'title': 'The Beginning'},
+        ],
+    }
+
+    order, episodes, matched = library._best_episode_order(candidates, local_files)
+
+    assert order == 'alternate'
+    assert len(episodes) == 2
+    assert matched
+
+
+def test_tvdb_series_episodes_auto_does_not_assume_netflix_order(tmp_path, tmp_db, monkeypatch):
+    from types import SimpleNamespace
+
+    from src import db, state
+
+    folder = tmp_path / 'series'
+    folder.mkdir()
+    (folder / 'Show - S01E01 - Pilot.mkv').write_bytes(b'x')
+    (folder / 'Show - S01E02 - Finale.mkv').write_bytes(b'x')
+    orders = {
+        'default': [
+            {'s': 1, 'e': 1, 'title': 'Pilot'},
+            {'s': 1, 'e': 2, 'title': 'Finale'},
+        ],
+        'alternate': [
+            {'s': 1, 'e': 1, 'title': 'Part One'},
+            {'s': 1, 'e': 2, 'title': 'Part Two'},
+            {'s': 2, 'e': 1, 'title': 'The Beginning'},
+        ],
+    }
+    calls = []
+
+    def get_series_episodes(series_id, season_type):
+        calls.append(season_type)
+        return {'episodes': orders[season_type]}
+
+    db.series_meta_set('123', '', {
+        'season_types': [
+            {'type': 'official', 'name': 'Official'},
+            {'type': 'alternate', 'alternateName': 'Netflix'},
+        ],
+    })
+    monkeypatch.setattr(state, 'config', {'tvdb_episode_order': 'auto'})
+    monkeypatch.setattr(state, 'api_handler', SimpleNamespace(get_series_episodes=get_series_episodes))
+
+    episodes = library.tvdb_series_episodes('123', str(folder))
+
+    assert calls == ['default', 'alternate']
+    assert [episode['title'] for episode in episodes] == ['Pilot', 'Finale']
+    assert db.series_episodes_get('123')['order'] == 'default'
+    assert db.series_meta_get('123')['data']['episode_order'] == 'official'
+
+
 def test_rename_subtitles_matching_stem(tmp_path):
     d = tmp_path / 'series'
     d.mkdir()

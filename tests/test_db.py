@@ -13,7 +13,7 @@ def test_init_db_creates_tables(tmp_db):
     for t in ('history', 'search_cache', 'file_search_cache', 'details_cache',
               'omdb_cache', 'omdb_episode_cache', 'series_episodes_cache',
               'series_meta_cache', 'usage_counters', 'media_duration_cache',
-              'folder_size_cache', 'app_meta'):
+              'folder_size_cache', 'library_file_size_cache', 'app_meta'):
         assert t in tables
 
 
@@ -142,6 +142,35 @@ def test_folder_size_cache(tmp_db):
     db.folder_size_set('/a', 500, 1234)
     assert db.folder_size_get('/a', 1234) == {'size': 500}
     assert db.folder_size_get('/a', 9999) is None
+
+
+def test_library_file_size_cache_queries_and_move(tmp_db, tmp_path):
+    root = tmp_path / 'library'
+    old_dir = root / 'old'
+    new_dir = root / 'new'
+    old_dir.mkdir(parents=True)
+    new_dir.mkdir()
+    old_path = str(old_dir / 'episode.mkv')
+    new_path = str(new_dir / 'episode.mkv')
+    db.library_file_sizes_set([{
+        'path': old_path,
+        'parent': str(old_dir),
+        'size': 2048,
+        'mtime': 123,
+        'is_video': True,
+    }], scan_id=7)
+    db.media_dur_set(old_path, 42, 2048, 123)
+
+    assert db.library_file_sizes_get([old_path])[old_path]['size'] == 2048
+    assert db.library_file_sizes_range() == {'min': 2048, 'max': 2048, 'count': 1}
+    assert db.library_file_size_sum_direct(str(old_dir)) == {'size': 2048, 'count': 1}
+
+    db.library_file_sizes_move_under(str(old_dir), str(new_dir))
+
+    assert db.library_file_sizes_get([old_path]) == {}
+    assert db.library_file_sizes_get([new_path])[new_path]['mtime'] == 123
+    assert db.library_file_size_sum_direct(str(new_dir)) == {'size': 2048, 'count': 1}
+    assert db.media_dur_get(new_path) == {'size': 2048, 'mtime': 123, 'minutes': 42}
 
 
 def test_refresh_due(tmp_db):
