@@ -56,11 +56,11 @@ function saveLibTreeCache() {
                 }
             }
             localStorage.setItem(LIB_TREE_CACHE_KEY, s);
-        } catch (e) { libTreeCache.data = {}; }
+        } catch (e) {}
     }, 400);
 }
 function cacheLibChildren(path, entries) {
-    if (!path || !Array.isArray(entries)) return;
+    if (typeof path !== 'string' || !Array.isArray(entries)) return;
     libTreeCache.data[path] = entries;
     saveLibTreeCache();
 }
@@ -177,35 +177,78 @@ function libDisplayTitle(name, metaTitle) {
 }
 
 // ── Chargement ───────────────────────────────────────────────────────────────
-function loadLibrary() {
+let _libraryRootPromise = null;
+let _libraryRootController = null;
+let _libraryRootSeq = 0;
+let _libraryRefreshPromise = null;
+let _libraryRefreshController = null;
+
+function renderLibraryEntries(entries) {
     const container = document.getElementById('library-tree');
-    container.innerHTML = `<div class="loading"><div class="spinner"></div></div>`;
-    return fetch('/api/library?fast=1')
-        .then(r => r.json())
-        .then(data => {
-            if (!data.entries?.length) {
-                container.innerHTML = `<div class="empty-state">${tr('lib_empty')}</div>`;
-                return;
-            }
-            container.innerHTML = '';
-            sortEntries(data.entries).forEach(root => {
-                container.appendChild(buildLibNode(root, 0, false));
-            });
-            applyLibFilter();
-            collectLibFacets();
-            if (document.getElementById('lib-advanced-filters')?.open) setLibFacetPreload(true);
-            if (typeof collectGridEnrich === 'function' && libView === 'grid') collectGridEnrich();
-            const fromCache = libTreeCacheFresh();
-            // Les dossiers persistés sont re-ouverts (instantanément si hydratés
-            // depuis le cache, sinon via re-fetch). Une fois l'expansion terminée,
-            // on re-valide en arrière-plan si l'affichage venait du cache.
-            expandStoredPathsDeep(container).then(() => {
-                // Le rendu rapide est visible avant les tailles, compteurs et
-                // enrichissements coûteux; ceux-ci sont revalidés ensuite.
-                setTimeout(() => refreshLibrary(), fromCache ? 0 : 150);
-            });
+    if (!container) return;
+    container.querySelectorAll('.lib-node').forEach(node => {
+        node._childrenControllers?.forEach(controller => controller.abort());
+    });
+    if (!entries?.length) {
+        container.innerHTML = `<div class="empty-state">${tr('lib_empty')}</div>`;
+        return;
+    }
+    container.innerHTML = '';
+    sortEntries(entries).forEach(root => container.appendChild(buildLibNode(root, 0, false)));
+    applyLibFilter();
+    collectLibFacets();
+    if (document.getElementById('lib-advanced-filters')?.open) setLibFacetPreload(true);
+    if (typeof collectGridEnrich === 'function' && libView === 'grid') collectGridEnrich();
+    expandStoredPathsDeep(container);
+}
+
+function loadLibrary(force = false) {
+    const container = document.getElementById('library-tree');
+    if (!container) return Promise.resolve();
+    if (_libraryRootPromise && !force) return _libraryRootPromise;
+    const cachedEntries = libTreeCache.data[''];
+    const hasCache = Array.isArray(cachedEntries);
+    if (hasCache) renderLibraryEntries(cachedEntries);
+    else container.innerHTML = `<div class="loading"><div class="spinner"></div></div>`;
+    if (!force && hasCache && libTreeCacheFresh()) return Promise.resolve(cachedEntries);
+
+    _libraryRootController?.abort();
+    const controller = new AbortController();
+    _libraryRootController = controller;
+    const seq = ++_libraryRootSeq;
+    const promise = fetch('/api/library?fast=1', { signal: controller.signal })
+        .then(r => {
+            if (!r.ok) throw new Error(`HTTP ${r.status}`);
+            return r.json();
         })
-        .catch(e => { container.innerHTML = `<div class="message error">${esc(e.message)}</div>`; });
+        .then(data => {
+            if (seq !== _libraryRootSeq) return;
+            const entries = data.entries || [];
+            cacheLibChildren('', entries);
+            if (hasCache && !container.querySelector('.loading, .empty-state')) {
+                if (!entries.length) container.innerHTML = `<div class="empty-state">${tr('lib_empty')}</div>`;
+                else {
+                    reconcileContainer(container, entries, 0);
+                    applyLibFilter();
+                    collectLibFacets();
+                }
+            } else {
+                renderLibraryEntries(entries);
+            }
+            return entries;
+        })
+        .catch(e => {
+            if (seq === _libraryRootSeq && e.name !== 'AbortError' && !hasCache)
+                container.innerHTML = `<div class="message error">${esc(e.message)}</div>`;
+        })
+        .finally(() => {
+            if (seq === _libraryRootSeq) {
+                _libraryRootPromise = null;
+                _libraryRootController = null;
+            }
+        });
+    _libraryRootPromise = promise;
+    return promise;
 }
 
 function refreshLibrary() {
@@ -220,19 +263,44 @@ function refreshLibrary() {
         saveExpandedPaths(expandedPaths);
     }
     if (!container.children.length || container.querySelector('.loading, .empty-state')) {
-        loadLibrary();
+        loadLibrary(true);
         return;
     }
     // Rafraîchissement incrémental : ne met à jour que les différences, sans tout reconstruire.
-    fetch('/api/library')
-        .then(r => r.json())
+    _libraryRootController?.abort();
+    _libraryRootController = null;
+    _libraryRootPromise = null;
+    _libraryRootSeq += 1;
+    if (_libraryRefreshPromise) return _libraryRefreshPromise;
+    _libraryRefreshController?.abort();
+    const controller = new AbortController();
+    _libraryRefreshController = controller;
+    const promise = fetch('/api/library', { signal: controller.signal })
+        .then(r => {
+            if (!r.ok) throw new Error(`HTTP ${r.status}`);
+            return r.json();
+        })
         .then(data => {
-            if (!data.entries?.length) return;
-            reconcileContainer(container, data.entries, 0);
+            if (controller.signal.aborted) return;
+            const entries = data.entries || [];
+            cacheLibChildren('', entries);
+            if (!entries.length) {
+                container.innerHTML = `<div class="empty-state">${tr('lib_empty')}</div>`;
+                return;
+            }
+            reconcileContainer(container, entries, 0);
             applyLibFilter();
             collectLibFacets();
         })
-        .catch(() => {});
+        .catch(() => {})
+        .finally(() => {
+            if (_libraryRefreshController === controller) {
+                _libraryRefreshController = null;
+                _libraryRefreshPromise = null;
+            }
+        });
+    _libraryRefreshPromise = promise;
+    return promise;
 }
 
 function getExpandedPaths(container) {
@@ -250,6 +318,112 @@ function findDirRow(container, path) {
         if (row.dataset.path === path) return row;
     }
     return null;
+}
+
+function updateRenamedLibrarySeries(oldPath, newPath, name, meta, tvdbid) {
+    if (!newPath) return;
+    const newName = name || newPath.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || '';
+    const updatedMeta = { ...(meta || {}) };
+    if (tvdbid || updatedMeta.tvdbid) updatedMeta.tvdb = String(tvdbid || updatedMeta.tvdbid);
+    if (updatedMeta.imdbid) updatedMeta.imdb = updatedMeta.imdbid;
+    if (updatedMeta.tmdbid) updatedMeta.tmdb = updatedMeta.tmdbid;
+    if (typeof updateLibGridSeriesTile === 'function')
+        updateLibGridSeriesTile(oldPath, newPath, newName, updatedMeta, tvdbid);
+
+    const replacePath = path => {
+        if (!path || !oldPath) return path;
+        if (path === oldPath) return newPath;
+        if (path.startsWith(oldPath + '\\') || path.startsWith(oldPath + '/'))
+            return newPath + path.slice(oldPath.length);
+        return path;
+    };
+    const nextExpanded = new Set([...expandedPaths].map(replacePath));
+    if ([...expandedPaths].some(path => replacePath(path) !== path)) {
+        expandedPaths = nextExpanded;
+        saveExpandedPaths(expandedPaths);
+    }
+
+    for (const [cachePath, entries] of Object.entries(libTreeCache.data)) {
+        if (oldPath && (cachePath === oldPath || cachePath.startsWith(oldPath + '\\')
+            || cachePath.startsWith(oldPath + '/'))) {
+            delete libTreeCache.data[cachePath];
+            continue;
+        }
+        if (!Array.isArray(entries)) continue;
+        entries.forEach(entry => {
+            if (entry.path === oldPath) {
+                entry.path = newPath;
+                entry.name = newName;
+                entry.meta = { ...(entry.meta || {}), ...updatedMeta };
+            } else {
+                entry.path = replacePath(entry.path);
+            }
+        });
+    }
+    saveLibTreeCache();
+
+    const container = document.getElementById('library-tree');
+    if (!container) return;
+    let row = findDirRow(container, oldPath) || findDirRow(container, newPath);
+    if (!row && tvdbid) {
+        row = [...container.querySelectorAll('.lib-row--dir')]
+            .find(candidate => candidate.parentElement?._tvdb === String(tvdbid)) || null;
+    }
+    if (!row) return;
+
+    const node = row.parentElement;
+    const previousTvdb = String(node._tvdb || '');
+    const existingMeta = { ...(node._entry?.meta || {}) };
+    if (tvdbid && previousTvdb && String(tvdbid) !== previousTvdb) {
+        ['rating', 'date', 'genres', 'certification', 'runtime', 'poster', 'imdb', 'imdbid', 'tmdb', 'tmdbid']
+            .forEach(key => delete existingMeta[key]);
+    }
+    const entry = {
+        ...(node._entry || {}),
+        name: newName,
+        path: newPath,
+        meta: { ...existingMeta, ...updatedMeta },
+    };
+    node._entry = entry;
+    node._key = node._path = newPath;
+    node._tvdb = String(tvdbid || entry.meta.tvdb || node._tvdb || '');
+    node._imdb = entry.meta.imdb || '';
+    row.dataset.path = newPath;
+    if (node._missingBadge) node._missingBadge._path = newPath;
+    if (node._upcomingBadge) node._upcomingBadge._path = newPath;
+    if (tvdbid && previousTvdb && String(tvdbid) !== previousTvdb && node._missingBadge) {
+        node._missingBadge.textContent = '';
+        node._upcomingBadge && (node._upcomingBadge.textContent = '');
+        if (node._missingBadge._loading) node._missingBadge._refreshAfterLoad = true;
+        else {
+            node._missingBadge._loaded = false;
+            node._missingBadge._childrenLoaded = false;
+            node._missingBadge._pollTries = 0;
+            if (!node._loaded && !node._missingBadge._observed)
+                observeLibMissingBadge(node._missingBadge, node._upcomingBadge, node._childrenEl);
+        }
+    }
+    updateLibNode(node, entry);
+    const poster = entry.meta.poster && entry.meta.poster !== 'N/A' ? entry.meta.poster : '';
+    const lead = row.querySelector('.lib-lead');
+    if (poster && lead?.tagName === 'IMG') lead.src = poster;
+    const label = row.querySelector('.lib-name-main') || row.querySelector('.lib-name');
+    if (label) label.textContent = newName;
+    const tvdbLink = row.querySelector('.lib-tvdb-link');
+    if (tvdbLink && node._tvdb) tvdbLink.href = `/api/library/tvdb-link/${encodeURIComponent(node._tvdb)}`;
+
+    const searchButton = row.querySelector('.lib-actions .search');
+    if (searchButton) {
+        const replacement = searchButton.cloneNode(true);
+        replacement.addEventListener('click', event => {
+            event.stopPropagation();
+            libManualSearchFolder(newPath, newName);
+        });
+        searchButton.replaceWith(replacement);
+    }
+    if (node.parentElement) insertLibNodeSorted(node.parentElement, node);
+    if (node._loaded && node._childrenEl)
+        syncLibFolder(entry, node._childrenEl, (node._depth || 0) + 1, node);
 }
 
 // Expande les dossiers persistés : tous les dossiers d'un même niveau sont
@@ -387,17 +561,6 @@ function buildLibNode(entry, depth, autoExpand) {
             wrap._missingBadge = mBadge;
             wrap._upcomingBadge = uBadge;
             if (tvdbLink) row.insertBefore(tvdbLink, dirActions);
-            // Charger les badges manquants/à venir dès l'affichage du dossier,
-            // sans attendre l'expansion (un seul fetch, badges uniquement).
-            // Différé (timeout 0) : au F5 tous les dossiers sont rendus d'un
-            // coup, on ne veut pas lancer tous les fetch en même temps que les
-            // requêtes d'arborescence.
-            if (!wrap._badgesLoaded) {
-                wrap._badgesLoaded = true;
-                mBadge._loaded = true;
-                uBadge._loaded = true;
-                setTimeout(() => loadLibMissing(entry.path, mBadge, uBadge, null), 0);
-            }
         }
         const children = document.createElement('div');
         children.className = 'lib-children';
@@ -441,6 +604,7 @@ function buildLibNode(entry, depth, autoExpand) {
         row.addEventListener('click', toggle);
         wrap.appendChild(row);
         wrap.appendChild(children);
+        if (wrap._missingBadge) observeLibMissingBadge(wrap._missingBadge, wrap._upcomingBadge, children);
         if (autoExpand) toggle();
     } else {
         const badgeClass = entry.valid ? 'lib-badge--ok' : 'lib-badge--warn';
@@ -474,13 +638,22 @@ function buildLibNode(entry, depth, autoExpand) {
 
 function loadLibChildren(entry, children, row, offset, limit) {
     const wrap = row.parentElement;
+    if (!wrap._childrenRequests) wrap._childrenRequests = new Map();
+    if (!wrap._childrenControllers) wrap._childrenControllers = new Map();
+    if (wrap._childrenRequests.has(offset)) return wrap._childrenRequests.get(offset);
     // Le dossier est en cours de chargement : applyLibFilter le garde visible
     // tant que ses enfants ne sont pas dans le DOM (le flag est retiré à la fin).
     wrap._loading = true;
     if (offset === 0) children.innerHTML = `<div class="lib-loading"><span class="lib-spinner"></span></div>`;
-    fetch(`/api/library?path=${encodeURIComponent(entry.path)}&type=${entry.type}&offset=${offset}&limit=${limit}&fast=1`)
-        .then(r => r.json())
+    const controller = new AbortController();
+    wrap._childrenControllers.set(offset, controller);
+    const promise = fetch(`/api/library?path=${encodeURIComponent(entry.path)}&type=${entry.type}&offset=${offset}&limit=${limit}&fast=1`, { signal: controller.signal })
+        .then(r => {
+            if (!r.ok) throw new Error(`HTTP ${r.status}`);
+            return r.json();
+        })
         .then(data => {
+            if (controller.signal.aborted || !wrap.isConnected) return;
             if (offset === 0) children.innerHTML = '';
             if (data.entries?.length) {
                 sortEntries(data.entries).forEach(child => children.appendChild(buildLibNode(child, 1, false)));
@@ -493,8 +666,7 @@ function loadLibChildren(entry, children, row, offset, limit) {
             if (loaded < total && data.entries?.length > 0) {
                 // Chargement séquentiel automatique : la page suivante se charge d'elle-même
                 // et les entrées s'affichent au fur et à mesure, sans bouton de pagination.
-                loadLibChildren(entry, children, row, loaded, limit);
-                return;
+                return loadLibChildren(entry, children, row, loaded, limit);
             }
             // Cache de l'arborescence : on garde la liste complète des enfants
             // pour un rendu instantané au prochain F5 (borné, voir saveLibTreeCache).
@@ -522,18 +694,25 @@ function loadLibChildren(entry, children, row, offset, limit) {
                 emptyRow.appendChild(delBtn);
                 children.appendChild(emptyRow);
             }
-            if (/\[tvdbid-/.test(entry.name)) loadLibMissing(entry.path, wrap._missingBadge, wrap._upcomingBadge, children);
+            if (/\[tvdbid-/.test(entry.name)) requestLibMissingBadge(wrap._missingBadge, wrap._upcomingBadge, children, true);
             else refreshSeriesBadges(children);
             wrap._loading = false;
             if (typeof continueLibFacetPreload === 'function') continueLibFacetPreload();
             scheduleApplyLibFilter();
             scheduleCollectFacets();
         })
-        .catch(() => {
+        .catch(error => {
+            if (error.name === 'AbortError') return;
             wrap._loading = false;
             if (offset === 0) children.innerHTML = `<div class="lib-loading lib-loading--error"><i class="mdi mdi-alert-circle-outline"></i></div>`;
             if (typeof continueLibFacetPreload === 'function') continueLibFacetPreload();
+        })
+        .finally(() => {
+            wrap._childrenRequests.delete(offset);
+            wrap._childrenControllers.delete(offset);
         });
+    wrap._childrenRequests.set(offset, promise);
+    return promise;
 }
 
 // ── Reconciliation incrémentale de la bibliothèque ───────────────────────────
@@ -542,7 +721,13 @@ function reconcileContainer(container, entries, depth) {
     Array.from(container.children).forEach(n => { if (n._key) existing.set(n._key, n); });
     const serverPaths = new Set(entries.map(e => e.path));
     for (const [key, node] of existing) {
-        if (!serverPaths.has(key)) node.remove();
+        if (!serverPaths.has(key)) {
+            node.querySelectorAll('.lib-node').forEach(child => {
+                child._childrenControllers?.forEach(controller => controller.abort());
+            });
+            node._childrenControllers?.forEach(controller => controller.abort());
+            node.remove();
+        }
     }
     for (const entry of entries) {
         const node = existing.get(entry.path);
@@ -667,7 +852,7 @@ function finalizeSync(entry, childrenEl, depth, node, acc, total) {
     // Le re-fetch a renvoyé la liste complète : on met à jour le cache
     // d'arborescence pour que le prochain F5 reflète l'état actuel.
     if (acc.length) cacheLibChildren(entry.path, acc);
-    if (/\[tvdbid-/.test(entry.name)) loadLibMissing(entry.path, node._missingBadge, node._upcomingBadge, childrenEl);
+    if (/\[tvdbid-/.test(entry.name)) requestLibMissingBadge(node._missingBadge, node._upcomingBadge, childrenEl, true);
     else refreshSeriesBadges(childrenEl);
     applyLibFilter();
     collectLibFacets();

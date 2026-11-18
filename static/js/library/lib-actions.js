@@ -78,20 +78,39 @@ function showLibRenameConfirm(folderBase, renames, folderNote, canApply) {
     }
     if (applyBtn) applyBtn.style.display = '';
     const total = renames.length;
-    let html = total
-        ? `<div class="lib-rename-summary">${total} fichier(s) seront renommé(s)</div>`
-        : '';
+    const subtitleExts = new Set(['.srt', '.sub', '.ass', '.ssa', '.vtt', '.idx']);
+    const videoRenames = renames.filter(r => !subtitleExts.has((r.to.match(/\.[^.]+$/) || [''])[0].toLowerCase()));
+    const subtitleRenames = renames.filter(r => subtitleExts.has((r.to.match(/\.[^.]+$/) || [''])[0].toLowerCase()));
+    const renderRenameSection = (label, items) => {
+        if (!items.length) return '';
+        return `<section class="lib-rename-section">
+            <h3>${esc(label)} <span class="lib-rename-count">${items.length}</span></h3>
+            <div class="lib-rename-columns"><span>${esc(tr('lib_rename_before'))}</span><span>${esc(tr('lib_rename_after'))}</span></div>
+            <div class="lib-rename-list">${items.map(r =>
+                `<div class="lib-rename-item">
+                    <span class="lib-rename-from" title="${esc(r.from)}">${esc(r.from)}</span>
+                    <span class="lib-rename-sep"><i class="mdi mdi-arrow-right"></i></span>
+                    <span class="lib-rename-to" title="${esc(r.to)}">${esc(r.to)}</span>
+                </div>`).join('')}</div>
+        </section>`;
+    };
+    let html = `<div class="lib-rename-preview">
+        <i class="mdi mdi-eye-outline"></i>
+        <div><strong>${esc(tr('lib_rename_preview'))}</strong><span>${esc(tr('lib_rename_preview_hint'))}</span></div>
+        ${total ? `<span class="lib-rename-total">${total} ${esc(tr('lib_rename_items_count'))}</span>` : ''}
+    </div>`;
     if (folderNote && !folderNote.error) {
-        html += `<div class="lib-rename-folder">Dossier : <s>${esc(folderNote.from)}</s> → <strong>${esc(folderNote.to)}</strong></div>`;
-    }
-    if (renames.length) {
-        html += `<div class="lib-rename-list">${renames.map(r =>
-            `<div class="lib-rename-item">
-                <span class="lib-rename-from" title="${esc(r.from)}">${esc(r.from)}</span>
+        html += `<section class="lib-rename-section">
+            <h3>${esc(tr('lib_rename_folder_label'))}</h3>
+            <div class="lib-rename-folder">
+                <div><span>${esc(tr('lib_rename_before'))}</span><s title="${esc(folderNote.from)}">${esc(folderNote.from)}</s></div>
                 <span class="lib-rename-sep"><i class="mdi mdi-arrow-right"></i></span>
-                <span class="lib-rename-to" title="${esc(r.to)}">${esc(r.to)}</span>
-            </div>`).join('')}</div>`;
+                <div><span>${esc(tr('lib_rename_after'))}</span><strong title="${esc(folderNote.to)}">${esc(folderNote.to)}</strong></div>
+            </div>
+        </section>`;
     }
+    html += renderRenameSection(tr('lib_rename_episodes'), videoRenames);
+    html += renderRenameSection(tr('lib_rename_subtitles'), subtitleRenames);
     body.innerHTML = html;
     document.getElementById('libRenameConfirmModal').classList.add('active');
 }
@@ -106,10 +125,10 @@ function confirmLibRename() {
     postJSON('/api/library/rename-folder-series', pending.payload)
         .then(data => {
             if (!data.success) { alert(`✗ ${data.message}`); return; }
-            // Le renommage touche le dossier et tous ses fichiers : le cache
-            // d'arborescence est périmé, on le vide (il se reconstruit au fil).
-            clearLibTreeCache();
-            refreshLibrary();
+            updateRenamedLibrarySeries(
+                pending.folderPath, data.new_path, data.new_name,
+                pending.payload, data.tvdbid
+            );
         })
         .catch(e => alert(`✗ ${e.message}`));
 }
@@ -140,8 +159,74 @@ function libManualSearch(filePath) {
 // ── Épisodes manquants / à venir ─────────────────────────────────────────────
 // « missing »   : diffusés mais absents du disque (rouge)
 // « upcoming »  : non diffusés — TBA ou date de sortie future (jaune)
+let libMissingObserver = null;
+
+function requestLibMissingBadge(missingBadgeEl, upcomingBadgeEl, childrenEl, force = false) {
+    if (!missingBadgeEl) return;
+    if (missingBadgeEl._loading) {
+        if (childrenEl && !missingBadgeEl._childrenLoaded) missingBadgeEl._pendingChildren = childrenEl;
+        return;
+    }
+    if (!force && missingBadgeEl._loaded && (!childrenEl || missingBadgeEl._childrenLoaded)) return;
+    if (missingBadgeEl._observed && libMissingObserver) {
+        libMissingObserver.unobserve(missingBadgeEl._observerTarget || missingBadgeEl);
+        missingBadgeEl._observed = false;
+    }
+    missingBadgeEl._loading = true;
+    loadLibMissing(missingBadgeEl._path, missingBadgeEl, upcomingBadgeEl, childrenEl)
+        .finally(() => {
+            missingBadgeEl._loading = false;
+            missingBadgeEl._loaded = true;
+            if (childrenEl) missingBadgeEl._childrenLoaded = true;
+            const pendingChildren = missingBadgeEl._pendingChildren;
+            missingBadgeEl._pendingChildren = null;
+            if (missingBadgeEl._refreshAfterLoad) {
+                missingBadgeEl._refreshAfterLoad = false;
+                missingBadgeEl._loaded = false;
+                missingBadgeEl._childrenLoaded = false;
+                const node = missingBadgeEl.closest('.lib-node');
+                const visibleChildren = node?._loaded
+                    && missingBadgeEl._childrenEl?.style.display === 'block'
+                    ? missingBadgeEl._childrenEl : null;
+                requestLibMissingBadge(
+                    missingBadgeEl, upcomingBadgeEl, pendingChildren || visibleChildren, true
+                );
+                return;
+            }
+            if (pendingChildren && !missingBadgeEl._childrenLoaded)
+                requestLibMissingBadge(missingBadgeEl, upcomingBadgeEl, pendingChildren, true);
+        });
+}
+
+function observeLibMissingBadge(missingBadgeEl, upcomingBadgeEl, childrenEl) {
+    if (!missingBadgeEl || missingBadgeEl._loaded || missingBadgeEl._observed) return;
+    missingBadgeEl._upcomingBadge = upcomingBadgeEl;
+    missingBadgeEl._childrenEl = childrenEl;
+    if (typeof IntersectionObserver === 'undefined') {
+        requestLibMissingBadge(missingBadgeEl, upcomingBadgeEl, null);
+        return;
+    }
+    if (!libMissingObserver) {
+        libMissingObserver = new IntersectionObserver(entries => {
+            entries.forEach(entry => {
+                if (!entry.isIntersecting) return;
+                const badge = entry.target._missingBadgeObserverEl || entry.target;
+                libMissingObserver.unobserve(entry.target);
+                badge._observed = false;
+                const children = badge._childrenEl?.style.display === 'block' ? badge._childrenEl : null;
+                requestLibMissingBadge(badge, badge._upcomingBadge, children);
+            });
+        }, { rootMargin: '200px 0px' });
+    }
+    const target = missingBadgeEl.closest('.lib-row') || missingBadgeEl;
+    target._missingBadgeObserverEl = missingBadgeEl;
+    missingBadgeEl._observerTarget = target;
+    missingBadgeEl._observed = true;
+    libMissingObserver.observe(target);
+}
+
 function loadLibMissing(path, missingBadgeEl, upcomingBadgeEl, childrenEl) {
-    fetch(`/api/library/missing?path=${encodeURIComponent(path)}`)
+    return fetch(`/api/library/missing?path=${encodeURIComponent(path)}`)
         .then(r => r.json())
         .then(d => {
             // Cache TVDB pas encore prêt (premier affichage, parsing en
@@ -219,11 +304,11 @@ function loadLibMissing(path, missingBadgeEl, upcomingBadgeEl, childrenEl) {
 function refreshSeriesBadges(container) {
     if (!container) return;
     [...container.querySelectorAll(':scope > .lib-node > .lib-row > .lib-missing-badge')].forEach(badge => {
-        if (badge._loaded) return;
-        badge._loaded = true;
         const row = badge.closest('.lib-row');
         const upBadge = row && row.querySelector('.lib-upcoming-badge');
-        loadLibMissing(badge._path, badge, upBadge, null);
+        const node = row && row.closest('.lib-node');
+        const children = node && node.querySelector(':scope > .lib-children');
+        observeLibMissingBadge(badge, upBadge, children);
     });
 }
 
@@ -236,10 +321,10 @@ function toggleLibMissingFilter() {
             const row = badge.closest('.lib-row');
             const node = row && row.closest('.lib-node');
             if (!node || node.style.display === 'none') return;
-            if (badge._loaded) return; // compteur déjà connu
-            badge._loaded = true;
             const upBadge = row && row.querySelector('.lib-upcoming-badge');
-            loadLibMissing(badge._path, badge, upBadge, node.querySelector(':scope > .lib-children'));
+            const children = node.querySelector(':scope > .lib-children');
+            requestLibMissingBadge(badge, upBadge,
+                children?.style.display === 'block' ? children : null);
         });
     }
     applyLibFilter();

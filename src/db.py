@@ -190,18 +190,20 @@ def _history_row_to_item(row):
 
 def get_history(limit=None, offset=0):
     conn = get_conn()
-    cur = conn.cursor()
-    query = 'SELECT * FROM history ORDER BY date DESC, id DESC'
-    if limit is not None:
-        query += ' LIMIT ? OFFSET ?'
-        cur.execute(query, (limit, offset))
-    elif offset:
-        query += ' LIMIT -1 OFFSET ?'
-        cur.execute(query, (offset,))
-    else:
-        cur.execute(query)
-    rows = cur.fetchall()
-    conn.close()
+    try:
+        cur = conn.cursor()
+        query = 'SELECT * FROM history ORDER BY date DESC, id DESC'
+        if limit is not None:
+            query += ' LIMIT ? OFFSET ?'
+            cur.execute(query, (limit, offset))
+        elif offset:
+            query += ' LIMIT -1 OFFSET ?'
+            cur.execute(query, (offset,))
+        else:
+            cur.execute(query)
+        rows = cur.fetchall()
+    finally:
+        conn.close()
     return [_history_row_to_item(row) for row in rows]
 
 
@@ -214,12 +216,32 @@ def get_history_entry(entry_id):
     return _history_row_to_item(row) if row else None
 
 
-def get_reverted_history_ids():
+def get_reverted_history_ids(entry_ids=None):
+    if entry_ids is not None:
+        entry_ids = list(dict.fromkeys(str(entry_id) for entry_id in entry_ids if entry_id))
+        if not entry_ids:
+            return set()
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("SELECT extra FROM history WHERE op = 'revert'")
-    rows = cur.fetchall()
-    conn.close()
+    try:
+        if entry_ids is None:
+            cur.execute("SELECT extra FROM history WHERE op = 'revert'")
+        else:
+            try:
+                placeholders = ','.join('?' for _ in entry_ids)
+                cur.execute(
+                    "SELECT extra FROM history WHERE op = 'revert' "
+                    f"AND CASE WHEN json_valid(extra) "
+                    f"THEN json_extract(extra, '$.revert_of') END IN ({placeholders})",
+                    entry_ids,
+                )
+            except sqlite3.OperationalError as e:
+                if 'json_' not in str(e).lower() and 'json ' not in str(e).lower():
+                    raise
+                cur.execute("SELECT extra FROM history WHERE op = 'revert'")
+        rows = cur.fetchall()
+    finally:
+        conn.close()
     reverted_ids = set()
     for row in rows:
         try:
@@ -505,6 +527,28 @@ def library_file_size_sum_direct(parent):
         conn.close()
 
 
+def library_file_size_sums_direct(parents):
+    parents = list(dict.fromkeys(os.path.abspath(path) for path in (parents or []) if path))
+    out = {}
+    if not parents:
+        return out
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        for offset in range(0, len(parents), 900):
+            batch = parents[offset:offset + 900]
+            placeholders = ','.join('?' for _ in batch)
+            cur.execute(
+                'SELECT parent, SUM(size) AS total_size FROM library_file_size_cache '
+                f'WHERE parent IN ({placeholders}) GROUP BY parent',
+                batch,
+            )
+            out.update({row['parent']: row['total_size'] or 0 for row in cur.fetchall()})
+        return out
+    finally:
+        conn.close()
+
+
 def library_file_sizes_delete_unseen(root, scan_id):
     prefix = os.path.abspath(root).rstrip(os.sep) + os.sep
     conn = get_conn()
@@ -771,6 +815,66 @@ def series_meta_all():
             except Exception:
                 continue
         return out
+    finally:
+        conn.close()
+
+
+def library_metadata_snapshot():
+    """Load the metadata maps used by library rendering from one DB snapshot."""
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute('SELECT file_path, media_type, results_json, loaded_at FROM file_search_cache')
+        basename_map = {}
+        for row in cur.fetchall():
+            try:
+                base = os.path.basename(row['file_path'])
+                if base not in basename_map or (row['loaded_at'] or 0) > (basename_map[base]['loaded_at'] or 0):
+                    basename_map[base] = {
+                        'media_type': row['media_type'],
+                        'results': json.loads(row['results_json'] or '[]'),
+                        'loaded_at': row['loaded_at'],
+                    }
+            except (TypeError, ValueError):
+                continue
+
+        cur.execute('SELECT imdb_id, data_json, rating FROM omdb_cache')
+        omdb_map = {}
+        for row in cur.fetchall():
+            try:
+                omdb_map[row['imdb_id']] = (
+                    json.loads(row['data_json'] or '{}') or {'imdbRating': row['rating']}
+                )
+            except (TypeError, ValueError):
+                omdb_map[row['imdb_id']] = {'imdbRating': row['rating']}
+
+        cur.execute('SELECT tvdb_id, imdb_id, data_json FROM series_meta_cache')
+        series_meta = {}
+        for row in cur.fetchall():
+            try:
+                series_meta[row['tvdb_id']] = {
+                    'imdb_id': row['imdb_id'] or '',
+                    'data': json.loads(row['data_json'] or '{}'),
+                }
+            except (TypeError, ValueError):
+                continue
+        series_imdb = {key: value['imdb_id'] for key, value in series_meta.items()}
+
+        cur.execute('SELECT key, data_json FROM omdb_episode_cache')
+        episode_omdb = {}
+        for row in cur.fetchall():
+            try:
+                episode_omdb[row['key']] = json.loads(row['data_json'] or '{}')
+            except (TypeError, ValueError):
+                continue
+
+        return {
+            'basename_map': basename_map,
+            'omdb_map': omdb_map,
+            'series_meta': series_meta,
+            'series_imdb': series_imdb,
+            'episode_omdb': episode_omdb,
+        }
     finally:
         conn.close()
 

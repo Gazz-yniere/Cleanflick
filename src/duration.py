@@ -5,8 +5,11 @@ l'invalidation (taille/mtime) et le calcul en arrière-plan non bloquant."""
 import os
 import time
 import threading
+import logging
 
 from . import db, mediaduration, state
+
+logger = logging.getLogger(__name__)
 
 _MEDIA_DUR_CACHE = {}
 _MEDIA_DUR_CACHE_KEY = object()  # sentinelle : absent du cache (distinct de None)
@@ -107,6 +110,43 @@ def duration_for(path):
         pass
     _dur_enqueue(path, mt)
     return None
+
+
+def durations_for(paths):
+    """Resolve scan durations with one bounded DB lookup instead of one per file."""
+    path_stats = {}
+    results = {}
+    for path in dict.fromkeys(paths or []):
+        if not isinstance(path, str) or not path:
+            continue
+        try:
+            stat = os.stat(path)
+            mt, size = int(stat.st_mtime), stat.st_size
+        except OSError:
+            results[path] = None
+            continue
+        key = (path, mt)
+        if key in _MEDIA_DUR_CACHE:
+            results[path] = _MEDIA_DUR_CACHE[key]
+        else:
+            path_stats[path] = (mt, size)
+
+    try:
+        cached_durations = db.media_durs_get_many(path_stats)
+    except Exception:
+        logger.warning("Batch duration cache read failed", exc_info=True)
+        cached_durations = {}
+
+    for path, (mt, size) in path_stats.items():
+        cached = cached_durations.get(path)
+        if cached and cached.get('size') == size and cached.get('mtime') == mt:
+            minutes = cached.get('minutes')
+            _MEDIA_DUR_CACHE[(path, mt)] = minutes
+            results[path] = minutes
+        else:
+            results[path] = None
+            _dur_enqueue(path, mt)
+    return results
 
 
 def _dur_enqueue(path, mt):

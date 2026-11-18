@@ -2,7 +2,6 @@
 enrichissement, retour vers l'input, renommage/suppression de dossiers."""
 import os
 import re
-import json
 import time
 import uuid
 import shutil
@@ -14,8 +13,8 @@ from flask import Blueprint, jsonify, request, redirect
 
 from .. import db, state
 from ..auth import login_required
-from ..history import append_history, append_history_batch
-from ..utils import _move_path, _run_file_op, _migrate_file_cache, _refresh_scan_snapshot
+from ..history import append_history_batch
+from ..utils import _move_path, _migrate_file_cache, _refresh_scan_snapshot
 from .. import library
 from .. import naming
 from .. import duration
@@ -30,6 +29,91 @@ _SIZE_INDEX_TTL = 24 * 60 * 60
 _SIZE_INDEX_LOCK = threading.Lock()
 _SIZE_INDEX_RUNNING = False
 _SIZE_INDEX_ERROR = None
+_LIBRARY_META_TTL = 20
+_LIBRARY_META_LOCK = threading.Condition()
+_LIBRARY_META_CACHE = {}
+_LIBRARY_META_REFRESHING = set()
+_LIBRARY_FLAT_TTL = 15
+_LIBRARY_FLAT_LOCK = threading.Condition()
+_LIBRARY_FLAT_CACHE = {}
+_LIBRARY_FLAT_REFRESHING = set()
+
+
+def _refresh_library_metadata(key):
+    try:
+        snapshot = db.library_metadata_snapshot()
+    except Exception:
+        logger.exception("Library metadata cache refresh failed")
+    else:
+        with _LIBRARY_META_LOCK:
+            _LIBRARY_META_CACHE[key] = (time.monotonic(), snapshot)
+    finally:
+        with _LIBRARY_META_LOCK:
+            _LIBRARY_META_REFRESHING.discard(key)
+            _LIBRARY_META_LOCK.notify_all()
+
+
+def _library_metadata_snapshot():
+    key = os.path.abspath(db.DB_PATH)
+    with _LIBRARY_META_LOCK:
+        while True:
+            now = time.monotonic()
+            entry = _LIBRARY_META_CACHE.get(key)
+            if entry and now - entry[0] < _LIBRARY_META_TTL:
+                return entry[1]
+            if entry:
+                if key not in _LIBRARY_META_REFRESHING:
+                    _LIBRARY_META_REFRESHING.add(key)
+                    threading.Thread(
+                        target=_refresh_library_metadata, args=(key,), daemon=True,
+                    ).start()
+                return entry[1]
+            if key not in _LIBRARY_META_REFRESHING:
+                _LIBRARY_META_REFRESHING.add(key)
+                break
+            _LIBRARY_META_LOCK.wait()
+
+    try:
+        snapshot = db.library_metadata_snapshot()
+    except Exception:
+        with _LIBRARY_META_LOCK:
+            _LIBRARY_META_REFRESHING.discard(key)
+            _LIBRARY_META_LOCK.notify_all()
+        raise
+    with _LIBRARY_META_LOCK:
+        _LIBRARY_META_CACHE[key] = (time.monotonic(), snapshot)
+        _LIBRARY_META_REFRESHING.discard(key)
+        _LIBRARY_META_LOCK.notify_all()
+    return snapshot
+
+
+def _library_flat_cache_key():
+    config = state.config or {}
+    return (
+        os.path.abspath(db.DB_PATH),
+        os.path.abspath(config.get('_movie_output_path') or config.get('movie_output_path') or ''),
+        os.path.abspath(config.get('_tv_output_path') or config.get('tv_output_path') or ''),
+        config.get('movie_format', '{n} ({y})'),
+        config.get('tv_format', '{n} - {s00e00} - {t}'),
+        bool(config.get('show_s00_specials')),
+    )
+
+
+def _refresh_library_flat(key):
+    try:
+        payload = _build_library_flat()
+    except Exception:
+        logger.exception("Library flat cache refresh failed")
+    else:
+        with _LIBRARY_FLAT_LOCK:
+            _LIBRARY_FLAT_CACHE[key] = (time.monotonic(), payload)
+            if len(_LIBRARY_FLAT_CACHE) > 8:
+                oldest = min(_LIBRARY_FLAT_CACHE, key=lambda item: _LIBRARY_FLAT_CACHE[item][0])
+                _LIBRARY_FLAT_CACHE.pop(oldest, None)
+    finally:
+        with _LIBRARY_FLAT_LOCK:
+            _LIBRARY_FLAT_REFRESHING.discard(key)
+            _LIBRARY_FLAT_LOCK.notify_all()
 
 
 def _library_size_index_worker(roots, scan_id):
@@ -112,6 +196,17 @@ def _start_library_size_index():
     threading.Thread(
         target=_library_size_index_worker, args=(roots, scan_id), daemon=True,
     ).start()
+
+
+def _cached_direct_sizes(paths):
+    try:
+        indexed_at = int(db.meta_get('library_file_sizes_indexed_at', '0') or 0)
+        if not indexed_at or time.time() - indexed_at >= _SIZE_INDEX_TTL:
+            return {}
+        return db.library_file_size_sums_direct(paths)
+    except Exception:
+        logger.warning("Library direct-size cache unavailable", exc_info=True)
+        return {}
 
 
 @bp.route('/api/library/size-range')
@@ -329,52 +424,15 @@ def _meta_ctx(fast_scan, lib_type, movie_fmt, tv_fmt):
                 return False
         return True
 
-    # Charge une seule fois le cache de recherche, puis matche par nom de fichier.
-    # (Le cache stocke le chemin d'origine ; après un déplacement vers la librairie
-    # le chemin change, mais le nom de fichier reste identique.)
-    basename_map = {}
-    conn = None
-    try:
-        conn = db.get_conn()
-        cur = conn.cursor()
-        cur.execute("SELECT file_path, media_type, results_json, loaded_at FROM file_search_cache")
-        for r in cur.fetchall():
-            try:
-                base = os.path.basename(r['file_path'])
-                if base not in basename_map or (r['loaded_at'] or 0) > (basename_map[base]['loaded_at'] or 0):
-                    basename_map[base] = {
-                        'media_type': r['media_type'],
-                        'results': json.loads(r['results_json'] or '[]'),
-                        'loaded_at': r['loaded_at'],
-                    }
-            except Exception:
-                continue
-    except Exception:
-        pass
-    finally:
-        try:
-            if conn:
-                conn.close()
-        except Exception:
-            pass
-
-    # Notes OMDb (par imdb_id) chargées une seule fois, en lecture seule.
-    try:
-        omdb_map = db.omdb_all()
-    except Exception:
-        omdb_map = {}
-    try:
-        series_meta_all = db.series_meta_all()
-    except Exception:
-        series_meta_all = {}
-    try:
-        episode_omdb_map = db.omdb_episode_all()
-    except Exception:
-        episode_omdb_map = {}
-    try:
-        series_imdb_map = omdb._series_imdb_map()
-    except Exception:
-        series_imdb_map = {}
+    # Les tables complètes sont lues en une fois, puis réutilisées entre les
+    # requêtes. En cas d'échec à froid, l'exception remonte au lieu d'inventer
+    # une réponse vide; une entrée précédente reste utilisable pendant son refresh.
+    snapshot = _library_metadata_snapshot()
+    basename_map = dict(snapshot['basename_map'])
+    omdb_map = dict(snapshot['omdb_map'])
+    series_meta_all = snapshot['series_meta']
+    episode_omdb_map = snapshot['episode_omdb']
+    series_imdb_map = snapshot['series_imdb']
 
     # Mémo par requête : un F5 re-ouvre toutes les séries en parallèle ; sans
     # cela chaque nœud relance sa résolution TVDB→IMDb (1 requête TVDB chacun)
@@ -780,8 +838,15 @@ def api_library():
                 # afficher juste le nom du dossier racine.
                 parts = lib_path.replace('/', '\\').rstrip('\\').split('\\')
                 root_name = os.path.basename(os.path.normpath(lib_path)) or parts[-1] or parts[-2] or lib_path
+                size = (
+                    library.folder_summary_direct(
+                        lib_path,
+                        _cached_direct_sizes([lib_path]).get(os.path.abspath(lib_path)),
+                    )['size']
+                    if fast_scan else library.folder_size(lib_path)
+                )
                 roots.append({'name': root_name, 'path': lib_path, 'type': lib_type, 'is_dir': True,
-                              'size': library.folder_size_direct(lib_path) if fast_scan else library.folder_size(lib_path)})
+                              'size': size})
         return jsonify({'path': '', 'type': 'root', 'entries': roots})
 
     if not os.path.isdir(path):
@@ -842,6 +907,15 @@ def api_library():
     else:
         page = all_entries[offset:]
 
+    dir_paths = []
+    if fast_scan:
+        for entry in page:
+            try:
+                if entry.is_dir(follow_symlinks=False):
+                    dir_paths.append(entry.path)
+            except OSError:
+                continue
+    cached_dir_sizes = _cached_direct_sizes(dir_paths) if fast_scan else {}
     media_paths = [
         os.path.abspath(entry.path) for entry in page
         if Path(entry.name).suffix.lower() in VIDEO_EXT
@@ -856,10 +930,16 @@ def api_library():
         except OSError:
             continue
         if is_dir:
-            try:
-                child_count = sum(1 for _ in os.scandir(entry.path))
-            except Exception:
-                child_count = 0
+            summary = library.folder_summary_direct(
+                entry.path, cached_dir_sizes.get(os.path.abspath(entry.path)),
+            ) if fast_scan else None
+            if summary:
+                child_count = summary['count']
+            else:
+                try:
+                    child_count = sum(1 for _ in os.scandir(entry.path))
+                except Exception:
+                    child_count = 0
             valid_dir = is_valid_name(entry.name, lib_type, is_dir=True)
             ep_present = ep_total = ep_upcoming = None
             if lib_type == 'tv' and not fast_scan:
@@ -885,7 +965,8 @@ def api_library():
                         _req_enqueue_series_omdb(mser.group(1), title=(meta or {}).get('title') or entry.name.split(' (')[0].strip())
             else:
                 meta = folder_meta(entry.name)
-            entries.append({'name': entry.name, 'path': entry.path, 'type': lib_type, 'is_dir': True, 'child_count': child_count, 'size': _req_folder_size(entry.path), 'valid': valid_dir,
+            folder_size = summary['size'] if summary else _req_folder_size(entry.path)
+            entries.append({'name': entry.name, 'path': entry.path, 'type': lib_type, 'is_dir': True, 'child_count': child_count, 'size': folder_size, 'valid': valid_dir,
                             'meta': meta,
                             'ep_present': ep_present, 'ep_total': ep_total, 'ep_upcoming': ep_upcoming})
         elif entry.is_file() and Path(entry.name).suffix.lower() in VIDEO_EXT:
@@ -924,9 +1005,7 @@ def api_library():
     return jsonify({'path': path, 'type': lib_type, 'entries': entries, 'total': total, 'offset': offset, 'limit': limit})
 
 
-@bp.route('/api/library/flat')
-@login_required
-def api_library_flat():
+def _build_library_flat():
     """Liste plate de la bibliothèque (vue grille) : 1 item par film
     (fichier) et 1 item par série (dossier [tvdbid-…]).
     Caches BDD uniquement (search cache, OMDb, series_meta) : 0 requête API
@@ -940,6 +1019,7 @@ def api_library_flat():
 
     items = []
     seen = set()
+    incomplete = []
     # lib_type='tv' : requis par folder_meta (dossiers série) ; file_meta et
     # is_valid_name sont indépendants du type.
     ctx = _meta_ctx(fast_scan=False, lib_type='tv', movie_fmt=movie_fmt, tv_fmt=tv_fmt)
@@ -958,6 +1038,7 @@ def api_library_flat():
         try:
             entries = sorted(os.scandir(root), key=lambda e: e.name.lower())
         except (PermissionError, OSError):
+            incomplete.append(root)
             return
         media_entries = [
             entry for entry in entries
@@ -990,6 +1071,7 @@ def api_library_flat():
                     meta = ctx['file_meta'](e.name, None, e.path)
                     _add(e.path, 'movie', e.name, meta, ctx['is_valid_name'](e.name, 'movie'), size)
             except OSError:
+                incomplete.append(e.path)
                 continue
         if size_updates:
             db.library_file_sizes_set(size_updates)
@@ -1000,6 +1082,7 @@ def api_library_flat():
         try:
             entries = sorted(os.scandir(root), key=lambda e: e.name.lower())
         except (PermissionError, OSError):
+            incomplete.append(root)
             return
         for e in entries:
             try:
@@ -1017,21 +1100,61 @@ def api_library_flat():
                         pass
                     size = 0
                     try:
-                        size = library.folder_size_direct(e.path)
+                        size = library.folder_summary_direct(e.path)['size']
                     except Exception:
                         pass
                     _add(e.path, 'series', e.name, meta, True, size, ep_present, ep_total, ep_upcoming)
                 else:
                     _walk_series(e.path, depth + 1, max_depth)
             except OSError:
+                incomplete.append(e.path)
                 continue
 
     if movie_root and os.path.isdir(movie_root):
         _walk_files(movie_root)
     if tv_root and os.path.isdir(tv_root):
         _walk_series(tv_root)
+    if incomplete:
+        raise OSError(f"Library scan incomplete at {incomplete[0]}")
     items.sort(key=lambda it: ((it['type'] != 'movie'), str(it['name']).lower()))
-    return jsonify({'items': items, 'total': len(items)})
+    return {'items': items, 'total': len(items)}
+
+
+@bp.route('/api/library/flat')
+@login_required
+def api_library_flat():
+    key = _library_flat_cache_key()
+    with _LIBRARY_FLAT_LOCK:
+        while True:
+            entry = _LIBRARY_FLAT_CACHE.get(key)
+            if entry and time.monotonic() - entry[0] < _LIBRARY_FLAT_TTL:
+                return jsonify(entry[1])
+            if entry:
+                if key not in _LIBRARY_FLAT_REFRESHING:
+                    _LIBRARY_FLAT_REFRESHING.add(key)
+                    threading.Thread(target=_refresh_library_flat, args=(key,), daemon=True).start()
+                return jsonify(entry[1])
+            if key not in _LIBRARY_FLAT_REFRESHING:
+                _LIBRARY_FLAT_REFRESHING.add(key)
+                break
+            _LIBRARY_FLAT_LOCK.wait()
+
+    try:
+        payload = _build_library_flat()
+    except Exception:
+        with _LIBRARY_FLAT_LOCK:
+            _LIBRARY_FLAT_REFRESHING.discard(key)
+            _LIBRARY_FLAT_LOCK.notify_all()
+        logger.exception("Library flat initial load failed")
+        return jsonify({'error': 'Bibliothèque indisponible'}), 503
+    with _LIBRARY_FLAT_LOCK:
+        _LIBRARY_FLAT_CACHE[key] = (time.monotonic(), payload)
+        _LIBRARY_FLAT_REFRESHING.discard(key)
+        _LIBRARY_FLAT_LOCK.notify_all()
+        if len(_LIBRARY_FLAT_CACHE) > 8:
+            oldest = min(_LIBRARY_FLAT_CACHE, key=lambda item: _LIBRARY_FLAT_CACHE[item][0])
+            _LIBRARY_FLAT_CACHE.pop(oldest, None)
+    return jsonify(payload)
 
 
 @bp.route('/api/library/series/<tvdb_id>')
@@ -1593,11 +1716,18 @@ def api_library_rename_folder_series():
                             **(details.get('data') or {}),
                             'poster': od['Poster'],
                         })
+                        selected['poster'] = od['Poster']
                     except Exception:
                         pass
         except Exception as e:
             logger.warning(f"[Rename série] enrichissement {tvdb_id}: {e}")
-        watcher.broadcast_library_refresh()
+        watcher.broadcast_library_refresh(
+            old_path=abs_folder,
+            new_path=new_folder,
+            name=os.path.basename(new_folder),
+            tvdbid=tvdb_id,
+            meta=selected,
+        )
 
     threading.Thread(target=_background, daemon=True).start()
     return jsonify({'success': True, 'new_path': new_folder, 'new_name': os.path.basename(new_folder),

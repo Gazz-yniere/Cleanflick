@@ -1,5 +1,27 @@
 # Changelog
 
+## [1.0.14] - 2026-11-18
+
+### Added
+- **Atomic verified moves** — `/api/move` copies to a unique `.partial` temp file (fsync), re-checks size/mtime stability, compares SHA-256 source↔destination, then publishes via hardlink/rename; the verifying phase now shows real verification progress. A destination file is never silently overwritten.
+- **Incremental SSE library refresh** — series-folder rename events now carry old/new paths, TVDB id and metadata; the UI patches the affected card instead of rescanning the whole library.
+- **Rename confirmation preview** — the series rename modal shows old → new columns for the folder and every file (responsive layout, styled scrollbar).
+- **Move confirmation preview** — moving a file whose proposed name differs from the filename opens the mismatch modal even when no metadata preview is loaded yet; the Move button is now available while previews are still loading.
+- **Tests** — new `tests/test_history.py` plus expanded app and DB suites (path-status caching, revert scoping, move validation, atomic-move failures) — **146 tests pass**, ruff clean.
+
+### Improved
+- **Library cache snapshots** — library metadata (search cache, OMDb, series meta) is loaded from one DB snapshot reused across requests (20 s TTL, stale-while-revalidate), the flat grid payload is cached per config (15 s TTL), folder sizes come from batched DB lookups (900-path batches), and folder count+size are resolved in a single directory pass.
+- **Scan performance** — durations resolve in one batched DB lookup instead of one query per file; previews load lazily via an `IntersectionObserver`, show a provisional poster/title before full details arrive, and deduplicate detail requests through a shared cache; repeated scan calls are deduplicated (15 s TTL, abortable).
+- **History loading** — paginated history is cached in `localStorage` (30 s TTL, quota-aware eviction) and re-renders instantly on tab switch; file-presence checks use a shared 15 s TTL cache (16 workers) and revert lookups only query the relevant entries (`json_extract`).
+- **Move UX** — double-move guard per path, batch Move All with silent per-file errors, and progress polling now tolerates transient fetch errors.
+- **Series folder name parsing** — `_series_folder_name` accepts more local naming variants (`S1E1`, `1x01`, `_`/`-` separators, case-insensitive).
+
+### Fixed
+- **Move API validation** — malformed JSON, missing/invalid paths or media types, Windows-reserved destination names (`CON`, `COM1`, `NUL`…) and unconfigured output roots are rejected with clear errors; series folder names are sanitized.
+- **Error honesty** — DB/history failures now propagate instead of rendering as empty results, and a grid scan that cannot read a folder returns `503 Bibliothèque indisponible` instead of a partial library.
+- **Post-move integrity** — history is recorded even if the watcher snapshot update fails; a verified copy whose source cannot be deleted reports the exact failure instead of hiding it.
+- **Duplicate DB connections** — history queries always close their connection (`finally`).
+
 ## [1.0.13] - 2026-11-16
 
 ### Added

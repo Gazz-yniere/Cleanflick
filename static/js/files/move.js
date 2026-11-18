@@ -1,5 +1,7 @@
 // ── Move ──────────────────────────────────────────────────────────────────────
 let pendingMoveNameMismatch = null;
+const pendingMovePaths = new Set();
+let moveAllInProgress = false;
 
 function openMoveNameMismatchModal(file, proposedName) {
     const modal = document.getElementById('confirmMoveNameMismatchModal');
@@ -27,30 +29,40 @@ async function doMove(filePath) {
     const file = allFiles.find(f => f.path === realPath) || allFiles.find(f => f.path === filePath);
     if (!file?.filename) return;
     const p = filesPreviews[file.path];
-    if (!p?.data) return;
-
-    const proposedName = generateFilename(file, p.data.details);
-    if (proposedName && file.filename && proposedName.trim().toLowerCase() !== file.filename.trim().toLowerCase()) {
-        openMoveNameMismatchModal(file, proposedName);
-        return;
+    const proposedName = p?.data ? generateFilename(file, p.data.details) : '';
+    if (proposedName && proposedName.trim().toLowerCase() !== file.filename.trim().toLowerCase()) {
+        if (openMoveNameMismatchModal(file, proposedName)) return;
     }
 
     await runMove(file.path, file, proposedName || file.filename);
 }
 
-async function runMove(filePath, file, proposedName) {
+async function runMove(filePath, file, proposedName, options = {}) {
+    if (pendingMovePaths.has(filePath) || Object.values(activeTransfers).some(t => t.filePath === filePath)) {
+        const error = tr('err_move');
+        if (!options.silent) alert(error);
+        return { success: false, error };
+    }
+
+    pendingMovePaths.add(filePath);
     try {
-        const data = await postJSON('/api/move', {
-            path: file.path,
-            media_type: file.media_type || 'movie'
-        });
+        const body = {
+            path: filePath,
+            media_type: file.media_type
+        };
+        if (proposedName && proposedName !== file.filename) body.new_name = proposedName;
+        else if (file.media_type === 'tv') body.series_name = file.title;
+        const data = await postJSON('/api/move', body);
         if (!data.success) throw new Error(data.message);
         const jobId = data.job_id;
         activeTransfers[jobId] = { filePath, jobId, pollInterval: null, startTime: Date.now(), progress: null };
+        pendingMovePaths.delete(filePath);
         renderTable();
-        trackMoveProgress(jobId, filePath, file, data.new_name || proposedName || file.filename);
+        return await trackMoveProgress(jobId, filePath, file, data.new_name || proposedName || file.filename, options);
     } catch (e) {
-        alert(`✗ ${tr('err_move')}\n${e.message}`);
+        pendingMovePaths.delete(filePath);
+        if (!options.silent) alert(`✗ ${tr('err_move')}\n${e.message}`);
+        return { success: false, error: e.message };
     }
 }
 
@@ -86,38 +98,66 @@ function showTransferResult(filePath, isError, msg) {
     }
 }
 
-function trackMoveProgress(jobId, filePath, file, newName) {
-    const pollInterval = setInterval(async () => {
-        try {
-            const response = await fetch(`/api/move-progress/${jobId}`);
-            const prog = await response.json();
-            const transfer = activeTransfers[jobId];
-            if (!transfer) { clearInterval(pollInterval); return; }
+function trackMoveProgress(jobId, filePath, file, newName, options = {}) {
+    return new Promise(resolve => {
+        let consecutiveErrors = 0;
+        let polling = false;
+        let pollInterval = null;
+        const finish = result => {
+            if (pollInterval) clearInterval(pollInterval);
+            delete activeTransfers[jobId];
+            resolve(result);
+        };
+        const fail = message => {
+            showTransferResult(filePath, true, message || tr('err_move'));
+            setTimeout(() => { unmarkFileAsTransferring(filePath); renderTable(); }, 2500);
+            finish({ success: false, error: message || tr('err_move') });
+        };
+        const poll = async () => {
+            if (polling) return;
+            polling = true;
+            try {
+                const response = await fetch(`/api/move-progress/${jobId}`);
+                const prog = await response.json();
+                if (!response.ok) throw new Error(prog.error || `HTTP ${response.status}`);
+                consecutiveErrors = 0;
 
-            if (prog.finished) {
-                clearInterval(pollInterval);
-                delete activeTransfers[jobId];
-                if (prog.error) {
-                    showTransferResult(filePath, true, prog.error);
-                    setTimeout(() => { unmarkFileAsTransferring(filePath); renderTable(); }, 2500);
+                const transfer = activeTransfers[jobId];
+                if (!transfer) {
+                    finish({ success: false, error: tr('err_move') });
                     return;
                 }
-                showTransferResult(filePath, false);
-                setTimeout(() => removeFileFromList(filePath), 900);
-                refreshLibrary();
-                return;
+                if (prog.finished) {
+                    const verified = prog.verified === true
+                        && prog.source_exists === false && prog.target_exists === true;
+                    if (prog.error || !verified) {
+                        fail(prog.error || tr('err_move'));
+                        return;
+                    }
+                    showTransferResult(filePath, false);
+                    setTimeout(() => removeFileFromList(filePath), 900);
+                    if (options.refreshLibrary !== false) refreshLibrary();
+                    finish({ success: true, newName });
+                    return;
+                }
+
+                transfer.progress = prog;
+                updateTransferRow(filePath, jobId);
+            } catch (e) {
+                consecutiveErrors += 1;
+                if (consecutiveErrors >= 10) {
+                    fail(`${tr('err_move')}: ${e.message}`);
+                } else {
+                    console.error('Progress poll error:', e);
+                }
+            } finally {
+                polling = false;
             }
+        };
 
-            transfer.progress = prog;
-            updateTransferRow(filePath, jobId);
-        } catch (e) {
-            console.error('Progress poll error:', e);
-        }
-    }, 400);
-
-    if (activeTransfers[jobId]) {
-        activeTransfers[jobId].pollInterval = pollInterval;
-    }
+        pollInterval = setInterval(poll, 800);
+        if (activeTransfers[jobId]) activeTransfers[jobId].pollInterval = pollInterval;
+    });
 }
 
 function removeFileFromList(filePath) {
@@ -136,8 +176,41 @@ function removeFileFromList(filePath) {
     }
 }
 
-function moveAll() {
-    const toMove = allFiles.filter(f => filesPreviews[f.path]?.data);
+async function moveAll() {
+    if (moveAllInProgress) return;
+    const toMove = allFiles.filter(file => file?.path && file.filename
+        && !pendingMovePaths.has(file.path)
+        && !Object.values(activeTransfers).some(transfer => transfer.filePath === file.path));
     if (!toMove.length) { alert(tr('err_no_files')); return; }
-    toMove.forEach(file => doMove(file.path));
+
+    moveAllInProgress = true;
+    let next = 0;
+    let moved = 0;
+    const failures = [];
+    const worker = async () => {
+        while (next < toMove.length) {
+            const file = toMove[next++];
+            const result = await runMove(file.path, file, file.filename, {
+                silent: true,
+                refreshLibrary: false
+            });
+            if (result.success) moved += 1;
+            else failures.push({ filename: file.filename, error: result.error });
+        }
+    };
+
+    try {
+        await Promise.all(Array.from({ length: Math.min(2, toMove.length) }, worker));
+    } finally {
+        moveAllInProgress = false;
+    }
+
+    if (moved) refreshLibrary();
+    if (failures.length) {
+        const details = failures.slice(0, 8)
+            .map(item => `${item.filename}: ${item.error}`)
+            .join('\n');
+        const remainder = failures.length > 8 ? `\n… ${failures.length - 8} autres` : '';
+        alert(`${moved} déplacé(s), ${failures.length} échec(s).\n${details}${remainder}`);
+    }
 }

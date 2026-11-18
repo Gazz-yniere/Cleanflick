@@ -6,6 +6,7 @@ import re
 import shutil
 import threading
 import time
+import uuid
 from pathlib import Path
 
 from . import db, state
@@ -38,13 +39,16 @@ def _move_path(source_path, destination_path, job_id=None):
         return dst
 
     _ensure_dir(os.path.dirname(dst))
-    if os.path.exists(dst):
-        os.remove(dst)
-
     if job_id is None:
+        if os.path.exists(dst):
+            os.remove(dst)
         return shutil.move(src, dst)
 
-    file_size = os.path.getsize(src)
+    if os.path.lexists(dst):
+        raise FileExistsError(f"Le fichier destination existe déjà : {dst}")
+
+    source_stat = os.stat(src)
+    file_size = source_stat.st_size
     chunk = 16*1024*1024 if file_size > 1_073_741_824 else \
             8*1024*1024  if file_size > 104_857_600    else \
             2*1024*1024  if file_size > 10_485_760     else \
@@ -52,11 +56,16 @@ def _move_path(source_path, destination_path, job_id=None):
 
     copied, last_update, last_copied, speed_avg = 0, time.time(), 0, 0
     start = time.time()
+    temp_dst = os.path.join(
+        os.path.dirname(dst), f".{os.path.basename(dst)}.{uuid.uuid4().hex}.partial"
+    )
+    published = False
+    source_digest = hashlib.sha256()
     try:
-        with open(src, 'rb') as f_in, open(dst, 'wb') as f_out:
+        with open(src, 'rb') as f_in, open(temp_dst, 'xb') as f_out:
             while buf := f_in.read(chunk):
                 f_out.write(buf)
-                f_out.flush()
+                source_digest.update(buf)
                 copied += len(buf)
                 now = time.time()
                 elapsed = now - last_update
@@ -73,35 +82,96 @@ def _move_path(source_path, destination_path, job_id=None):
                         'elapsed': round(now - start, 2),
                     })
                     last_update, last_copied = now, copied
-        try:
-            fd = os.open(dst, os.O_RDONLY)
-            try:
-                os.fsync(fd)
-            finally:
-                os.close(fd)
-        except Exception:
-            pass
-        if not os.path.exists(dst):
-            raise FileNotFoundError(f"Le fichier de destination n'a pas été créé : {dst}")
+            f_out.flush()
+            os.fsync(f_out.fileno())
+
+        current_stat = os.stat(src)
+        if (copied != file_size or os.path.getsize(temp_dst) != file_size
+                or current_stat.st_size != source_stat.st_size
+                or current_stat.st_mtime_ns != source_stat.st_mtime_ns):
+            raise OSError(f"La copie de {src} est incomplète ou le fichier source a changé")
+
         state.move_progress[job_id].update({
-            'copied': file_size, 'file_size': file_size, 'percent': 100,
+            'copied': 0, 'file_size': file_size, 'percent': 0,
             'speed': 0, 'eta': 0, 'phase': 'verifying', 'finished': False,
             'elapsed': round(time.time() - start, 2),
         })
-        os.remove(src)
-        if os.path.exists(src):
-            raise FileExistsError(f"Le fichier source n'a pas quitté le dossier source : {src}")
+        destination_digest = hashlib.sha256()
+        verified_bytes = 0
+        last_verify_update = time.time()
+        with open(temp_dst, 'rb') as f_check:
+            while buf := f_check.read(chunk):
+                destination_digest.update(buf)
+                verified_bytes += len(buf)
+                now = time.time()
+                if now - last_verify_update > 0.2 or verified_bytes >= file_size:
+                    state.move_progress[job_id].update({
+                        'copied': verified_bytes,
+                        'percent': round(verified_bytes * 100 / file_size) if file_size else 100,
+                        'elapsed': round(now - start, 2),
+                    })
+                    last_verify_update = now
+        if source_digest.digest() != destination_digest.digest():
+            raise OSError(f"La vérification du contenu a échoué : {dst}")
+        if os.path.lexists(dst):
+            raise FileExistsError(f"Le fichier destination existe déjà : {dst}")
+        try:
+            os.link(temp_dst, dst)
+            published = True
+            os.remove(temp_dst)
+        except FileExistsError:
+            raise
+        except OSError as link_error:
+            if os.path.lexists(dst):
+                raise FileExistsError(f"Le fichier destination existe déjà : {dst}") from link_error
+            try:
+                os.rename(temp_dst, dst)
+            except OSError as rename_error:
+                raise rename_error from link_error
+            published = True
+        if not os.path.isfile(dst) or os.path.getsize(dst) != file_size:
+            raise OSError(f"La vérification du fichier destination a échoué : {dst}")
     except Exception:
-        if os.path.exists(dst):
-            os.remove(dst)
+        if os.path.lexists(temp_dst):
+            try:
+                os.remove(temp_dst)
+            except OSError:
+                logger.exception("Impossible de supprimer le fichier temporaire %s", temp_dst)
+        if published and os.path.exists(src) and os.path.lexists(dst):
+            try:
+                os.remove(dst)
+            except OSError:
+                logger.exception("Impossible de nettoyer la destination incomplète %s", dst)
         raise
+
+    try:
+        os.remove(src)
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        raise OSError(
+            f"Copie vérifiée dans {dst}, mais suppression de la source impossible : {e}"
+        ) from e
     return dst
 
 
 def _series_folder_name(new_name):
     stem = Path(new_name).stem
-    m = re.match(r'^(.*?)(?:\s+-\s+(?:S\d{2}E\d{2}|\d+x\d{2})\s+-\s+.*)?$', stem)
+    m = re.match(r'^(.*?)(?:[\s._-]*(?:S\d{1,2}E\d{1,2}|\d{1,2}x\d{2})\b.*)?$', stem, re.I)
     return (m.group(1).strip() if m and m.group(1).strip() else stem)
+
+
+def _safe_path_component(value):
+    component = re.sub(r'[<>:"/\\|?*\x00-\x1f]', ' ', str(value or ''))
+    component = re.sub(r'\s+', ' ', component).strip(' .')
+    if not component or component in {'.', '..'}:
+        raise ValueError("Nom de dossier de série invalide")
+    if component.upper().split('.')[0] in {
+            'CON', 'PRN', 'AUX', 'NUL',
+            *(f'COM{i}' for i in range(1, 10)),
+            *(f'LPT{i}' for i in range(1, 10))}:
+        component = f'_{component}'
+    return component
 
 
 def _refresh_scan_snapshot():
@@ -152,28 +222,28 @@ def _run_file_op(job_id, src_path, dst_path, history_entry):
             _move_path(src_path, dst_path, job_id=job_id)
             source_exists = os.path.exists(src_path)
             target_exists = os.path.exists(dst_path)
-            if target_exists and not source_exists:
-                state.move_progress[job_id] = _make_progress(
-                    file_size, finished=True, phase='done',
-                    copied=file_size, percent=100,
-                    new_path=dst_path, new_name=Path(dst_path).name,
-                    verified=True,
-                    source_exists=False,
-                    target_exists=True,
-                    destination=dst_path,
-                    source=src_path,
-                )
+            if not (target_exists and not source_exists and os.path.getsize(dst_path) == file_size):
+                raise OSError(f"Vérification impossible après déplacement : {src_path} -> {dst_path}")
+            state.move_progress[job_id] = _make_progress(
+                file_size, finished=True, phase='done',
+                copied=file_size, percent=100,
+                new_path=dst_path, new_name=Path(dst_path).name,
+                verified=True,
+                source_exists=False,
+                target_exists=True,
+                destination=dst_path,
+                source=src_path,
+            )
+            try:
                 append_history(history_entry)
-                # After a successful async move, update the scan snapshot so the watcher
-                # does not treat the change as a new external file.
-                try:
-                    with state.scan_watch_lock:
-                        state.scan_last_snapshot = watcher._scan_snapshot()
-                except Exception:
-                    pass
-                _migrate_file_cache(str(src_path), str(dst_path))
-            else:
-                raise FileNotFoundError(f"Vérification impossible après déplacement : {src_path} -> {dst_path}")
+            except Exception:
+                logger.exception("Le fichier a été déplacé, mais son historique n'a pas été enregistré")
+            try:
+                with state.scan_watch_lock:
+                    state.scan_last_snapshot = watcher._scan_snapshot()
+            except Exception:
+                logger.exception("Impossible de mettre à jour le snapshot après déplacement")
+            _migrate_file_cache(str(src_path), str(dst_path))
         except Exception as e:
             state.move_progress[job_id] = _make_progress(
                 file_size,

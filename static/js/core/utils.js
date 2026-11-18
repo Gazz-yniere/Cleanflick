@@ -32,7 +32,13 @@ function setVal(id, v) { const el = document.getElementById(id); if (el) el.valu
 
 function postJSON(url, body) {
     return fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
-        .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); });
+        .then(async r => {
+            let data;
+            try { data = await r.json(); } catch { data = null; }
+            if (!r.ok) throw new Error(data?.message || data?.error || `HTTP ${r.status}`);
+            if (data === null) throw new Error(`Réponse invalide du serveur (HTTP ${r.status})`);
+            return data;
+        });
 }
 
 function basename(p) {

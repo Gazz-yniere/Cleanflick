@@ -36,10 +36,19 @@ def broadcast_scan_refresh():
             pass
 
 
-def broadcast_library_refresh():
+def broadcast_library_refresh(old_path=None, new_path=None, name=None, tvdbid=None, meta=None):
     """Notifie les clients SSE que la bibliothèque a changé (renommage de
     dossier série en arrière-plan) pour un rafraîchissement incrémental."""
-    payload = json.dumps({'event': 'library-refresh', 'ts': time.time()})
+    payload = {'event': 'library-refresh', 'ts': time.time()}
+    if new_path:
+        payload.update({
+            'old_path': old_path,
+            'new_path': new_path,
+            'new_name': name,
+            'tvdbid': tvdbid,
+            'meta': meta or {},
+        })
+    payload = json.dumps(payload)
     dead = []
     for client in list(state.scan_clients):
         try:

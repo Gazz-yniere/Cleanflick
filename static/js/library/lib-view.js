@@ -5,18 +5,76 @@
 // les filtres/tri de la barre latérale s'appliquent (client-side).
 const LIB_VIEW_KEY = 'cleanflick_lib_view';
 const LIB_GRID_SECTIONS_KEY = 'cleanflick_lib_grid_sections';
+const LIB_GRID_CACHE_KEY = 'cleanflick_lib_flat_cache_v1';
+const LIB_GRID_PAGE_SIZE = 60;
+const LIB_GRID_CACHE_MAX_CHARS = 2_000_000;
 let libView = 'tree';
-let libFlatItems = null;
+function readLibGridCache() {
+    try {
+        const raw = localStorage.getItem(LIB_GRID_CACHE_KEY);
+        if (!raw) return null;
+        if (raw.length > LIB_GRID_CACHE_MAX_CHARS) {
+            try { localStorage.removeItem(LIB_GRID_CACHE_KEY); } catch (e) {}
+            return null;
+        }
+        const cache = JSON.parse(raw);
+        if (cache?.version !== 1 || !Array.isArray(cache.items) || !Number.isFinite(cache.ts)) {
+            try { localStorage.removeItem(LIB_GRID_CACHE_KEY); } catch (e) {}
+            return null;
+        }
+        return cache;
+    } catch (e) {
+        try { localStorage.removeItem(LIB_GRID_CACHE_KEY); } catch (removeError) {}
+        return null;
+    }
+}
+const _cachedLibGrid = readLibGridCache();
+let libFlatItems = _cachedLibGrid
+    ? _cachedLibGrid.items.map(it => ({ ...it, _imdb: (it.meta && it.meta.imdb) || '', _tvdb: (it.meta && it.meta.tvdb) || '' }))
+    : null;
 let libGridSections = { movie: true, series: true };
+let libGridVisibleItems = { movie: [], series: [] };
+let libGridRenderedCount = { movie: 0, series: 0 };
 let libGridExpanded = new Set();   // tvdb_id des séries ouvertes (expandées in-line dans la grille)
 let libGridExpandedSeasons = new Map(); // tvdb_id -> numéro de saison ouverte (ou absent)
 const _gridDetailCache = new Map();     // tvdb_id -> réponse API /api/library/series (détail)
-let _gridLoaded = false;
-let _gridTs = 0;
+let _gridLoaded = !!_cachedLibGrid;
+let _gridTs = _cachedLibGrid?.ts || 0;
 let _gridRenderSig = null;
+let _gridVisibleSig = null;
 let _gridFilterTimer = null;
+let _gridLoadObserver = null;
 const LIB_GRID_TTL = 60_000;
 let _gridFetchSeq = 0;
+let _gridFetchPromise = null;
+let _gridFetchController = null;
+let _gridCacheSaveTimer = null;
+
+function scheduleLibGridCacheSave() {
+    if (_gridCacheSaveTimer || !libFlatItems) return;
+    _gridCacheSaveTimer = setTimeout(() => {
+        _gridCacheSaveTimer = null;
+        try {
+            const raw = JSON.stringify({ version: 1, ts: _gridTs || Date.now(), items: libFlatItems });
+            if (raw.length > LIB_GRID_CACHE_MAX_CHARS) {
+                try { localStorage.removeItem(LIB_GRID_CACHE_KEY); } catch (e) {}
+                return;
+            }
+            try {
+                localStorage.setItem(LIB_GRID_CACHE_KEY, raw);
+            } catch (e) {
+                if (!(e?.name === 'QuotaExceededError' || e?.code === 22 || e?.code === 1014)) return;
+                for (const key of ['cleanflick_lib_tree_cache', 'cleanflick_history_cache_v1']) {
+                    try { localStorage.removeItem(key); } catch (removeError) {}
+                    try {
+                        localStorage.setItem(LIB_GRID_CACHE_KEY, raw);
+                        return;
+                    } catch (retryError) {}
+                }
+            }
+        } catch (e) {}
+    }, 350);
+}
 
 function libGridSortInfo(item) {
     const m = item.meta || {};
@@ -231,6 +289,101 @@ function libGridReplaceCard(oldCard, html) {
     return next;
 }
 
+function updateLibGridSeriesTile(oldPath, newPath, name, meta, tvdbid) {
+    if (!libFlatItems) return;
+    const id = String(tvdbid || meta.tvdb || meta.tvdbid || '');
+    const item = libFlatItems.find(candidate => candidate.type === 'series'
+        && (candidate.path === oldPath || candidate.path === newPath
+            || (id && String(candidate._tvdb || candidate.meta?.tvdb || '') === id)));
+    if (!item) return;
+    const card = [...document.querySelectorAll('.lib-card[data-path]')].find(candidate =>
+        candidate.dataset.path === oldPath || candidate.dataset.path === newPath
+        || (id && candidate.dataset.tvdb === id));
+    const previousId = String(item._tvdb || item.meta?.tvdb || '');
+    const nextMeta = { ...(item.meta || {}) };
+    if (id && previousId && id !== previousId) {
+        ['rating', 'date', 'genres', 'certification', 'runtime', 'poster', 'imdb', 'imdbid', 'tmdb', 'tmdbid']
+            .forEach(key => delete nextMeta[key]);
+    }
+    item.path = newPath;
+    item.name = name;
+    item.meta = { ...nextMeta, ...meta };
+    if (id) {
+        item._tvdb = id;
+        item.meta.tvdb = id;
+    }
+    item._imdb = item.meta.imdb || '';
+    if (id && previousId && id !== previousId) {
+        libGridExpanded.delete(previousId);
+        libGridExpandedSeasons.delete(previousId);
+    }
+
+    const visible = libFlatItems.filter(libGridItemVisible).sort(libGridCmp);
+    const seriesItems = visible.filter(candidate => candidate.type === 'series');
+    libGridVisibleItems = {
+        movie: visible.filter(candidate => candidate.type === 'movie'),
+        series: seriesItems,
+    };
+    _gridVisibleSig = visible.map(candidate => candidate.path).join('|');
+    const count = Math.min(libGridRenderedCount.series, seriesItems.length);
+    const index = seriesItems.indexOf(item);
+    const grid = card?.parentElement
+        || document.querySelector('#library-grid .lib-grid-section[data-key="series"] .lib-grid');
+    if (!grid) {
+        _gridRenderSig = null;
+        return;
+    }
+    _gridRenderSig = [libSortKey, libSortDir, [...libGridExpanded].sort().join(','), _gridVisibleSig].join('¦');
+    const findCard = candidate => [...document.querySelectorAll('.lib-card[data-path]')].find(element =>
+        element.dataset.path === candidate.path
+        || (candidate._tvdb && element.dataset.tvdb === String(candidate._tvdb)));
+    const createCard = (candidate, itemIndex) => {
+        const wrapper = document.createElement('div');
+        const expanded = libGridExpanded.has(String(candidate._tvdb || ''));
+        wrapper.innerHTML = libCardHtml(candidate, itemIndex, expanded);
+        return wrapper.firstElementChild;
+    };
+    const insertCard = (element, itemIndex) => {
+        const next = seriesItems.slice(itemIndex + 1, count).map(findCard).find(Boolean);
+        if (next) grid.insertBefore(element, next);
+        else grid.appendChild(element);
+    };
+    const updateLoadMore = () => {
+        const button = grid.parentElement?.querySelector('.lib-grid-load-more');
+        if (!button) return;
+        const shown = Math.min(libGridRenderedCount.series, seriesItems.length);
+        if (shown >= seriesItems.length) button.remove();
+        else button.textContent = `${tr('lib_grid_load_more')} (${shown}/${seriesItems.length})`;
+    };
+    if (card && index < 0) {
+        card.remove();
+        libGridRenderedCount.series = Math.min(Math.max(0, count - 1), seriesItems.length);
+        if (!seriesItems.length) grid.closest('.lib-grid-section')?.remove();
+        updateLoadMore();
+        return;
+    }
+    if (card && index >= count) {
+        card.remove();
+        const promotedIndex = count - 1;
+        const promoted = seriesItems[promotedIndex];
+        if (promoted && !findCard(promoted)) {
+            const element = createCard(promoted, promotedIndex);
+            if (element) grid.appendChild(element);
+        }
+        return;
+    }
+    const updatedCard = card
+        ? libGridReplaceCard(card, libCardHtml(item, index, libGridExpanded.has(String(item._tvdb || ''))))
+        : (index >= 0 && index < count ? createCard(item, index) : null);
+    if (updatedCard) insertCard(updatedCard, index);
+    if (!card && updatedCard && count > 0) {
+        const last = findCard(seriesItems[count - 1]);
+        if (last && last !== updatedCard) last.remove();
+    }
+    if (updatedCard) collectGridEnrich([item]);
+    collectGridEnrich([item]);
+}
+
 function libGridUpdateDetailCols(card, tvdb) {
     const seasons = card.querySelector(':scope > .lib-sd-seasons');
     const eps = card.querySelector(':scope > .lib-sd-eps');
@@ -337,9 +490,13 @@ function libGridToggleSection(key) {
 
 function libGridSectionHtml(labelHtml, items, key) {
     const open = libGridSections[key] !== false;
+    const emptyLabel = key === 'movie' ? 'lib_grid_empty_movies' : 'lib_grid_empty_series';
+    const count = Math.min(libGridRenderedCount[key] || LIB_GRID_PAGE_SIZE, items.length);
+    libGridRenderedCount[key] = count;
     const body = items.length
-        ? `<div class="lib-grid">${items.map((it, i) => libCardHtml(it, i)).join('')}</div>`
-        : `<div class="lib-grid"><div class="empty-state">${tr('lib_grid_empty')}</div></div>`;
+        ? `<div class="lib-grid">${items.slice(0, count).map((it, i) => libCardHtml(it, i)).join('')}</div>
+            ${libGridLoadMoreButton(key, count, items.length)}`
+        : `<div class="lib-grid"><div class="empty-state">${tr(emptyLabel)}</div></div>`;
     return `<section class="lib-grid-section" data-key="${key}">
         <div class="lib-grid-section-head" onclick="libGridToggleSection('${key}')">
             <i class="mdi mdi-chevron-right${open ? ' open' : ''}"></i>
@@ -351,6 +508,8 @@ function libGridSectionHtml(labelHtml, items, key) {
 }
 
 function libGridSeriesSectionHtml(series) {
+    const count = Math.min(libGridRenderedCount.series || LIB_GRID_PAGE_SIZE, series.length);
+    libGridRenderedCount.series = count;
     return `<section class="lib-grid-section" data-key="series">
         <div class="lib-grid-section-head" onclick="libGridToggleSection('series')">
             <i class="mdi mdi-chevron-right${libGridSections.series !== false ? ' open' : ''}"></i>
@@ -358,9 +517,59 @@ function libGridSeriesSectionHtml(series) {
             <span class="lib-grid-section-count">${series.length}</span>
         </div>
         <div class="lib-grid-section-body" ${libGridSections.series !== false ? '' : 'hidden'}>
-            <div class="lib-grid">${series.map((it, i) => libCardHtml(it, i, libGridExpanded.has(String(it._tvdb || '')))).join('')}</div>
+            <div class="lib-grid">${series.slice(0, count).map((it, i) => libCardHtml(it, i, libGridExpanded.has(String(it._tvdb || '')))).join('')}</div>
+            ${libGridLoadMoreButton('series', count, series.length)}
         </div>
     </section>`;
+}
+
+function libGridLoadMoreButton(key, count, total) {
+    if (count >= total) return '';
+    return `<button type="button" class="btn btn-secondary lib-grid-load-more" data-grid-key="${key}" onclick="libGridLoadMore('${key}')">
+        ${esc(tr('lib_grid_load_more'))} (${count}/${total})
+    </button>`;
+}
+
+function observeLibGridLoadMore(container) {
+    if (typeof IntersectionObserver === 'undefined') return;
+    if (!_gridLoadObserver) {
+        _gridLoadObserver = new IntersectionObserver(entries => {
+            entries.forEach(entry => {
+                if (!entry.isIntersecting) return;
+                _gridLoadObserver.unobserve(entry.target);
+                libGridLoadMore(entry.target.dataset.gridKey);
+            });
+        }, { rootMargin: '400px 0px' });
+    }
+    container.querySelectorAll('.lib-grid-load-more').forEach(button => _gridLoadObserver.observe(button));
+}
+
+function libGridLoadMore(key) {
+    const items = libGridVisibleItems[key] || [];
+    const section = document.querySelector(`#library-grid .lib-grid-section[data-key="${key}"]`);
+    const grid = section?.querySelector('.lib-grid');
+    const button = section?.querySelector('.lib-grid-load-more');
+    if (!grid || !button || button.disabled) return;
+    button.disabled = true;
+    _gridLoadObserver?.unobserve(button);
+
+    const start = libGridRenderedCount[key];
+    const end = Math.min(start + LIB_GRID_PAGE_SIZE, items.length);
+    const nextItems = items.slice(start, end);
+    const html = nextItems.map((item, index) => {
+        const expanded = key === 'series' && libGridExpanded.has(String(item._tvdb || ''));
+        return libCardHtml(item, start + index, expanded);
+    }).join('');
+    grid.insertAdjacentHTML('beforeend', html);
+    libGridRenderedCount[key] = end;
+    collectGridEnrich(nextItems);
+
+    if (end >= items.length) button.remove();
+    else {
+        button.textContent = `${tr('lib_grid_load_more')} (${end}/${items.length})`;
+        button.disabled = false;
+        if (_gridLoadObserver) _gridLoadObserver.observe(button);
+    }
 }
 
 function renderLibGrid() {
@@ -373,10 +582,22 @@ function renderLibGrid() {
     const sig = [libSortKey, libSortDir, [...libGridExpanded].sort().join(','), visible.map(it => it.path).join('|')].join('¦');
     if (sig === _gridRenderSig) return;
     _gridRenderSig = sig;
+    const visibleSig = visible.map(it => it.path).join('|');
+    if (visibleSig !== _gridVisibleSig) libGridRenderedCount = { movie: 0, series: 0 };
+    _gridVisibleSig = visibleSig;
     const movies = visible.filter(it => it.type === 'movie');
     const series = visible.filter(it => it.type === 'series');
-    if (!movies.length && !series.length) {
+    libGridVisibleItems = { movie: movies, series };
+    _gridLoadObserver?.disconnect();
+    if (!libFlatItems.length) {
         container.innerHTML = `<div class="empty-state">${tr('lib_grid_empty')}</div>`;
+        return;
+    }
+    if (!movies.length && !series.length) {
+        container.innerHTML = `<div class="empty-state lib-grid-empty">
+            <span>${esc(tr('lib_grid_no_matches'))}</span>
+            <button class="btn btn-secondary" onclick="resetLibFilters()">${esc(tr('lib_filter_reset'))}</button>
+        </div>`;
         return;
     }
     let html = '';
@@ -389,6 +610,8 @@ function renderLibGrid() {
         html += libGridSeriesSectionHtml(series);
     }
     container.innerHTML = html;
+    observeLibGridLoadMore(container);
+    collectGridEnrich();
 }
 
 function applyLibGridFilter() {
@@ -402,6 +625,12 @@ function applyLibGridFilter() {
 function setLibView(v) {
     if (libView === v) return;
     libView = v;
+    if (v !== 'grid' && _gridFetchController) {
+        _gridFetchController.abort();
+        _gridFetchController = null;
+        _gridFetchPromise = null;
+        _gridFetchSeq += 1;
+    }
     try { localStorage.setItem(LIB_VIEW_KEY, v); } catch (e) {}
     document.getElementById('lib-view-tree')?.classList.toggle('active', v === 'tree');
     document.getElementById('lib-view-grid')?.classList.toggle('active', v === 'grid');
@@ -414,37 +643,67 @@ function setLibView(v) {
 
 function loadLibGrid(force) {
     if (libView !== 'grid') return;
-    const seq = ++_gridFetchSeq;
     if (libFlatItems && !force && Date.now() - _gridTs < LIB_GRID_TTL) {
         renderLibGrid();
-        return;
+        return Promise.resolve(libFlatItems);
     }
+    if (_gridFetchPromise && !force) return _gridFetchPromise;
+    if (_gridFetchController) _gridFetchController.abort();
+    const controller = new AbortController();
+    _gridFetchController = controller;
+    const seq = ++_gridFetchSeq;
     const grid = document.getElementById('library-grid');
-    if (grid) grid.innerHTML = `<div class="skeleton-grid">${'<div class="skeleton skeleton-card"></div>'.repeat(8)}</div>`;
-    fetch('/api/library/flat')
-        .then(r => r.json())
+    if (libFlatItems) renderLibGrid();
+    else if (grid) grid.innerHTML = `<div class="skeleton-grid">${'<div class="skeleton skeleton-card"></div>'.repeat(8)}</div>`;
+    const promise = fetch('/api/library/flat', { signal: controller.signal })
+        .then(r => {
+            if (!r.ok) throw new Error(`HTTP ${r.status}`);
+            if (!(r.headers.get('content-type') || '').includes('application/json'))
+                throw new Error(tr('lib_grid_invalid_response'));
+            return r.json();
+        })
         .then(data => {
             if (seq !== _gridFetchSeq) return;
-            libFlatItems = (data.items || []).map(it => ({ ...it, _imdb: (it.meta && it.meta.imdb) || '', _tvdb: (it.meta && it.meta.tvdb) || '' }));
+            if (!Array.isArray(data.items)) throw new Error(tr('lib_grid_invalid_response'));
+            libFlatItems = data.items.map(it => ({ ...it, _imdb: (it.meta && it.meta.imdb) || '', _tvdb: (it.meta && it.meta.tvdb) || '' }));
             _gridLoaded = true;
             _gridTs = Date.now();
+            scheduleLibGridCacheSave();
             _gridRenderSig = null;
+            _gridVisibleSig = null;
             renderLibGrid();
-            collectGridEnrich();
         })
-        .catch(() => {
+        .catch(error => {
             if (seq !== _gridFetchSeq) return;
-            if (grid) grid.innerHTML = `<div class="message error">${tr('lib_grid_empty')}</div>`;
+            if (error.name === 'AbortError') return;
+            console.error('Library grid load failed:', error);
+            if (!libFlatItems && grid) grid.innerHTML = `<div class="message error lib-grid-load-error">
+                <strong>${esc(tr('lib_grid_load_error'))}</strong>
+                <small>${esc(error.message)}</small>
+                <button class="btn btn-secondary" onclick="loadLibGrid(true)">${esc(tr('btn_refresh_library'))}</button>
+            </div>`;
+        })
+        .finally(() => {
+            if (seq === _gridFetchSeq) {
+                _gridFetchPromise = null;
+                _gridFetchController = null;
+            }
         });
+    _gridFetchPromise = promise;
+    return promise;
 }
 
 // Enrichissement (note/genres/poster manquants) des items de la grille :
 // file throttlée commune à l'arbre (120 IDs/120 TVDB par batch + délai).
-function collectGridEnrich() {
+function collectGridEnrich(items) {
     if (!libFlatItems) return;
+    const candidates = items || [
+        ...libGridVisibleItems.movie.slice(0, libGridRenderedCount.movie),
+        ...libGridVisibleItems.series.slice(0, libGridRenderedCount.series),
+    ];
     const ids = [];
     const tvdbIds = [];
-    for (const it of libFlatItems) {
+    for (const it of candidates) {
         const m = it.meta || {};
         if (it.type === 'series') {
             if (it._tvdb && !m.rating) tvdbIds.push(it._tvdb);
@@ -476,6 +735,7 @@ window.libGridApplyEnrich = (results) => {
         changed.push(it);
     });
     if (!changed.length || libView !== 'grid') return;
+    scheduleLibGridCacheSave();
     // Update in-place des cartes touchées (pas de re-render global).
     for (const it of changed) {
         const card = document.querySelector(`.lib-card[data-path="${CSS.escape(it.path)}"]`);

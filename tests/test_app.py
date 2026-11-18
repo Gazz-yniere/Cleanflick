@@ -1,5 +1,8 @@
 import os
 import time
+from pathlib import Path
+
+import pytest
 
 
 
@@ -241,6 +244,90 @@ def test_api_move_missing_source(app_client, tmp_path):
     assert r.status_code == 400
 
 
+def test_api_move_conflict_preserves_both_files(app_client, tmp_path):
+    source = tmp_path / 'downloads' / 'movie.mkv'
+    source.write_bytes(b'new movie')
+    destination = tmp_path / 'out' / 'movies' / source.name
+    destination.parent.mkdir(parents=True)
+    destination.write_bytes(b'existing movie')
+
+    response = app_client.post('/api/move', json={
+        'path': str(source), 'media_type': 'movie',
+    })
+
+    assert response.status_code == 409
+    assert source.read_bytes() == b'new movie'
+    assert destination.read_bytes() == b'existing movie'
+
+
+def test_api_move_rejects_unknown_type_and_unsafe_name(app_client, tmp_path):
+    source = tmp_path / 'downloads' / 'movie.mkv'
+    source.write_bytes(b'movie')
+
+    missing_type = app_client.post('/api/move', json={'path': str(source)})
+    unsafe_name = app_client.post('/api/move', json={
+        'path': str(source), 'media_type': 'movie', 'new_name': '..\\outside.mkv',
+    })
+
+    assert missing_type.status_code == 400
+    assert unsafe_name.status_code == 400
+    assert source.read_bytes() == b'movie'
+
+
+def test_api_move_uses_series_and_confirmed_filename(app_client, tmp_path, monkeypatch):
+    from src import utils
+
+    monkeypatch.setattr(utils, '_migrate_file_cache', lambda *_args: None)
+    source = tmp_path / 'downloads' / 'unparsed-name.mkv'
+    source.write_bytes(b'episode')
+    response = app_client.post('/api/move', json={
+        'path': str(source),
+        'media_type': 'tv',
+        'series_name': 'Superman & Lois',
+        'new_name': 'Superman & Lois - S01E01 - Pilot.mkv',
+    })
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body['new_path'] == str(
+        tmp_path / 'out' / 'tv' / 'Superman & Lois' / 'Superman & Lois - S01E01 - Pilot.mkv'
+    )
+
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        progress = app_client.get(f"/api/move-progress/{body['job_id']}").get_json()
+        if progress.get('finished'):
+            break
+        time.sleep(0.1)
+
+    assert progress['verified'] is True
+    assert os.path.exists(body['new_path'])
+    assert Path(body['new_path']).read_bytes() == b'episode'
+    assert not source.exists()
+
+
+def test_async_move_keeps_verified_copy_if_source_cleanup_fails(tmp_path, monkeypatch):
+    from src import state, utils
+
+    source = tmp_path / 'source.mkv'
+    destination = tmp_path / 'destination.mkv'
+    source.write_bytes(b'content')
+    job_id = 'cleanup-failure'
+    state.move_progress[job_id] = utils._make_progress(7)
+    original_remove = os.remove
+
+    def fail_source_remove(path):
+        if os.path.abspath(path) == os.path.abspath(source):
+            raise PermissionError('source is locked')
+        original_remove(path)
+
+    monkeypatch.setattr(utils.os, 'remove', fail_source_remove)
+    with pytest.raises(OSError, match='Copie vérifiée'):
+        utils._move_path(str(source), str(destination), job_id=job_id)
+
+    assert source.read_bytes() == b'content'
+    assert destination.read_bytes() == b'content'
+
+
 def test_api_move_tv_creates_series_folder(app_client, tmp_path):
     dl = tmp_path / 'downloads'
     src = dl / 'My Show - S01E01 - Pilot.mkv'
@@ -262,8 +349,8 @@ def test_api_move_tv_creates_series_folder(app_client, tmp_path):
 
 def test_api_move_progress_unknown_job(app_client):
     r = app_client.get('/api/move-progress/unknown-job')
-    assert r.status_code == 200
-    assert r.get_json()['finished'] is True
+    assert r.status_code == 404
+    assert r.get_json()['verified'] is False
 
 
 def test_api_config_get_post(app_client):
@@ -310,7 +397,6 @@ def test_library_movie_file_meta_not_matched_in_cache(app_client, tmp_path):
     homonymes TVDB → la meta vient du nom + OMDb, PAS du 1er résultat (poster/
     infos d'un autre titre)."""
     from src import db
-    from src.api import omdb
 
     movies = tmp_path / 'out' / 'movies'
     movies.mkdir(parents=True)

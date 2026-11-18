@@ -1,7 +1,71 @@
 // ── History ───────────────────────────────────────────────────────────────────
 const HISTORY_PAGE_SIZE = 100;
+const HISTORY_CACHE_KEY = 'cleanflick_history_cache_v1';
+const HISTORY_CACHE_MAX_CHARS = 350_000;
 let _historyRequestId = 0;
 let _historyHasMore = false;
+function readHistoryCache() {
+    try {
+        const raw = localStorage.getItem(HISTORY_CACHE_KEY);
+        if (!raw) return null;
+        if (raw.length > HISTORY_CACHE_MAX_CHARS) {
+            try { localStorage.removeItem(HISTORY_CACHE_KEY); } catch (e) {}
+            return null;
+        }
+        const cache = JSON.parse(raw);
+        if (cache?.version !== 1 || !Array.isArray(cache.entries) || !Number.isFinite(cache.ts)) {
+            try { localStorage.removeItem(HISTORY_CACHE_KEY); } catch (e) {}
+            return null;
+        }
+        return cache;
+    } catch (e) {
+        try { localStorage.removeItem(HISTORY_CACHE_KEY); } catch (removeError) {}
+        return null;
+    }
+}
+const _cachedHistory = readHistoryCache();
+window._historyEntries = _cachedHistory?.entries || [];
+_historyHasMore = !!_cachedHistory?.hasMore;
+let _historyLoaded = !!_cachedHistory;
+let _historyUpdatedAt = _cachedHistory?.ts || 0;
+let _historyController = null;
+let _historyPromise = null;
+const HISTORY_CACHE_TTL = 30_000;
+
+function saveHistoryCache() {
+    try {
+        const entries = window._historyEntries || [];
+        let cachedEntries = entries;
+        let raw;
+        const makeRaw = list => JSON.stringify({
+            version: 1,
+            ts: _historyUpdatedAt || Date.now(),
+            hasMore: _historyHasMore || list.length < entries.length,
+            entries: list,
+        });
+        raw = makeRaw(cachedEntries);
+        while (raw.length > HISTORY_CACHE_MAX_CHARS && cachedEntries.length > 1) {
+            cachedEntries = cachedEntries.slice(0, Math.max(1, Math.floor(cachedEntries.length * 0.8)));
+            raw = makeRaw(cachedEntries);
+        }
+        if (raw.length > HISTORY_CACHE_MAX_CHARS) {
+            try { localStorage.removeItem(HISTORY_CACHE_KEY); } catch (e) {}
+            return;
+        }
+        try {
+            localStorage.setItem(HISTORY_CACHE_KEY, raw);
+        } catch (e) {
+            if (!(e?.name === 'QuotaExceededError' || e?.code === 22 || e?.code === 1014)) return;
+            for (const key of ['cleanflick_lib_tree_cache', 'cleanflick_lib_flat_cache_v1']) {
+                try { localStorage.removeItem(key); } catch (removeError) {}
+                try {
+                    localStorage.setItem(HISTORY_CACHE_KEY, raw);
+                    return;
+                } catch (retryError) {}
+            }
+        }
+    } catch (e) {}
+}
 
 function renderHistoryEntries(entries, startIndex) {
     const tbody = document.getElementById('history-tbody');
@@ -39,22 +103,42 @@ function renderHistoryEntries(entries, startIndex) {
     else tbody.insertAdjacentHTML('beforeend', markup);
 }
 
-function loadHistory(loadMore = false) {
+function loadHistory(loadMore = false, force = true) {
     const tbody = document.getElementById('history-tbody');
     const button = document.getElementById('history-load-more');
     const entries = window._historyEntries || [];
+    if (!loadMore && _historyLoaded) {
+        if (entries.length) {
+            tbody.innerHTML = '';
+            renderHistoryEntries(entries, 0);
+        } else {
+            tbody.innerHTML = `<tr><td colspan="4" class="empty-state">${tr('hist_empty')}</td></tr>`;
+        }
+        if (button) {
+            button.hidden = !_historyHasMore;
+            button.disabled = false;
+        }
+        if (!force && Date.now() - _historyUpdatedAt < HISTORY_CACHE_TTL)
+            return Promise.resolve(entries);
+    }
+    if (_historyPromise && !force) return _historyPromise;
+    if (_historyController) _historyController.abort();
+    const controller = new AbortController();
+    _historyController = controller;
     const offset = loadMore ? entries.length : 0;
     const requestId = ++_historyRequestId;
     if (!loadMore) {
-        window._historyEntries = [];
-        _historyHasMore = false;
-        if (button) button.hidden = true;
-        tbody.innerHTML = `<tr><td colspan="4" class="empty-state">${tr('searching')}</td></tr>`;
+        if (!_historyLoaded) {
+            window._historyEntries = [];
+            _historyHasMore = false;
+            if (button) button.hidden = true;
+            tbody.innerHTML = `<tr><td colspan="4" class="empty-state">${tr('searching')}</td></tr>`;
+        }
     } else if (button) {
         button.disabled = true;
     }
 
-    fetch(`/api/history?limit=${HISTORY_PAGE_SIZE}&offset=${offset}`)
+    const promise = fetch(`/api/history?limit=${HISTORY_PAGE_SIZE}&offset=${offset}`, { signal: controller.signal })
         .then(r => {
             if (!r.ok) throw new Error(`HTTP ${r.status}`);
             return r.json().then(data => ({ data, hasMore: r.headers.get('X-History-Has-More') === 'true' }));
@@ -65,6 +149,9 @@ function loadHistory(loadMore = false) {
             const startIndex = window._historyEntries.length;
             window._historyEntries.push(...data);
             _historyHasMore = hasMore;
+            _historyLoaded = true;
+            _historyUpdatedAt = Date.now();
+            saveHistoryCache();
             if (!window._historyEntries.length) {
                 tbody.innerHTML = `<tr><td colspan="4" class="empty-state">${tr('hist_empty')}</td></tr>`;
             } else {
@@ -77,9 +164,18 @@ function loadHistory(loadMore = false) {
         })
         .catch(e => {
             if (requestId !== _historyRequestId) return;
+            if (e.name === 'AbortError') return;
             if (button) button.disabled = false;
-            if (!loadMore) tbody.innerHTML = `<tr><td colspan="4" class="empty-state">Erreur: ${esc(e.message)}</td></tr>`;
+            if (!loadMore && !_historyLoaded) tbody.innerHTML = `<tr><td colspan="4" class="empty-state">Erreur: ${esc(e.message)}</td></tr>`;
+        })
+        .finally(() => {
+            if (requestId === _historyRequestId) {
+                _historyController = null;
+                _historyPromise = null;
+            }
         });
+    _historyPromise = promise;
+    return promise;
 }
 
 async function revertEntry(i) {

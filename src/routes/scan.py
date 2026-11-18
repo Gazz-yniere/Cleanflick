@@ -11,18 +11,16 @@ bp = Blueprint('scan', __name__)
 @bp.route('/api/scan')
 @login_required
 def api_scan():
-    state.scanned_files = state.scanner.scan()
+    files = state.scanned_files = state.scanner.scan()
+    duration_map = duration.durations_for(f.path for f in files)
     out = []
-    for f in state.scanned_files:
+    for f in files:
         item = {
             'filename': f.filename, 'path': f.path,
             'media_type': f.media_type, 'title': f.title,
             'season': f.season, 'episode': f.episode, 'year': f.year
         }
-        try:
-            item['duration'] = duration.duration_for(f.path)
-        except Exception:
-            item['duration'] = None
+        item['duration'] = duration_map.get(f.path)
         out.append(item)
     # Une recherche TVDB/OMDb nécessite une validation explicite de l'utilisateur.
     # Seul le calcul local des durées peut continuer en arrière-plan.

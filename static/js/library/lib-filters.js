@@ -93,29 +93,9 @@ function libSearchReset() {
     scheduleApplyLibFilter();
 }
 
-// Pré-charge les enfants de tous les dossiers collapsed (sans les déplier) pour
-// que le filtre puisse évaluer leur contenu : le DOM ne contient que les nœuds
-// déjà rendus, or les enfants d'un dossier non ouvert sont chargés à la volée.
-function preloadAllFolders(container) {
-    const walk = (el) => {
-        for (const n of el.children) {
-            if (!n._sort || !n._sort.is_dir) continue;
-            if (n._loaded || n._loading) continue;
-            const childrenEl = n._childrenEl;
-            const row = n.querySelector(':scope > .lib-row');
-            if (!childrenEl || !row || !n._entry) continue;
-            n._loaded = true;
-            loadLibChildren(n._entry, childrenEl, row, 0, LIB_PAGE_SIZE, true);
-        }
-    };
-    walk(container);
-    container.querySelectorAll('.lib-children').forEach(c => walk(c));
-}
-
 function applyLibFilter() {
     const container = document.getElementById('library-tree');
     if (!container) return;
-    if (libAnyFilterActive()) preloadAllFolders(container);
     const facetsActive = libGenreFilter.size > 0 || libAgeRange !== null;
     const searchActive = libSearchQuery !== '';
     const q = searchActive ? libNormSearch(libSearchQuery) : '';
@@ -163,7 +143,10 @@ function applyLibFilter() {
             // Recherche : la ligne correspond si son propre nom/titre contient la
             // chaîne ; un dossier peut aussi apparaître via un descendant (récursif).
             const searchSelfOk = !searchActive || libNodeSearchText(n).includes(q);
-            const visible = isRootLevel || n._loading || ((selfMatches && metaOk && rangeOk(n) && missingOk && searchSelfOk)
+            // Un dossier non chargé reste visible pendant le filtre : son contenu
+            // est inconnu, mais on n'explore pas en réseau tous les dossiers fermés.
+            const unknownChildren = !!(n._childrenEl && !n._loaded);
+            const visible = isRootLevel || n._loading || unknownChildren || ((selfMatches && metaOk && rangeOk(n) && missingOk && searchSelfOk)
                 || ((searchActive || childCanMatch) && childVisible));
             n.style.display = visible ? '' : 'none';
             if (visible) anyVisible = true;
@@ -249,16 +232,8 @@ function setLibFacetPreload(enabled) {
 
 function continueLibFacetPreload() {
     if (!_libFacetPreloadRequested) return;
-    const container = document.getElementById('library-tree');
-    if (!container) return;
-    preloadAllFolders(container);
-    const pending = [...container.querySelectorAll('.lib-node')].some(n =>
-        n._childrenEl && (!n._loaded || n._loading)
-    );
-    if (!pending) {
-        _libFacetPreloadRequested = false;
-        collectLibFacets();
-    }
+    _libFacetPreloadRequested = false;
+    collectLibFacets();
 }
 
 function renderLibFacetList(listId, values, selected) {

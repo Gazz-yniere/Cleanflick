@@ -26,8 +26,8 @@ function doRename(filePath) {
         });
 }
 
-function renameAll() {
-    const toRename = allFiles.filter(f => filesPreviews[f.path]?.data);
+async function renameAll() {
+    const toRename = await ensureFilePreviews(allFiles);
     if (!toRename.length) { alert(tr('err_no_files')); return; }
     toRename.forEach(file => doRename(file.path));
 }

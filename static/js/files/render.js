@@ -83,6 +83,7 @@ function renderTable() {
         return;
     }
     tbody.innerHTML = rows.join('');
+    observeFilePreviews(tbody);
     updateBatchSelectionUI();
     if (tbody.animate && !window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
         tbody.animate([{ opacity: 0.4 }, { opacity: 1 }], { duration: 160, easing: 'ease-out' });
@@ -149,10 +150,20 @@ function filterFiles(type) {
 function renderPreview(file) {
     const p = filesPreviews[file.path];
     if (!p) return `<div class="no-preview">${tr('btn_other')}</div>`;
-    if (p.loading) return `<div class="loading-cell"><i class="mdi mdi-loading mdi-spin"></i> ${tr('searching')}</div>`;
+    if (p.loading && !p.data) return `<div class="loading-cell"><i class="mdi mdi-loading mdi-spin"></i> ${tr('searching')}</div>`;
     if (p.error) return `<div class="no-preview"><i class="mdi mdi-alert-circle-outline"></i> ${esc(p.error)}</div>`;
     if (!p.data) return `<div class="no-preview">${tr('no_result')}</div>`;
     const { source, details } = p.data;
+    if (p.loading) {
+        const poster = source.poster ? `<img src="${esc(source.poster)}" alt="">` : `<i class="mdi ${file.media_type === 'movie' ? 'mdi-film' : 'mdi-television'}"></i>`;
+        return `<div class="preview-wrap">
+            <div class="preview-poster">${poster}</div>
+            <div class="preview-info"><div class="preview-line1">
+                <span class="preview-title">${esc(details.title || source.title || '')}</span>${details.year ? ` <span class="preview-year">${esc(String(details.year))}</span>` : ''}
+                <span class="loading-cell"><i class="mdi mdi-loading mdi-spin"></i> ${tr('searching')}</span>
+            </div></div>
+        </div>`;
+    }
     const notFound = details.not_found || source.not_found;
     // Film : le format par défaut n'a besoin que de titre/année (dispos OMDb).
     // Série : le titre d'épisode est inconnu sans TVDB → pas de renommage.
@@ -200,8 +211,9 @@ function previewChips(source, details, isTv, realDur) {
 
 function renderActions(file) {
     const p = filesPreviews[file.path];
-    if (!p) return `<div class="btn-group"><button class="btn-small search" title="${tr('btn_other')}" onclick="manualSearch(decodeURIComponent('${pathKey(file.path)}'))"><i class="mdi mdi-magnify"></i></button></div>`;
-    if (p.loading) return `<div class="btn-group"><button class="btn-small search" disabled><i class="mdi mdi-loading mdi-spin"></i></button></div>`;
+    const moveButton = `<button class="btn-small move" title="${tr('btn_move')}" onclick="doMove(decodeURIComponent(this.closest('.file-row').dataset.filePath))"><i class="mdi mdi-folder-move"></i></button>`;
+    if (!p) return `<div class="btn-group">${moveButton}<button class="btn-small search" title="${tr('btn_other')}" onclick="manualSearch(decodeURIComponent('${pathKey(file.path)}'))"><i class="mdi mdi-magnify"></i></button></div>`;
+    if (p.loading) return `<div class="btn-group">${moveButton}<button class="btn-small search" disabled><i class="mdi mdi-loading mdi-spin"></i></button></div>`;
     let html = '<div class="btn-group">';
     if (p.data) {
         const notFound = p.data.details.not_found || p.data.source.not_found;
@@ -211,8 +223,8 @@ function renderActions(file) {
             html += `<span class="btn-small ok-label" title="${tr('btn_ok')}"><i class="mdi mdi-check"></i></span>`;
         else if (canRename && newName)
             html += `<button class="btn-small rename" title="${tr('btn_rename')}" onclick="doRename(decodeURIComponent('${pathKey(file.path)}'))"><i class="mdi mdi-pencil"></i></button>`;
-        html += `<button class="btn-small move" title="${tr('btn_move')}" onclick="doMove(decodeURIComponent('${pathKey(file.path)}'))"><i class="mdi mdi-folder-move"></i></button>`;
     }
+    html += moveButton;
     html += `<button class="btn-small search" title="${tr('btn_other')}" onclick="manualSearch(decodeURIComponent('${pathKey(file.path)}'))"><i class="mdi mdi-magnify"></i></button>`;
     html += '</div>';
     return html;

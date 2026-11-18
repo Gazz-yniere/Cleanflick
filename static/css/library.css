@@ -302,14 +302,81 @@
     margin-left: 10px;
     flex-shrink: 0;
 }
+#libRenameConfirmBody {
+    scrollbar-width: thin;
+    scrollbar-color: var(--c-border2) transparent;
+}
+#libRenameConfirmBody::-webkit-scrollbar { width: 8px; }
+#libRenameConfirmBody::-webkit-scrollbar-thumb { background: var(--c-border2); border-radius: 4px; }
+#libRenameConfirmBody::-webkit-scrollbar-thumb:hover { background: var(--c-accent); }
+#libRenameConfirmBody::-webkit-scrollbar-track { background: transparent; }
+.lib-grid-empty { display: flex; flex-direction: column; align-items: center; gap: 12px; }
+.lib-grid-load-error { text-align: center; }
+.lib-grid-load-error button { margin-top: 12px; }
+.lib-grid-load-more { display: block; min-width: 180px; margin: 14px auto; }
 .lib-rename-summary { font-size: 1.05em; font-weight: 600; color: var(--c-success); margin-bottom: 10px; }
-.lib-rename-folder { font-size: 1em; padding: 8px 10px; margin-bottom: 10px; border-radius: 6px; background: var(--c-surface2); border: 1px solid var(--c-border); color: var(--c-text2); }
+.lib-rename-preview {
+    display: flex; align-items: center; gap: 12px; padding: 12px 14px;
+    margin-bottom: 16px; border-radius: var(--radius); border: 1px solid var(--c-border);
+    background: var(--c-surface2); color: var(--c-text2);
+}
+.lib-rename-preview > i { color: var(--c-accent); font-size: 1.35em; }
+.lib-rename-preview > div { display: flex; flex-direction: column; min-width: 0; }
+.lib-rename-preview strong { color: var(--c-bright); }
+.lib-rename-preview span { color: var(--c-text3); font-size: .9em; }
+.lib-rename-total, .lib-rename-count {
+    flex-shrink: 0; border-radius: var(--radius-pill); padding: 3px 9px;
+    background: var(--c-accent-dim); color: var(--c-accent-hv) !important;
+    font-weight: 600; white-space: nowrap;
+}
+.lib-rename-section { margin: 16px 0; }
+.lib-rename-section h3 {
+    display: flex; align-items: center; gap: 8px; margin-bottom: 8px;
+    color: var(--c-bright); font-size: .95em; font-weight: 600;
+}
+.lib-rename-count { font-size: .82em; }
+.lib-rename-folder {
+    display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+    align-items: center; gap: 12px; padding: 12px;
+    border-radius: var(--radius); background: var(--c-surface2); border: 1px solid var(--c-border);
+}
+.lib-rename-folder > div { display: flex; flex-direction: column; min-width: 0; gap: 3px; }
+.lib-rename-folder > div > span, .lib-rename-columns {
+    color: var(--c-text3); font-size: .8em; font-weight: 600; text-transform: uppercase; letter-spacing: .04em;
+}
+.lib-rename-folder s, .lib-rename-folder strong {
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.lib-rename-folder s { color: var(--c-text3); }
+.lib-rename-folder strong { color: var(--c-success); }
 .lib-rename-folder--error { color: var(--c-error); border-color: var(--c-error-bd); background: var(--c-error-soft); }
+.lib-rename-columns {
+    display: grid; grid-template-columns: minmax(0, 1fr) 24px minmax(0, 1fr);
+    gap: 8px; padding: 0 10px 5px;
+}
+.lib-rename-columns span:last-child { grid-column: 3; }
 .lib-rename-list { display: flex; flex-direction: column; gap: 6px; }
-.lib-rename-item { display: flex; flex-direction: row; align-items: center; gap: 8px; font-family: var(--font-mono, monospace); font-size: .9em; padding: 6px 8px; border-radius: 4px; background: var(--c-surface2); }
+.lib-rename-item {
+    display: grid; grid-template-columns: minmax(0, 1fr) 24px minmax(0, 1fr);
+    align-items: center; gap: 8px; font-family: var(--font-mono, monospace);
+    font-size: .9em; padding: 8px 10px; border-radius: var(--radius-sm);
+    background: var(--c-surface2); border: 1px solid var(--c-border);
+}
 .lib-rename-sep { color: var(--c-accent); line-height: 1; flex-shrink: 0; }
-.lib-rename-from { color: var(--c-error); flex: 1 1 0; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.lib-rename-to { color: var(--c-success); flex: 1 1 0; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.lib-rename-from, .lib-rename-to {
+    display: block; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.lib-rename-from { color: var(--c-text2); }
+.lib-rename-to { color: var(--c-success); }
+@media (max-width: 560px) {
+    .lib-rename-preview { align-items: flex-start; flex-wrap: wrap; }
+    .lib-rename-total { margin-left: 32px; }
+    .lib-rename-folder { grid-template-columns: minmax(0, 1fr); }
+    .lib-rename-folder > .lib-rename-sep { transform: rotate(90deg); justify-self: center; }
+    .lib-rename-item { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+    .lib-rename-columns { display: none; }
+    .lib-rename-sep { transform: rotate(90deg); justify-self: center; }
+}
 .lib-actions { display: flex; gap: 6px; flex-shrink: 0; margin-left: 8px; }
 .lib-row--dir .lib-actions .btn-small {
     width: 30px; height: 30px; border-radius: 50%;

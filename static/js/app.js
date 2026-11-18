@@ -1,5 +1,6 @@
 // ── Navigation ────────────────────────────────────────────────────────────────
 let scanEventSource = null;
+let _appInitializing = true;
 
 function switchTab(tab, e) {
     if (e) e.preventDefault();
@@ -14,9 +15,9 @@ function switchTab(tab, e) {
     document.getElementById(tab)?.classList.add('active');
     if (e?.target) e.target.closest('.nav-link').classList.add('active');
     try { localStorage.setItem(LIB_TAB_KEY, tab); } catch (err) {}
-    if (tab === 'files') scanFiles();
+    if (tab === 'files' && !_appInitializing) scanFiles(false);
     if (tab === 'config') loadConfig();
-    if (tab === 'history') loadHistory();
+    if (tab === 'history') loadHistory(false, false);
     if (tab === 'library') {
         const c = document.getElementById('library-tree');
         if (!c || !c.children.length || c.querySelector('.loading, .empty-state')) loadLibrary();
@@ -38,6 +39,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (savedTab && ['files', 'library', 'history', 'config'].includes(savedTab)) {
         switchTab(savedTab);
     }
+    _appInitializing = false;
 
     if (window.EventSource) {
         try {
@@ -48,12 +50,15 @@ document.addEventListener('DOMContentLoaded', () => {
                     if (data.event === 'scan-refresh') {
                         scanFiles();
                     } else if (data.event === 'library-refresh') {
-                        // Renommage de dossier série terminé (parsing TVDB en
-                        // arrière-plan achevé) : les fichiers ont pu être renommés
-                        // une 2e fois → le cache d'arborescence est périmé.
-                        if (typeof clearLibTreeCache === 'function') clearLibTreeCache();
-                        const c = document.getElementById('library-tree');
-                        if (c && c.children.length) refreshLibrary();
+                        if (data.new_path && typeof updateRenamedLibrarySeries === 'function') {
+                            updateRenamedLibrarySeries(
+                                data.old_path, data.new_path, data.new_name, data.meta, data.tvdbid
+                            );
+                        } else {
+                            if (typeof clearLibTreeCache === 'function') clearLibTreeCache();
+                            const c = document.getElementById('library-tree');
+                            if (c && c.children.length) refreshLibrary();
+                        }
                     } else if (data.event === 'usage-refresh') {
                         loadApiUsage();
                     }
@@ -76,9 +81,9 @@ document.addEventListener('DOMContentLoaded', () => {
             if (cfg.tv_format)    globalConfig.tv_format    = cfg.tv_format;
             if (cfg.tv_output_path) globalConfig.tv_output_path = cfg.tv_output_path;
             // Initial scan: populate the table but preserve previews if present
-            scanFiles();
+            if (document.getElementById('files')?.classList.contains('active') && !_filesScanLoaded) scanFiles(false);
         })
         .catch(e => { if (!e.message.includes('401')) {
-            scanFiles();
+            if (document.getElementById('files')?.classList.contains('active') && !_filesScanLoaded) scanFiles(false);
         } });
 });

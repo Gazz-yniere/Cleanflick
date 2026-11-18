@@ -83,7 +83,6 @@ def test_interpolate_episode_title_languages():
 
 def test_generate_filename_user_tv_format_uses_episode_title(monkeypatch):
     # Format réel de l'utilisateur : {n:en} ({y}) [tvdbid-{tvdbid}] - {s00e00} - {t:en}
-    prev = state.config
     monkeypatch.setattr(state, 'config', {
         'tv_format': '{n:en} ({y}) [tvdbid-{tvdbid}] - {s00e00} - {t:en}'
     })

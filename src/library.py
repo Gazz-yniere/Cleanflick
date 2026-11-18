@@ -122,6 +122,26 @@ def folder_size_direct(path):
     return total
 
 
+def folder_summary_direct(path, cached_size=None):
+    """Return the immediate entry count and direct-file size in one directory pass."""
+    count = 0
+    total = cached_size if cached_size is not None else 0
+    try:
+        with os.scandir(path) as entries:
+            for entry in entries:
+                count += 1
+                if cached_size is not None:
+                    continue
+                try:
+                    if not entry.is_dir(follow_symlinks=False):
+                        total += entry.stat(follow_symlinks=False).st_size
+                except OSError:
+                    continue
+    except OSError:
+        pass
+    return {'count': count, 'size': total}
+
+
 def _episode_order_candidates(season_types):
     candidates = [('default', 'official')]
     for item in season_types or []:

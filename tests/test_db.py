@@ -31,6 +31,19 @@ def test_history_roundtrip(tmp_db):
     assert db.get_history() == []
 
 
+def test_reverted_history_ids_can_be_limited_to_a_page(tmp_db):
+    db.add_history({'id': 'h1', 'op': 'move', 'date': '2026-01-01',
+                    'from_path': '/a', 'to_path': '/b'})
+    db.add_history({'id': 'h2', 'op': 'move', 'date': '2026-01-02',
+                    'from_path': '/c', 'to_path': '/d'})
+    db.add_history({'id': 'r1', 'op': 'revert', 'date': '2026-01-03',
+                    'from_path': '/b', 'to_path': '/a', 'revert_of': 'h1'})
+
+    assert db.get_reverted_history_ids(['h2']) == set()
+    assert db.get_reverted_history_ids(['h1']) == {'h1'}
+    assert db.get_reverted_history_ids() == {'h1'}
+
+
 def test_search_cache_roundtrip_and_expiry(tmp_db):
     assert db.cache_get('k1') is None
     db.cache_set('k1', 'movie', [{'id': 1}])
@@ -72,6 +85,20 @@ def test_omdb_cache_roundtrip(tmp_db):
     db.omdb_set('TT1', {'imdbRating': '8.5', 'Title': 'X'})
     assert db.omdb_get('tt1') == {'imdbRating': '8.5', 'Title': 'X'}
     assert 'tt1' in db.omdb_all()
+
+
+def test_library_metadata_snapshot(tmp_db):
+    db.file_cache_set('f1', '/downloads/Film.mkv', 10, 123, 'movie', [{'title': 'Film'}])
+    db.omdb_set('tt1', {'Title': 'Film', 'imdbRating': '8.0'})
+    db.series_meta_set('55', 'tt2', {'title': 'Series'})
+    db.omdb_episode_set('tt2:s01e01', {'imdbRating': '7.0'})
+
+    snapshot = db.library_metadata_snapshot()
+    assert snapshot['basename_map']['Film.mkv']['results'][0]['title'] == 'Film'
+    assert snapshot['omdb_map']['tt1']['imdbRating'] == '8.0'
+    assert snapshot['series_meta']['55']['data']['title'] == 'Series'
+    assert snapshot['series_imdb']['55'] == 'tt2'
+    assert snapshot['episode_omdb']['tt2:s01e01']['imdbRating'] == '7.0'
 
 
 def test_omdb_episode_cache(tmp_db):
@@ -164,6 +191,7 @@ def test_library_file_size_cache_queries_and_move(tmp_db, tmp_path):
     assert db.library_file_sizes_get([old_path])[old_path]['size'] == 2048
     assert db.library_file_sizes_range() == {'min': 2048, 'max': 2048, 'count': 1}
     assert db.library_file_size_sum_direct(str(old_dir)) == {'size': 2048, 'count': 1}
+    assert db.library_file_size_sums_direct([str(old_dir)]) == {str(old_dir): 2048}
 
     db.library_file_sizes_move_under(str(old_dir), str(new_dir))
 
