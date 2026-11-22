@@ -972,8 +972,8 @@ def test_library_rename_folder_series_sync(app_client, monkeypatch, tmp_path):
     new_folder = body['new_path']
     assert os.path.isdir(new_folder)
     assert not os.path.isdir(folder)
-    # Le dossier a été renommé (le format par défaut ne porte pas d'ID).
-    assert body['new_name'] == 'Breaking Bad'
+    # Le dossier a été renommé selon series_folder_format (défaut : année + ID).
+    assert body['new_name'] == 'Breaking Bad (2008) [tvdbid-81189]'
 
     # Le parsing TVDB + 2e passe de renommage se font en arrière-plan :
     # on attend que les titres d'épisodes soient complétés dans les noms.
@@ -1048,7 +1048,7 @@ def test_rename_folder_series_dry_run_no_changes(app_client, monkeypatch, tmp_pa
         {'s': 1, 'e': 2, 'title': 'Second'}]})
 
     tv_root = str(tmp_path / 'out' / 'tv')
-    folder = os.path.join(tv_root, 'Show')  # déjà au bon nom (format par défaut)
+    folder = os.path.join(tv_root, 'Show (2020) [tvdbid-555]')  # déjà conforme au format dossier
     os.makedirs(folder)
     for n in ('Show - S01E01 - Pilot.mkv', 'Show - S01E02 - Second.mkv'):
         with open(os.path.join(folder, n), 'wb') as f:

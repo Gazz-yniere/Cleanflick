@@ -41,6 +41,7 @@
 
 - **TVDB v4 + OMDb API** integration for accurate movie, TV show and episode metadata
 - **Filebot-style naming** with customizable format strings (`{n}`, `{y}`, `{s00e00}`, `{t}`, `{imdb}`...)
+- **Series folder naming** — `series_folder_format` (default `{n} ({y}) [tvdbid-{tvdbid}]`) drives the series folder name on move and rename, with the same tokens as filenames
 - **Multi-language titles** (`{n:fr}`, `{n:de}`, `{n:ja}`...)
 - **External IDs** in filenames (IMDb, TVDB, TMDB)
 - **Recursive folder scanning** with live refresh, reacting to changes in real time
@@ -50,7 +51,7 @@
 - **Manual search** with full TVDB results selection (confirmed choices are remembered)
 - **Rename All / Move All** batch processing
 - **Real-time move progress** with speed, ETA, a `verifying` phase, and file-gone verification
-- **Library tab** — tree **and grid** views (toggle), instant F5 via a local tree cache, missing **and upcoming** episode badges, expandable series card (poster + seasons with TVDB posters + episodes with state), per-file manual search, folder rename/delete, full series-folder rename from manual search (episode order selection, subtitles follow the video), TVDB web link, poster hover preview, filter sidebar (search, genre, age, size, rating, date, missing) and episode "present/total" counters
+- **Library tab** — tree **and grid** views (toggle), instant F5 via a local tree cache, missing **and upcoming** episode badges, expandable series card (poster + seasons with TVDB posters + episodes with state), per-file manual search, folder rename/delete, full series-folder rename from manual search (episode order selection, subtitles follow the video), TVDB web link, poster hover preview, filter sidebar (search, genre, age, size, rating, date, missing) and episode "present/total" counters; series folders whose name does not match `series_folder_format` are flagged with a ⚠ rename badge (tree and grid)
 - **Folder picker** for media paths
 - **Password protection** (optional)
 - **6 languages** interface (FR, EN, ES, DE, IT, PT) with language switch
@@ -67,7 +68,7 @@ CleanFlick turns messy download folders into a clean, organized media library. T
 ### 1. Files
 
 - CleanFlick **recursively scans** your `input_path` and lists every movie / TV episode file.
-- For each file it queries **TVDB** (and **OMDb** for episode ratings) and proposes a cleaned filename using your `movie_format` / `tv_format`.
+- For each file it queries **TVDB** (and **OMDb** for episode ratings) and proposes a cleaned filename using your `movie_format` / `tv_format`; TV files move into a series folder named by `series_folder_format`.
 - Results are **cached permanently by default** so repeated scans are instant. The **scan/auto-scan** path uses the cache first and only queries the API when there is no cached info; the **manual search** (`🔍`) always forces a fresh API call so you can pick an alternative title even when a proposal is already cached. Once you confirm a manual selection, it is remembered per-file.
 - Each row offers **Rename** and **Move** (plus a transfer overlay with a live progress bar, speed, ETA and a final *verifying* phase that confirms the file really moved before removing the row).
 
@@ -172,7 +173,7 @@ Copy `config.example.json` to `config.json` and fill in your settings:
   "tv_output_path": "/tv_shows",
   "movie_format": "{n} ({y})",
   "tv_format": "{n} - {s00e00} - {t}",
-  "lib_fast_scan": true,
+  "series_folder_format": "{n} ({y}) [tvdbid-{tvdbid}]",
   "cache_refresh_days": 0,
   "tvdb_episode_order": "auto",
   "show_s00_specials": false
@@ -188,7 +189,7 @@ Copy `config.example.json` to `config.json` and fill in your settings:
 | `tv_output_path` | Destination for renamed TV shows | `/tv_shows` |
 | `movie_format` | Naming format for movies | `{n} ({y})` |
 | `tv_format` | Naming format for TV shows | `{n} - {s00e00} - {t}` |
-| `lib_fast_scan` | Fast library scan (non-recursive folder sizes) | `true` |
+| `series_folder_format` | Naming format for series folders (move + rename, applied when the TVDB id is known) | `{n} ({y}) [tvdbid-{tvdbid}]` |
 | `cache_refresh_days` | Auto-refresh of cached API data in the background (0 = disabled) | `0` |
 | `tvdb_episode_order` | TVDB episode order: `auto`, `official`, `alternate` or `netflix` (per-series choice from manual search wins) | `auto` |
 | `show_s00_specials` | Include special episodes (season 0) in missing episodes and episode counters | `false` |
@@ -253,6 +254,13 @@ Copy `config.example.json` to `config.json` and fill in your settings:
 ```
 {n} - {s00e00} - {t}                              → Breaking Bad - S01E01 - Pilot.mkv
 {n} ({y}) [tvdbid-{tvdbid}] - {s00e00} - {t}    → Breaking Bad (2008) [tvdbid-81189] - S01E01 - Pilot.mkv
+```
+
+**Series Folders** (`series_folder_format`):
+
+```
+{n} ({y}) [tvdbid-{tvdbid}]                      → Breaking Bad (2008) [tvdbid-81189]/
+{n:fr} ({y}) [tvdbid-{tvdbid}]                   → Les Feux de l'amour (1973) [tvdbid-326]/  (folder in French title)
 ```
 
 ---

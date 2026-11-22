@@ -7,7 +7,7 @@ import time
 import threading
 import logging
 
-from . import db, mediaduration, state
+from . import db, mediaduration
 
 logger = logging.getLogger(__name__)
 
@@ -43,8 +43,8 @@ def _parse_duration_cached(path, mt, sz):
 def get_duration(path, non_blocking=False):
     """Durée réelle (min) du fichier vidéo, lue en Python pur (Docker-safe),
     mise en cache en mémoire + en base (invalidée si taille/mtime change).
-    En mode scan rapide : durée non bloquante (un chargement en arrière-plan
-    démarre et la durée est renvoyée au premier accès suivant)."""
+    Toujours non bloquante : si la durée est inconnue, le parse est mis en
+    file d'arrière-plan et None est renvoyé (affichée au prochain accès)."""
     try:
         st = os.stat(path)
         mt = int(st.st_mtime)
@@ -62,10 +62,8 @@ def get_duration(path, non_blocking=False):
             return minutes
     except Exception:
         pass
-    if non_blocking or (state.config or {}).get('lib_fast_scan'):
-        _dur_enqueue(path, mt)
-        return None
-    return _parse_duration_cached(path, mt, sz)
+    _dur_enqueue(path, mt)
+    return None
 
 
 def get_duration_cached(path, size, mtime, cached=None, non_blocking=False):
@@ -82,10 +80,8 @@ def get_duration_cached(path, size, mtime, cached=None, non_blocking=False):
         minutes = cached.get('minutes')
         _MEDIA_DUR_CACHE[key] = minutes
         return minutes
-    if non_blocking or (state.config or {}).get('lib_fast_scan'):
-        _dur_enqueue(path, mt)
-        return None
-    return _parse_duration_cached(path, mt, sz)
+    _dur_enqueue(path, mt)
+    return None
 
 
 def duration_for(path):

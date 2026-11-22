@@ -1,5 +1,16 @@
 # Changelog
 
+## [Unreleased]
+
+## [1.0.15] - 2026-11-22
+
+### Added
+- **Series folder format** — new `series_folder_format` setting (default `{n} ({y}) [tvdbid-{tvdbid}]`) defines the series folder name with the same tokens as the filename formats. Used by `/api/move` (TV files land in the formatted folder, metadata from the preview + series cache; folder format is only applied when the TVDB id is resolved, so no empty `( ) [tvdbid-]` folders) and by the series folder rename; the library tree and the grid now flag series folders whose name does not match the format (⚠ badge), season folders and episode files keep following `tv_format`.
+- **Tests** — 4 new `series_folder` tests in `test_naming.py` (translations, default fallback, sanitization) plus updated move/rename route tests — **150 tests pass**, ruff clean.
+
+### Removed
+- **`lib_fast_scan` setting** — the library scan is now always non-blocking: durations are parsed in the background worker and fill in on the next refresh, so the checkbox and its config key are gone (legacy keys are dropped on load).
+
 ## [1.0.14] - 2026-11-18
 
 ### Added

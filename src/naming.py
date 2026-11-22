@@ -24,6 +24,9 @@ _LANG_MAP_INV = {v: k for k, v in _LANG_MAP.items()}
 # titre d'épisode (langue originale), jamais sur le nom de série.
 _TRANS_NAMES = ('n', 'title', 'original_title')
 
+# Défaut du nom de dossier série (config `series_folder_format`).
+SERIES_FOLDER_DEFAULT = '{n} ({y}) [tvdbid-{tvdbid}]'
+
 
 def episode_title_languages(template=None) -> List[str]:
     """TVDB language codes requested by localized episode-title tokens."""
@@ -194,6 +197,37 @@ def generate_filename(filename, media_type, season, episode, details,
     result = re.sub(r'[\s\-.]+$', '', result)
     result = result.strip()
     return (result + ext) if result else filename
+
+
+def series_folder(details):
+    """Rendu du nom de dossier série depuis `series_folder_format`
+    (tokens identiques à generate_filename : {n}, {n:en}, {y}, {tvdbid}...).
+    Renvoie '' si aucun format n'est défini et le rendu est vide."""
+    cfg = state.config or {}
+    fmt = (cfg.get('series_folder_format') or '').strip() or SERIES_FOLDER_DEFAULT
+    details = details or {}
+    cleaned_title = clean_title(details.get('title'))
+    cleaned_original = clean_title(details.get('original_title'))
+    year = details.get('year') or ''
+    tvdb = details.get('tvdbid') or str(details.get('id') or '')
+    imdb = details.get('imdbid') or details.get('imdb') or ''
+    tmdb = details.get('tmdbid') or details.get('tmdb') or ''
+    vars_ = {
+        'n': cleaned_title, 'title': cleaned_title,
+        'original_title': cleaned_original,
+        'ny': f"{cleaned_title} ({year})" if cleaned_title and year else cleaned_title,
+        'y': year, 'year': year,
+        'tvdbid': tvdb, 'tvdb': tvdb,
+        'imdbid': imdb, 'imdb': imdb,
+        'tmdbid': tmdb, 'tmdb': tmdb,
+        '_translations': details.get('translations') or {},
+    }
+    result = interpolate(fmt, vars_)
+    result = result.replace(':', ' -')
+    result = re.sub(r'[<>"\\/\|?*]', '', result)
+    result = re.sub(r'\s+', ' ', result)
+    result = re.sub(r'[\s\-.]+$', '', result)
+    return result.strip()
 
 
 def series_folder_name(filename):

@@ -267,15 +267,6 @@
                         <span class="hint" data-i18n="cfg_tv_output_path_hint"></span>
                     </div>
                     <div class="form-field cfg-toggle-row">
-                        <label class="cfg-toggle" for="lib_fast_scan">
-                            <input type="checkbox" id="lib_fast_scan">
-                            <span class="cfg-toggle-text">
-                                <span data-i18n="cfg_lib_fast_scan"></span>
-                                <span class="hint" data-i18n="cfg_lib_fast_scan_hint"></span>
-                            </span>
-                        </label>
-                    </div>
-                    <div class="form-field cfg-toggle-row">
                         <label class="cfg-toggle" for="show_s00_specials">
                             <input type="checkbox" id="show_s00_specials">
                             <span class="cfg-toggle-text">
@@ -305,10 +296,16 @@
                                 <label data-i18n="cfg_tv_format"></label>
                                 <input type="text" id="tv_format" placeholder="{n} - {s00e00} - {t}">
                             </div>
+                            <div class="form-field">
+                                <label data-i18n="cfg_series_folder_format"></label>
+                                <input type="text" id="series_folder_format" placeholder="{n:en} ({y}) [tvdbid-{tvdbid}]">
+                            </div>
                             <div class="examples-box">
                                 <p><code>{n} - {s00e00} - {t}</code> → <em>Breaking Bad - S01E01 - Pilot.mkv</em></p>
                                 <p><code>{n} ({y}) [tvdbid-{tvdbid}] - {s00e00} - {t}</code> → <em>Breaking Bad (2008) [tvdbid-81189] - S01E01 - Pilot.mkv</em></p>
                                 <p><code>{n:en} ({y}) [tvdbid-{tvdbid}] - {s00e00} - {t:en}</code> → <em>titre forcé en anglais</em></p>
+                                <p><code>{n} ({y}) [tvdbid-{tvdbid}]</code> → <em>The Boys (2019) [tvdbid-269096]</em> (dossier)</p>
+                                <p><code>{n}</code> → <em>The Boys</em> (dossier sans année ni ID)</p>
                             </div>
                         </div>
                     </div>
@@ -417,7 +414,7 @@
 
     <footer class="app-footer">
         <span data-i18n="footer_text"></span>
-        <span class="footer-meta">· <a href="https://github.com/Gazz-yniere/Cleanflick" target="_blank">GitHub</a> · v1.0.14</span>
+        <span class="footer-meta">· <a href="https://github.com/Gazz-yniere/Cleanflick" target="_blank">GitHub</a> · v1.0.15</span>
     </footer>
 </div>
 

@@ -51,7 +51,20 @@ async function runMove(filePath, file, proposedName, options = {}) {
             media_type: file.media_type
         };
         if (proposedName && proposedName !== file.filename) body.new_name = proposedName;
-        else if (file.media_type === 'tv') body.series_name = file.title;
+        if (file.media_type === 'tv') {
+            // Métas série pour que le backend rende le nom du dossier
+            // depuis `series_folder_format` (aperçu prioritaire, sinon champs du scan).
+            const p = filesPreviews[filePath];
+            const det = (p && p.data && p.data.details) || {};
+            const tvdbFromName = String(file.filename || '').match(/\[tvdbid-(\d+)\]/i);
+            body.series = {
+                title: det.title || file.title || '',
+                year: det.year || file.year || '',
+                tvdbid: String(det.tvdbid || det.id || (tvdbFromName ? tvdbFromName[1] : '') || ''),
+            };
+            if (det.translations) body.series.translations = det.translations;
+            body.series_name = file.title || '';
+        }
         const data = await postJSON('/api/move', body);
         if (!data.success) throw new Error(data.message);
         const jobId = data.job_id;

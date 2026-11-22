@@ -101,6 +101,40 @@ def test_generate_filename_only_s00e00_remains():
     assert out == '- S01E01.mkv'
 
 
+def test_series_folder_renders_user_format(monkeypatch):
+    monkeypatch.setattr(state, 'config', {
+        'series_folder_format': '{n:en} ({y}) [tvdbid-{tvdbid}]'
+    })
+    out = naming.series_folder({
+        'title': 'The Boys', 'year': 2019, 'tvdbid': 269096,
+        'translations': {'eng': 'The Boys', 'fra': 'Les Garçons'},
+    })
+    assert out == 'The Boys (2019) [tvdbid-269096]'
+
+
+def test_series_folder_translated_token(monkeypatch):
+    monkeypatch.setattr(state, 'config', {'series_folder_format': '{n:fra} ({y})'})
+    out = naming.series_folder({
+        'title': 'The Boys', 'year': 2019, 'tvdbid': '269096',
+        'translations': {'fra': 'Les Garçons'},
+    })
+    assert out == 'Les Garçons (2019)'
+
+
+def test_series_folder_default_when_config_empty(monkeypatch):
+    # Format vide → défaut « {n} ({y}) [tvdbid-{tvdbid}] ».
+    monkeypatch.setattr(state, 'config', {'series_folder_format': ''})
+    out = naming.series_folder({'title': 'Show', 'year': 2020, 'tvdbid': '42'})
+    assert out == 'Show (2020) [tvdbid-42]'
+
+
+def test_series_folder_sanitizes_illegal_chars(monkeypatch):
+    monkeypatch.setattr(state, 'config', {'series_folder_format': '{n} ({y})'})
+    out = naming.series_folder({'title': 'Show: Origins', 'year': 2021})
+    # clean_title remplace « : » par espace (parité avec generate_filename).
+    assert out == 'Show Origins (2021)'
+
+
 def test_series_folder_name_with_ids():
     assert naming.series_folder_name('My Show (2019) [tvdbid-42] - S01E01 - Pilot.mkv') == 'My Show (2019) [tvdbid-42]'
 

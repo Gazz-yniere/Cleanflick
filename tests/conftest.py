@@ -34,7 +34,6 @@ def app_client(tmp_path, monkeypatch):
             'tv_output_path': str(tmp_path / 'out' / 'tv'),
             'movie_format': '{n} ({y})',
             'tv_format': '{n} - {s00e00} - {t}',
-            'lib_fast_scan': False,
         }, f)
     (tmp_path / 'downloads').mkdir()
     monkeypatch.setenv('CLEANFLICK_PASSWORD', '')

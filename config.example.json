@@ -5,8 +5,8 @@
     "movie_output_path":"/movies",
     "tv_output_path":"/tv_shows",
     "movie_format":"{n} ({y})",
-    "tv_format":"{n} - {s00e00} - {t}",
-    "lib_fast_scan": true,
+    "tv_format":"{n:en} - {s00e00} - {t:en}",
+    "series_folder_format":"{n:en} ({y}) [tvdbid-{tvdbid}]",
     "cache_refresh_days": 0,
     "tvdb_episode_order": "auto",
     "show_s00_specials": false

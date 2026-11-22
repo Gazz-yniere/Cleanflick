@@ -79,6 +79,7 @@ document.addEventListener('DOMContentLoaded', () => {
         .then(cfg => {
             if (cfg.movie_format) globalConfig.movie_format = cfg.movie_format;
             if (cfg.tv_format)    globalConfig.tv_format    = cfg.tv_format;
+            if (cfg.series_folder_format) globalConfig.series_folder_format = cfg.series_folder_format;
             if (cfg.tv_output_path) globalConfig.tv_output_path = cfg.tv_output_path;
             // Initial scan: populate the table but preserve previews if present
             if (document.getElementById('files')?.classList.contains('active') && !_filesScanLoaded) scanFiles(false);

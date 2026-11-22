@@ -95,6 +95,7 @@ def _library_flat_cache_key():
         os.path.abspath(config.get('_tv_output_path') or config.get('tv_output_path') or ''),
         config.get('movie_format', '{n} ({y})'),
         config.get('tv_format', '{n} - {s00e00} - {t}'),
+        config.get('series_folder_format', naming.SERIES_FOLDER_DEFAULT),
         bool(config.get('show_s00_specials')),
     )
 
@@ -387,10 +388,14 @@ def _meta_ctx(fast_scan, lib_type, movie_fmt, tv_fmt):
     (api_library) et la liste plate (api_library/flat)."""
     movie_fmt = state.config.get('movie_format', '{n} ({y})')
     tv_fmt    = state.config.get('tv_format',    '{n} - {s00e00} - {t}')
+    series_fmt = state.config.get('series_folder_format', naming.SERIES_FOLDER_DEFAULT)
 
-    def is_valid_name(filename, ftype, is_dir=False):
+    def is_valid_name(filename, ftype, is_dir=False, series_level=False):
         stem = Path(filename).stem if not is_dir else filename
-        fmt = movie_fmt if ftype == 'movie' else tv_fmt
+        # Les dossiers de niveau série (enfants directs de la racine TV) se
+        # valident contre le format de nom de dossier ; les sous-dossiers
+        # (saisons) et les fichiers se valident contre le format d'épisode.
+        fmt = movie_fmt if ftype == 'movie' else (series_fmt if (is_dir and series_level) else tv_fmt)
         tokens = set(re.findall(r'\{([a-zA-Z_][\w:]*?)\}', fmt))
         # Normaliser les alias
         if 'imdbid' in tokens:
@@ -864,6 +869,9 @@ def api_library():
 
     movie_fmt = state.config.get('movie_format', '{n} ({y})')
     tv_fmt    = state.config.get('tv_format',    '{n} - {s00e00} - {t}')
+    # Niveau série = enfants directs de la racine TV : ces dossiers se valident
+    # contre series_folder_format ; les saisons et fichiers suivent tv_format.
+    parent_is_tv_root = lib_type == 'tv' and os.path.normcase(abs_path) == os.path.normcase(tv_root)
     ctx = _meta_ctx(fast_scan, lib_type, movie_fmt, tv_fmt)
     is_valid_name = ctx['is_valid_name']
     name_meta = ctx['name_meta']
@@ -940,7 +948,8 @@ def api_library():
                     child_count = sum(1 for _ in os.scandir(entry.path))
                 except Exception:
                     child_count = 0
-            valid_dir = is_valid_name(entry.name, lib_type, is_dir=True)
+            valid_dir = is_valid_name(entry.name, lib_type, is_dir=True,
+                                      series_level=parent_is_tv_root)
             ep_present = ep_total = ep_upcoming = None
             if lib_type == 'tv' and not fast_scan:
                 mep = re.search(r'\[tvdbid-([0-9]+)\]', entry.name, re.I)
@@ -995,8 +1004,7 @@ def api_library():
             ) if mtime else None
             entries.append({'name': entry.name, 'path': entry.path, 'type': lib_type, 'is_dir': False, 'size': size,
                              'valid': valid, 'meta': file_meta(entry.name, dur, entry.path),
-                            'dur_pending': dur is None and state.config.get('lib_fast_scan')
-                            and duration.is_pending(entry.path)})
+                            'dur_pending': dur is None and duration.is_pending(entry.path)})
     if size_updates:
         db.library_file_sizes_set(size_updates)
     # Mode scan rapide : get_duration() a déjà mis les durées manquantes dans
@@ -1103,7 +1111,8 @@ def _build_library_flat():
                         size = library.folder_summary_direct(e.path)['size']
                     except Exception:
                         pass
-                    _add(e.path, 'series', e.name, meta, True, size, ep_present, ep_total, ep_upcoming)
+                    valid_dir = ctx['is_valid_name'](e.name, 'tv', is_dir=True, series_level=True)
+                    _add(e.path, 'series', e.name, meta, valid_dir, size, ep_present, ep_total, ep_upcoming)
                 else:
                     _walk_series(e.path, depth + 1, max_depth)
             except OSError:
@@ -1659,15 +1668,24 @@ def api_library_rename_folder_series():
     renames = _folder_series_rename(abs_folder, series_title, year, tvdb_id, imdb_id, tmdb_id,
                                     translations, dry_run=dry_run)
 
-    # Nom du dossier : dérivé du nom d'épisode généré (même format que le JS).
-    sample_name = naming.generate_filename('sample.mkv', 'tv', 1, 1, {
+    # Nom du dossier : rendu direct du format série (métas complètes),
+    # avec fallback sur la dérivation depuis un nom d'épisode généré.
+    desired_folder = naming.series_folder({
         'title': series_title, 'year': year or '',
         'tvdbid': tvdb_id, 'tvdb': tvdb_id,
         'imdbid': imdb_id, 'imdb': imdb_id,
         'tmdbid': tmdb_id, 'tmdb': tmdb_id,
         'translations': translations,
     })
-    desired_folder = naming.series_folder_name(sample_name)
+    if not desired_folder:
+        sample_name = naming.generate_filename('sample.mkv', 'tv', 1, 1, {
+            'title': series_title, 'year': year or '',
+            'tvdbid': tvdb_id, 'tvdb': tvdb_id,
+            'imdbid': imdb_id, 'imdb': imdb_id,
+            'tmdbid': tmdb_id, 'tmdb': tmdb_id,
+            'translations': translations,
+        })
+        desired_folder = naming.series_folder_name(sample_name)
     folder_note = None
     folder_base = os.path.basename(abs_folder)
     new_folder = abs_folder

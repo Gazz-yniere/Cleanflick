@@ -9,7 +9,9 @@ from pathlib import Path
 from flask import Blueprint, jsonify, request
 
 from .. import state
+from .. import db
 from .. import library
+from .. import naming
 from ..auth import login_required
 from ..history import (load_history_entry, load_history_page,
                        load_reverted_history_ids, path_existence_statuses,
@@ -101,7 +103,26 @@ def api_move():
 
     if media_type == 'tv':
         series_name = d.get('series_name')
-        folder_source = series_name.strip() if isinstance(series_name, str) else ''
+        folder_source = ''
+        # Priorité au format série : nom du dossier rendu depuis
+        # `series_folder_format` avec les métas de l'aperçu du front,
+        # complétées par le cache série (title/year/traductions).
+        series_meta = d.get('series') if isinstance(d.get('series'), dict) else {}
+        tvdb_id = str(series_meta.get('tvdbid') or '').strip()
+        details = {k: v for k, v in series_meta.items() if v not in (None, '')}
+        if tvdb_id:
+            try:
+                cached = (db.series_meta_get(tvdb_id.lower()) or {}).get('data') or {}
+            except Exception:
+                cached = {}
+            for key in ('title', 'year', 'original_title', 'imdbid', 'imdb', 'tmdbid', 'tmdb'):
+                details.setdefault(key, cached.get(key) or '')
+            if not details.get('translations'):
+                details['translations'] = cached.get('translations') or {}
+        if tvdb_id:
+            folder_source = naming.series_folder(details)
+        if not folder_source:
+            folder_source = series_name.strip() if isinstance(series_name, str) else ''
         if not folder_source:
             folder_source = _series_folder_name(new_name)
         try:

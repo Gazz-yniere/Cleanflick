@@ -3,6 +3,8 @@ import json
 import os
 import platform
 
+from . import naming
+
 APP_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 CONFIG_FILE = "config.json"
@@ -14,7 +16,7 @@ DEFAULT_CONFIG = {
     "tv_output_path": "/downloads/tv_shows",
     "movie_format": "{n} ({y})",
     "tv_format": "{n} - {s00e00} - {t}",
-    "lib_fast_scan": True,
+    "series_folder_format": "{n} ({y}) [tvdbid-{tvdbid}]",
     "cache_refresh_days": 0,
     "tvdb_episode_order": "auto",
     "show_s00_specials": False,
@@ -58,9 +60,10 @@ def load_config():
     cfg.setdefault('input_path', '/downloads')
     cfg.setdefault('movie_output_path', '/movies')
     cfg.setdefault('tv_output_path', '/tv_shows')
-    cfg.setdefault('lib_fast_scan', True)
+    cfg.pop('lib_fast_scan', None)
     cfg.setdefault('cache_refresh_days', 0)
     cfg.setdefault('tvdb_episode_order', 'auto')
+    cfg.setdefault('series_folder_format', naming.SERIES_FOLDER_DEFAULT)
     cfg.setdefault('show_s00_specials', False)
     cfg['_input_path'] = _resolve(cfg['input_path'])
     cfg['_movie_output_path'] = _resolve(cfg['movie_output_path'])
